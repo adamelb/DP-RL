@@ -1,0 +1,491 @@
+
+import numpy as np
+import matplotlib.pyplot as plt
+from numpy.linalg import lstsq
+
+# -------------------------------
+# Problem and Model Parameters
+# -------------------------------
+
+# Time horizon and discount
+T = 10                # Number of time steps (finite-horizon)
+gamma = 0.95          # Discount factor
+
+# Environment parameters (these could be treated as inputs in a more general model)
+c = 0.005             # cost parameter for trading cost (c * |x| + 1)
+corr = 0.9            # autocorrelation parameter for alpha (AR(1))
+t_lambda = 0.1        # risk penalty parameter
+
+# Noise standard deviation for AR(1): for stationarity, sigma = sqrt(1-corr^2)
+sigma = np.sqrt(1 - corr**2)
+
+# Range for states and actions:
+# Assume alpha is in [-1, 1] and p (holdings) in [-10,10]
+alpha_min, alpha_max = -1.0, 1.0
+p_min, p_max = -10.0, 10.0
+
+# Trading action range for x (number of shares to trade)
+x_min, x_max = -5, 5      # a reasonable range for trade adjustments
+n_x_candidates = 50       # Number of candidate x values in grid search
+
+# Number of states to sample at each time for regression
+N_samples = 1000
+
+# Number of Monte Carlo samples used to approximate expectation over next alpha noise
+n_MC = 10
+
+# -------------------------------
+# Helper Functions
+# -------------------------------
+
+def reward(alpha, p, x, c, t_lambda):
+    """
+    Compute the one-step reward.
+    R = alpha*(p+x) - [c*abs(x) + 1] - 0.5*t_lambda*(p+x)^2.
+    """
+    immediate_gain = alpha * (p + x)
+    cost = c * np.abs(x) + 1
+    risk = 0.5 * t_lambda * (p + x)**2
+    return immediate_gain - cost - risk
+
+def ar1_next(alpha, corr, sigma):
+    """
+    AR(1) update for alpha: alpha_next = corr * alpha + noise.
+    Noise ~ N(0, sigma^2)
+    """
+    noise = np.random.randn() * sigma
+    return corr * alpha + noise
+
+def features(alpha, p, c, corr, t_lambda):
+    """
+    Compute the feature vector from the state (alpha, p) plus environment parameters.
+    Features: [alpha^2, p^2, alpha*p, c, corr, t_lambda].
+    """
+    return np.array([alpha**2, p**2, alpha * p, c, corr, t_lambda])
+
+# -------------------------------
+# Approximate DP via Backward Recursion
+# -------------------------------
+
+# We store the regression weights for each time step in a list;
+# For time T, V_T(s) = 0 for all s.
+theta = [None]*(T+1)
+theta[T] = np.zeros(6)   # Not used but defined (V_T = 0)
+
+# We also store the optimal actions if you want to derive a policy afterward.
+# For each time step and each sample state, we store the argmax_x value.
+policy_actions = {}
+
+# We work backward in time.
+# At time T, V_T = 0, so the regression target is 0.
+# For time steps T-1, T-2, ... 0, do:
+for t in reversed(range(T)):
+    print(f"Processing time step {t} ...")
+    
+    # Step 1: Sample N state samples for (alpha, p)
+    # Uniformly sample alpha and p from the specified ranges.
+    alphas = np.random.uniform(low=alpha_min, high=alpha_max, size=N_samples)
+    ps = np.random.uniform(low=p_min, high=p_max, size=N_samples)
+    
+    # Arrays to store the target values and feature vectors for the regression.
+    targets = np.zeros(N_samples)
+    f_matrix = np.zeros((N_samples, 6))  # 6 features
+    
+    # Also store the best x for each sample (for policy derivation)
+    best_xs = np.zeros(N_samples)
+    
+    # For each sampled state, choose the action x that maximizes:
+    # Q(x) = reward(alpha, p, x) + gamma * E[V_{t+1}(alpha_next, p + x)]
+    for i in range(N_samples):
+        alpha_i = alphas[i]
+        p_i = ps[i]
+        
+        best_val = -np.inf
+        best_x = None
+        
+        # Candidate actions: grid search over x
+        candidate_xs = np.linspace(x_min, x_max, n_x_candidates)
+        
+        for x in candidate_xs:
+            # Compute immediate reward given x
+            r_immediate = reward(alpha_i, p_i, x, c, t_lambda)
+            
+            # Estimate the expectation of V_{t+1} at next state
+            # p_next = p_i + x is deterministic.
+            p_next = p_i + x
+            V_next_total = 0
+            # Monte Carlo average over noise in alpha:
+            for j in range(n_MC):
+                alpha_next = ar1_next(alpha_i, corr, sigma)
+                # Since V_{t+1} is approximated by a linear function:
+                # features for state at t+1: using p_next, alpha_next (and same parameters)
+                f_next = features(alpha_next, p_next, c, corr, t_lambda)
+                V_next = np.dot(theta[t+1], f_next)
+                V_next_total += V_next
+            V_next_avg = V_next_total / n_MC
+            
+            # Bellman backup: immediate reward plus discounted next value
+            Q_val = r_immediate + gamma * V_next_avg
+            
+            if Q_val > best_val:
+                best_val = Q_val
+                best_x = x
+        
+        # Set the regression target for this state to the max Q value
+        targets[i] = best_val
+        # Compute feature vector for current state:
+        f_matrix[i, :] = features(alpha_i, p_i, c, corr, t_lambda)
+        best_xs[i] = best_x
+
+    # At this time step, perform linear regression to fit the value function approximation
+    # We solve: f_matrix * theta = targets, using least squares
+    theta_t, residuals, rank, s = lstsq(f_matrix, targets, rcond=None)
+    theta[t] = theta_t
+    
+    # Save the best actions (optional, for policy extraction)
+    policy_actions[t] = best_xs
+    
+    print(f"  Time {t}: Regression theta = {theta_t}")
+    
+# -------------------------------
+# Using the ADP Value Function and Policy
+# -------------------------------
+
+def approx_value(alpha, p, t_stage):
+    """
+    Compute the approximated value at a given time stage using the learned linear model.
+    """
+    f = features(alpha, p, c, corr, t_lambda)
+    return np.dot(theta[t_stage], f)
+
+def policy(alpha, p, t_stage):
+    """
+    Given state (alpha, p) at time t_stage, determine the best action x by grid search
+    using the approximate V function at time t_stage+1.
+    """
+    best_val = -np.inf
+    best_x = None
+    candidate_xs = np.linspace(x_min, x_max, n_x_candidates)
+    for x in candidate_xs:
+        r_immediate = reward(alpha, p, x, c, t_lambda)
+        p_next = p + x
+        # Use a single Monte Carlo sample for simplicity here; you could average over several if needed.
+        alpha_next = ar1_next(alpha, corr, sigma)
+        V_next = approx_value(alpha_next, p_next, t_stage + 1)
+        Q_val = r_immediate + gamma * V_next
+        if Q_val > best_val:
+            best_val = Q_val
+            best_x = x
+    return best_x, best_val
+
+# -------------------------------
+# Testing the ADP at Time 0
+# -------------------------------
+
+# We test the learned ADP policy on a grid of states in time 0.
+test_alphas = np.linspace(alpha_min, alpha_max, 10)
+test_ps = np.linspace(p_min, p_max, 10)
+
+policy_grid = np.zeros((len(test_alphas), len(test_ps)))
+value_grid = np.zeros((len(test_alphas), len(test_ps)))
+
+for i, a in enumerate(test_alphas):
+    for j, p_val in enumerate(test_ps):
+        opt_x, opt_val = policy(a, p_val, 0)
+        policy_grid[i, j] = opt_x
+        value_grid[i, j] = opt_val
+
+plt.figure(figsize=(12,5))
+plt.subplot(1,2,1)
+plt.imshow(policy_grid, origin="lower", aspect="auto", 
+           extent=[p_min, p_max, alpha_min, alpha_max])
+plt.title("Approximate DP: Optimal x at t=0")
+plt.xlabel("p")
+plt.ylabel("alpha")
+plt.colorbar()
+
+plt.subplot(1,2,2)
+plt.imshow(value_grid, origin="lower", aspect="auto", 
+           extent=[p_min, p_max, alpha_min, alpha_max])
+plt.title("Approximate DP: Value at t=0")
+plt.xlabel("p")
+plt.ylabel("alpha")
+plt.colorbar()
+
+plt.tight_layout()
+plt.show()
+
+------------------
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+
+# -------------------------------
+# Problem and Model Parameters
+# -------------------------------
+
+# Time horizon and discount factor
+T = 10                # Finite horizon (number of time steps)
+gamma = 0.95          # Discount factor
+
+# Environment parameters (these can later be extended to vary)
+c = 0.005             # Cost coefficient for trading: cost(x) = c*abs(x) + 1
+corr = 0.9            # Autocorrelation for alpha in AR(1)
+t_lambda = 0.1        # Risk penalty coefficient
+
+# Noise standard deviation for AR(1) process (ensuring stationarity)
+sigma = np.sqrt(1 - corr**2)
+
+# Ranges for state variables:
+alpha_min, alpha_max = -1.0, 1.0    # possible values for alpha
+p_min, p_max = -10.0, 10.0          # possible holdings
+
+# Trading action (x) range:
+x_min, x_max = -5, 5                # range for trade adjustments
+n_x_candidates = 50                 # grid search resolution for x
+
+# Number of state samples for regression at each time step
+N_samples = 1000
+
+# Number of Monte Carlo samples to approximate expectation over next alpha noise
+n_MC = 10
+
+# Training parameters for neural network
+n_epochs = 100         # number of epochs for NN training at each time stage
+learning_rate = 1e-3   # learning rate for optimizer
+batch_size = 64
+
+# Device for PyTorch (GPU if available, else CPU)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# -------------------------------
+# Neural Network Definition
+# -------------------------------
+
+class ValueNetwork(nn.Module):
+    def __init__(self, input_dim=5, hidden_dim=64):
+        """
+        A simple feedforward neural network that takes in a 5-dimensional input:
+        [alpha, p, c, corr, t_lambda] and outputs a scalar V.
+        """
+        super(ValueNetwork, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+        
+    def forward(self, x):
+        return self.net(x)
+
+# -------------------------------
+# Helper Functions
+# -------------------------------
+
+def reward(alpha, p, x, c, t_lambda):
+    """
+    Compute the one-step reward:
+    R = alpha*(p+x) - (c*abs(x) + 1) - 0.5*t_lambda*(p+x)^2.
+    """
+    immediate_gain = alpha * (p + x)
+    cost = c * np.abs(x) + 1
+    risk = 0.5 * t_lambda * (p + x)**2
+    return immediate_gain - cost - risk
+
+def ar1_next(alpha, corr, sigma):
+    """
+    Evolve alpha via the AR(1) process:
+    alpha_next = corr * alpha + noise, where noise ~ N(0, sigma^2).
+    """
+    noise = np.random.randn() * sigma
+    return corr * alpha + noise
+
+def make_input(state):
+    """
+    Prepare network input tensor. 
+    'state' is a tuple (alpha, p) and we include environment parameters.
+    Output dimension: [alpha, p, c, corr, t_lambda]
+    """
+    alpha, p = state
+    # Convert to float32 for PyTorch
+    return torch.tensor([alpha, p, c, corr, t_lambda], dtype=torch.float32, device=device)
+
+# -------------------------------
+# ADP with Neural Network Backward Recursion
+# -------------------------------
+
+# We store one neural network per time step (from 0 to T-1).
+# For t = T, we define V_T = 0.
+value_nets = [None] * T  # value_nets[t] will estimate V_t(.) for  t=0,...,T-1
+
+# For t = T, the value is 0 for all states. We do not learn a network.
+# We define a function that returns zero:
+def terminal_value(state):
+    return 0.0
+
+# We'll proceed backward in time.
+for t in reversed(range(T)):
+    print(f"Training value network for time step {t} ...")
+    
+    # For time step t, we create a dataset with N_samples of state: (alpha, p)
+    alphas = np.random.uniform(low=alpha_min, high=alpha_max, size=N_samples)
+    ps = np.random.uniform(low=p_min, high=p_max, size=N_samples)
+    
+    # We'll store the computed target values (the optimal Bellman backup) for each sample
+    targets = np.zeros(N_samples)
+    
+    # Also store inputs for training (each is a 5-dimensional vector)
+    inputs = np.zeros((N_samples, 5))  # columns: [alpha, p, c, corr, t_lambda]
+    
+    # For each sampled state:
+    for i in range(N_samples):
+        alpha_i = alphas[i]
+        p_i = ps[i]
+        
+        # For each candidate action, compute:
+        # Q(x) = reward(alpha_i, p_i, x) + gamma * E[V_{t+1}(alpha_next, p_i+x)]
+        best_Q = -np.inf
+        
+        candidate_xs = np.linspace(x_min, x_max, n_x_candidates)
+        for x in candidate_xs:
+            r_immediate = reward(alpha_i, p_i, x, c, t_lambda)
+            # p_next is deterministic
+            p_next = p_i + x
+            # Estimate the expectation via Monte Carlo
+            V_next_total = 0.0
+            for _ in range(n_MC):
+                alpha_next = ar1_next(alpha_i, corr, sigma)
+                # If we are at the terminal stage (t == T-1), then V_{T}=0.
+                if t == T-1:
+                    V_next = 0.0
+                else:
+                    # Evaluate the neural network for time t+1.
+                    # The input state for V_{t+1} is (alpha_next, p_next) with the same env params.
+                    inp = make_input((alpha_next, p_next))
+                    # We do not need gradients during target evaluation.
+                    with torch.no_grad():
+                        V_next = value_nets[t+1](inp).item()
+                V_next_total += V_next
+            V_next_avg = V_next_total / n_MC
+            Q_val = r_immediate + gamma * V_next_avg
+            if Q_val > best_Q:
+                best_Q = Q_val
+        # Set the target for the current sample.
+        targets[i] = best_Q
+        # Build the network input (alpha, p, c, corr, t_lambda)
+        inputs[i, :] = [alpha_i, p_i, c, corr, t_lambda]
+    
+    # Convert inputs and targets to torch tensors.
+    X = torch.tensor(inputs, dtype=torch.float32, device=device)
+    y = torch.tensor(targets, dtype=torch.float32, device=device).unsqueeze(1)  # shape [N_samples, 1]
+    
+    # Create a new neural network for time t.
+    net = ValueNetwork(input_dim=5, hidden_dim=64).to(device)
+    optimizer = optim.Adam(net.parameters(), lr=learning_rate)
+    loss_fn = nn.MSELoss()
+    
+    # Train the network for n_epochs using mini-batch gradient descent.
+    dataset_size = X.shape[0]
+    n_batches = int(np.ceil(dataset_size / batch_size))
+    
+    for epoch in range(n_epochs):
+        perm = torch.randperm(dataset_size)
+        epoch_loss = 0.0
+        for b in range(n_batches):
+            idx = perm[b*batch_size : min((b+1)*batch_size, dataset_size)]
+            X_batch = X[idx]
+            y_batch = y[idx]
+            
+            optimizer.zero_grad()
+            y_pred = net(X_batch)
+            loss = loss_fn(y_pred, y_batch)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item() * X_batch.size(0)
+        epoch_loss /= dataset_size
+        if (epoch + 1) % 20 == 0:
+            print(f"  t={t}, Epoch {epoch+1}/{n_epochs}, Loss: {epoch_loss:.4f}")
+    
+    # Save the trained network for time t
+    value_nets[t] = net
+
+print("Backward ADP with neural network value approximation has been completed.")
+
+# -------------------------------
+# Policy Extraction
+# -------------------------------
+
+def approx_value_nn(state, time_idx):
+    """
+    Given a state (alpha, p), return the approximated V using the neural network trained for that time index.
+    For time T, returns 0.
+    """
+    if time_idx >= T:
+        return 0.0
+    inp = make_input(state)
+    with torch.no_grad():
+        return value_nets[time_idx](inp).item()
+
+def policy_nn(state, time_idx):
+    """
+    Given the current state (alpha, p) and time stage, choose the optimal x
+    by performing grid search using the neural network approximation for V_{time_idx+1}.
+    """
+    alpha, p = state
+    best_Q = -np.inf
+    best_x = None
+    candidate_xs = np.linspace(x_min, x_max, n_x_candidates)
+    for x in candidate_xs:
+        r_immediate = reward(alpha, p, x, c, t_lambda)
+        p_next = p + x
+        # For Q, we add the discounted value estimated for the next state.
+        if time_idx == T-1:
+            V_next = 0.0
+        else:
+            # Evaluate V_{time_idx+1} using the trained NN.
+            V_next = approx_value_nn((ar1_next(alpha, corr, sigma), p_next), time_idx + 1)
+        Q_val = r_immediate + gamma * V_next
+        if Q_val > best_Q:
+            best_Q = Q_val
+            best_x = x
+    return best_x, best_Q
+
+# -------------------------------
+# Testing the Learned Policy at Time 0
+# -------------------------------
+
+# Create a grid over alpha and p to visualize the policy and value function at time 0.
+test_alphas = np.linspace(alpha_min, alpha_max, 10)
+test_ps = np.linspace(p_min, p_max, 10)
+policy_grid = np.zeros((len(test_alphas), len(test_ps)))
+value_grid = np.zeros((len(test_alphas), len(test_ps)))
+
+for i, a in enumerate(test_alphas):
+    for j, p_val in enumerate(test_ps):
+        opt_x, opt_val = policy_nn((a, p_val), 0)
+        policy_grid[i, j] = opt_x
+        value_grid[i, j] = opt_val
+
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+plt.imshow(policy_grid, origin="lower", aspect="auto", extent=[p_min, p_max, alpha_min, alpha_max])
+plt.title("Neural-Network ADP: Optimal x at t=0")
+plt.xlabel("p")
+plt.ylabel("alpha")
+plt.colorbar()
+
+plt.subplot(1, 2, 2)
+plt.imshow(value_grid, origin="lower", aspect="auto", extent=[p_min, p_max, alpha_min, alpha_max])
+plt.title("Neural-Network ADP: Value at t=0")
+plt.xlabel("p")
+plt.ylabel("alpha")
+plt.colorbar()
+
+plt.tight_layout()
+plt.show()
+
