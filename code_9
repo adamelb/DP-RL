@@ -1,0 +1,150 @@
+from __future__ import annotations
+from dataclasses import dataclass
+import numpy as np
+from typing import Callable, Tuple
+# (Assume appropriate imports for NonTerminal, Terminal, SampledDistribution, etc.)
+# For example, if using your rl library:
+from rl.markov_process import MarkovRewardProcess, NonTerminal, Terminal, State
+from rl.distribution import SampledDistribution
+# We also assume you have a LinearFunctionApprox and Weights classes and a least_squares_td function.
+from rl.approximate_dynamic_programming import least_squares_td, ValueFunctionApprox
+# (If you do not have these, the code for least_squares_td is given earlier in our conversation)
+
+###############################################################################
+# 1. Define a Portfolio State and MRP
+###############################################################################
+
+@dataclass(frozen=True)
+class PortfolioState:
+    position: float
+    alpha: float
+    corr: float
+    c: float
+    t_lambda: float
+
+    def __repr__(self) -> str:
+        return (f"PortfolioState(position={self.position:.2f}, alpha={self.alpha:.2f}, "
+                f"corr={self.corr:.2f}, c={self.c:.3f}, t_lambda={self.t_lambda:.3f})")
+
+class PortfolioMRP(MarkovRewardProcess[PortfolioState]):
+    """
+    A Markov Reward Process for a portfolio problem.
+    
+    Dynamics:
+      Given a state s = (position, alpha, corr, c, t_lambda) and a chosen action a
+      (provided via the action_func), the next state is defined by:
+          position_next = position + a
+          alpha_next = corr * alpha + sqrt(1 - corr²) * noise   (noise ~ N(0,1))
+          (corr, c, t_lambda remain the same)
+    Reward:
+      R = alpha * (position + a) - ( c * |a| + 1 ) - 0.5*t_lambda*(position + a)² 
+         - 0.5*la*(position + a)²,
+      where la is a constant (here set to 1).
+    """
+    def __init__(self, action_func: Callable[[NonTerminal[PortfolioState]], float]) -> None:
+        self.action_func = action_func
+        self.la = 1.0  # fixed parameter for reward
+    
+    def transition_reward(
+        self, state: NonTerminal[PortfolioState]
+    ) -> SampledDistribution[Tuple[State[PortfolioState], float]]:
+        def sample_next_state_reward(state=state) -> Tuple[State[PortfolioState], float]:
+            curr = state.state
+            # Choose an action using the provided policy (action function)
+            action = self.action_func(state)
+            new_position = curr.position + action
+            # AR(1) update for alpha:
+            noise = np.random.randn()  # draw noise ~ N(0,1)
+            new_alpha = curr.corr * curr.alpha + np.sqrt(1 - curr.corr**2) * noise
+            new_state = PortfolioState(
+                position=new_position,
+                alpha=new_alpha,
+                corr=curr.corr,
+                c=curr.c,
+                t_lambda=curr.t_lambda
+            )
+            # Reward: note that all parameters (c and t_lambda) are in the state; la is set here.
+            reward = (curr.alpha * (curr.position + action)
+                      - (curr.c * abs(action) + 1)
+                      - 0.5 * curr.t_lambda * (curr.position + action)**2
+                      - 0.5 * self.la * (curr.position + action)**2)
+            return NonTerminal(new_state), reward
+        return SampledDistribution(sample_next_state_reward)
+
+    def __repr__(self) -> str:
+        return f"PortfolioMRP(action_func={self.action_func}, la={self.la})"
+
+###############################################################################
+# 2. Define Feature Functions for PortfolioState
+###############################################################################
+# We want our feature vector to be: [1, p^2, alpha^2, c, corr, t_lambda].
+
+def feature_const(state: NonTerminal[PortfolioState]) -> float:
+    return 1.0
+
+def feature_position_sq(state: NonTerminal[PortfolioState]) -> float:
+    return state.state.position**2
+
+def feature_alpha_sq(state: NonTerminal[PortfolioState]) -> float:
+    return state.state.alpha**2
+
+def feature_c(state: NonTerminal[PortfolioState]) -> float:
+    return state.state.c
+
+def feature_corr(state: NonTerminal[PortfolioState]) -> float:
+    return state.state.corr
+
+def feature_t_lambda(state: NonTerminal[PortfolioState]) -> float:
+    return state.state.t_lambda
+
+feature_functions = [
+    feature_const,
+    feature_position_sq,
+    feature_alpha_sq,
+    feature_c,
+    feature_corr,
+    feature_t_lambda
+]
+
+###############################################################################
+# 3. Set Up a Simulation of Transitions and Run Least-Squares TD
+###############################################################################
+
+# Define a simple policy: for demonstration, we use a constant action.
+def constant_action(state: NonTerminal[PortfolioState]) -> float:
+    # For example, always buy 0.1 units (you can change this as needed)
+    return 0.1
+
+# Create the MRP using the constant action function.
+portfolio_mrp = PortfolioMRP(action_func=constant_action)
+
+# Define an initial state.
+init_state = NonTerminal(PortfolioState(
+    position=0.0,
+    alpha=0.5,
+    corr=0.9,
+    c=0.005,
+    t_lambda=0.1
+))
+
+# Now we simulate a number of transitions from the MRP.
+# For example, simulate 1000 transitions using the transition_reward method.
+transitions = [portfolio_mrp.transition_reward(init_state).sample() for _ in range(1000)]
+
+# Set discount factor and a small regularization parameter epsilon.
+gamma = 0.95
+epsilon = 1e-3
+
+# Use the least_squares_td function to fit a linear value function approximation.
+# This function takes as input the transitions, feature functions, discount factor, and epsilon.
+approx_value = least_squares_td(transitions, feature_functions, gamma, epsilon)
+
+# Print the resulting weights.
+print("Approximated value function weights (for features [1, p^2, alpha^2, c, corr, t_lambda]):")
+print(approx_value.weights)
+
+###############################################################################
+# (Optionally, you could also use one of the other prediction methods, such as
+#  TD(λ) or lambda-return prediction. For your low-dimensional linear problem,
+#  least_squares_td is a natural choice.)
+###############################################################################
