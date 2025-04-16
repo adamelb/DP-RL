@@ -1,0 +1,165 @@
+import numpy as np
+
+# ------------------------------
+# 1. Sampler function
+# ------------------------------
+def sampler(n_samples=1000, m_samples=100, mult=1.0, dist="normal"):
+    """
+    Sample states and parameters.
+      - p and alpha: sampled either normally or uniformly (shape: [n_samples, 1, 1])
+      - The first sample is forced to zero.
+      - corr: sampled from Normal(0.9, 0.02) and clipped.
+      - c: uniformly sampled in [0.001, 0.01]
+      - t_lambda: uniformly sampled in [0.01, 0.3]
+      - next_alpha: for each sample, m_samples are generated using the AR(1) update:
+           next_alpha = alpha*corr + sqrt(1 - corr^2)*N(0,1)
+    """
+    if dist == "normal":
+        p = np.random.randn(n_samples, 1, 1) * mult
+        alpha = np.random.randn(n_samples, 1, 1) * mult
+    elif dist == "uniform":
+        p = np.random.uniform(-mult, mult, size=(n_samples, 1, 1))
+        alpha = np.random.uniform(-mult, mult, size=(n_samples, 1, 1))
+    # Set initial state for first sample to zero:
+    p[0, 0, 0] = 0
+    alpha[0, 0, 0] = 0
+
+    # Sample correlation from Normal(0.9, 0.02) and clip to (-0.9999, 0.9999)
+    corr_arr = np.random.normal(0.9, 0.02, size=(n_samples, 1, 1))
+    corr_arr = np.clip(corr_arr, -0.9999, 0.9999)
+    
+    # Sample cost parameter c uniformly in [0.001, 0.01]
+    c_vals = np.random.uniform(0.001, 0.01, size=(n_samples, 1, 1))
+    
+    # Sample risk penalty t_lambda uniformly in [0.01, 0.3]
+    t_lambda_arr = np.random.uniform(0.01, 0.3, size=(n_samples, 1, 1))
+    
+    # Compute m_samples of next_alpha for each sample:
+    next_alpha = alpha * corr_arr + np.sqrt(1 - corr_arr**2) * np.random.randn(n_samples, 1, m_samples)
+    
+    return p, alpha, next_alpha, c_vals, corr_arr, t_lambda_arr
+
+# ------------------------------
+# 2. Feature function for current state
+# ------------------------------
+def get_features(p, alpha, c_vals, corr_arr, t_lambda_arr):
+    """
+    Compute features for the current state:
+         [ p^2,  alpha^2,  c,  corr,  t_lambda ]
+    Each input is assumed to be of shape (n_samples, 1, 1);
+    we squeeze them to (n_samples,).
+    Returns an array of shape (n_samples, 5).
+    """
+    p_flat = p[:,0,0]
+    alpha_flat = alpha[:,0,0]
+    c_flat = c_vals[:,0,0]
+    corr_flat = corr_arr[:,0,0]
+    tl_flat = t_lambda_arr[:,0,0]
+    X = np.stack([p_flat**2, alpha_flat**2, c_flat, corr_flat, tl_flat], axis=1)
+    return X
+
+# ------------------------------
+# 3. Feature function for next state (used in MC evaluation)
+# ------------------------------
+def get_features_next(p_next, next_alpha, c_vals, corr_arr, t_lambda_arr):
+    """
+    p_next, c_vals, corr_arr, t_lambda_arr are arrays of shape
+      (n_samples, num_actions, m_samples) and
+    next_alpha is shape (n_samples, num_actions, m_samples).
+    
+    Returns features for the next state as an array of shape
+      (n_samples, num_actions, m_samples, 5)
+    with features = [ (p_next)^2, (next_alpha)^2, c, corr, t_lambda ].
+    """
+    feat1 = p_next**2
+    feat2 = next_alpha**2
+    feat3 = c_vals
+    feat4 = corr_arr
+    feat5 = t_lambda_arr
+    X_next = np.stack([feat1, feat2, feat3, feat4, feat5], axis=-1)
+    return X_next
+
+# ------------------------------
+# 4. Reward function
+# ------------------------------
+def get_reward(alpha, p, actions, c_vals, t_lambda_arr):
+    """
+    Compute one-step reward for each candidate action.
+    alpha, p, c_vals, t_lambda_arr are arrays of shape (n_samples,1,1);
+    actions is an array of shape (1, num_actions, 1).
+    
+    Reward: R = alpha*(p+action) - ( c*|action| + 1 ) - 0.5*t_lambda*(p+action)^2
+    Broadcasting automatically works.
+    Returns an array of shape (n_samples, num_actions, 1).
+    """
+    return alpha * (p + actions) - ( c_vals * np.abs(actions) + 1 ) - 0.5 * t_lambda_arr * (p + actions)**2
+
+# ------------------------------
+# 5. Main ADP loop to fit V using linear regression
+# ------------------------------
+
+# Define a grid of candidate actions.
+actions = (np.arange(-100, 100).reshape(1, -1, 1)) * 1e-2  # shape: (1, num_actions, 1)
+
+# Settings
+n_samples = 1000
+m_samples = 100
+gamma = 0.95
+num_iterations = 200
+
+# Initialize V parameter vector (the theta in V = theta^T * features) as zeros.
+V = np.zeros(5)  # shape (5,)
+
+for iteration in range(num_iterations):
+    # Sample states and their parameters
+    p, alpha, next_alpha, c_vals, corr_arr, t_lambda_arr = sampler(n_samples=n_samples, m_samples=m_samples, mult=1.0, dist="normal")
+    
+    # For candidate actions, compute next state's p:
+    # p has shape (n_samples,1,1) and actions has shape (1, num_actions, 1), so broadcasting gives:
+    p_next = p + actions  # shape: (n_samples, num_actions, 1)
+    
+    # Tile next_alpha to match the candidate actions dimension.
+    # next_alpha originally is shape: (n_samples,1,m_samples) — tile along axis 1:
+    next_alpha_tiled = np.tile(next_alpha, (1, actions.shape[1], 1))  # shape: (n_samples, num_actions, m_samples)
+    
+    # Similarly, tile p, c_vals, corr_arr, t_lambda_arr for the next state.
+    p_next_tiled = np.tile(p_next, (1, 1, m_samples))  # shape: (n_samples, num_actions, m_samples)
+    c_tiled = np.tile(c_vals, (1, actions.shape[1], m_samples))
+    corr_tiled = np.tile(corr_arr, (1, actions.shape[1], m_samples))
+    tl_tiled = np.tile(t_lambda_arr, (1, actions.shape[1], m_samples))
+    
+    # Compute features for the next state for each candidate action and each MC sample.
+    X_next = get_features_next(p_next_tiled, next_alpha_tiled, c_tiled, corr_tiled, tl_tiled)
+    # X_next has shape: (n_samples, num_actions, m_samples, 5)
+    
+    # Evaluate V (the approximate value function) on the next state.
+    # For each feature vector (length 5) take the dot with V. Use tensordot.
+    V_candidates = np.tensordot(X_next, V, axes=([3],[0]))  # shape: (n_samples, num_actions, m_samples)
+    # Average the value over the m_samples (Monte Carlo):
+    V_next_avg = V_candidates.mean(axis=2, keepdims=True)  # shape: (n_samples, num_actions, 1)
+    
+    # Compute immediate reward for each candidate action.
+    R_immediate = get_reward(alpha, p, actions, c_vals, t_lambda_arr)  # shape: (n_samples, num_actions, 1)
+    
+    # Compute candidate Q-values: immediate reward plus discounted estimated value.
+    Q_vals = R_immediate + gamma * V_next_avg  # shape: (n_samples, num_actions, 1)
+    
+    # (Optionally, one may average the Q-value over the action dimension—but here we wish to select the maximum.)
+    # For updating V, we will use the maximum Q-value for each sample.
+    best_Q = np.max(Q_vals, axis=1).squeeze()  # shape: (n_samples,)
+    
+    # Also, the corresponding optimal action can be extracted if needed:
+    optimal_index = np.argmax(Q_vals.squeeze(-1), axis=1)  # shape: (n_samples,)
+    optimal_action = actions[0, optimal_index, 0]  # shape: (n_samples,)
+    
+    # Compute features for the CURRENT state.
+    X_current = get_features(p, alpha, c_vals, corr_arr, t_lambda_arr)  # shape: (n_samples, 5)
+    
+    # Update the value function parameters V by linear regression.
+    # Here we solve theta = pinv(X) @ y, where y is best_Q.
+    V = np.linalg.pinv(X_current) @ best_Q  # shape: (5,)
+    
+    if iteration % 10 == 0:
+        print(f"Iteration {iteration}: Mean Q = {best_Q.mean():.4f}, sample optimal actions = {optimal_action[:5]}")
+
+print("Final V parameters:", V)
