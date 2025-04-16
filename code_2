@@ -1,0 +1,209 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ------------------------------
+# 1. Environment and Parameters
+# ------------------------------
+
+# a) AR(1) process for alpha:
+#    alpha_{t+1} = corr * alpha_t + noise, noise ~ N(0, sigma^2)
+#    with sigma = sqrt(1 - corr^2) for stationarity
+corr = 0.9
+sigma = np.sqrt(1 - corr**2)
+
+# b) Cost parameter c for trading:
+c = 0.01
+
+# c) Risk penalty parameter:
+t_lambda = 0.05
+
+# d) Discount factor:
+gamma = 0.95
+
+# e) Ranges for alpha, holdings p, and actions x:
+alpha_min, alpha_max = -1.0, 1.0
+p_min, p_max = -10.0, 10.0
+x_min, x_max = -5.0, 5.0
+
+# f) Number of candidate x values for argmax search:
+n_x_candidates = 31    # e.g., a small grid
+
+# g) Monte Carlo samples for alpha_{next} in Q-value estimation:
+n_MC = 20
+
+# h) For fitting V, how many states to sample?
+N_samples = 1000
+
+# i) For simulating forward (to compute cumulative reward), how many steps?
+N_sim = 200
+
+# ------------------------------
+# 2. Reward Function and Dynamics
+# ------------------------------
+
+def reward(alpha, p, x, c, t_lambda):
+    """
+    One-step reward:
+      R = alpha*(p + x) - ( c*|x| + 1 ) - 0.5 * t_lambda * (p + x)^2
+    """
+    immediate_gain = alpha * (p + x)
+    cost = c * abs(x) + 1
+    risk = 0.5 * t_lambda * (p + x)**2
+    return immediate_gain - cost - risk
+
+def alpha_next(alpha, corr, sigma):
+    """
+    AR(1) process:
+      alpha_{t+1} = corr * alpha + noise
+    """
+    noise = np.random.randn() * sigma
+    return corr * alpha + noise
+
+# ------------------------------
+# 3. Feature Vector
+# ------------------------------
+# User-requested features for V approx: [p^2, alpha^2, c, corr, t_lambda].
+# We do NOT include a separate constant term here; if you want an intercept,
+# you could add a '1' as an additional feature.
+
+def features(alpha, p, c, corr, t_lambda):
+    return np.array([
+        p**2,
+        alpha**2,
+        c,           # the cost parameter (could be varied)
+        corr,        # AR(1) correlation
+        t_lambda     # risk penalty
+    ], dtype=np.float64)
+
+# ------------------------------
+# 4. Fit V(α, p) via Monte Carlo + Bellman
+# ------------------------------
+
+# We will do a SINGLE iteration of approximate value function estimation:
+#   V(α,p) = max_x [ R(α,p,x) + gamma * E_alphaNext[ V(α_{next}, p+x) ] ]
+# We do not do multiple iterations or backward recursion in this example;
+# you could extend it for more advanced ADP.  
+
+# a) Sample states (alpha, p) in the domain:
+alphas_sample = np.random.uniform(alpha_min, alpha_max, N_samples)
+ps_sample     = np.random.uniform(p_min, p_max, N_samples)
+
+# b) For each sampled state, compute target = max_x Q(α,p,x), where
+#    Q(α,p,x) = reward(α,p,x) + gamma * E[ V(α_{next}, p+x) ].
+#    But initially, V(...) is unknown. We'll do a *single pass* approach:
+#    i.e., we assume V(...)=0 for the next step or we do a fixed guess (0).
+#    Alternatively, if you had an initial guess of V, you'd evaluate it. 
+#    For simplicity, let's do V(...)=0 *this pass*, so effectively we find
+#    a one-step lookahead policy. Then we fit V(α,p) to those one-step Q* values.
+
+Q_targets = np.zeros(N_samples)
+F_mat = np.zeros((N_samples, 5))  # 5 features
+
+for i in range(N_samples):
+    alpha_i = alphas_sample[i]
+    p_i = ps_sample[i]
+    
+    best_Q = -np.inf
+    # Grid search over x
+    for x in np.linspace(x_min, x_max, n_x_candidates):
+        # 1) immediate reward
+        r = reward(alpha_i, p_i, x, c, t_lambda)
+        
+        # 2) next-state "value" (we're using V=0 as a simplification)
+        #    If you want a better approximation, you'd do a second pass or
+        #    some iteration. For demonstration, we do V(next)=0.
+        #    So Q_val = r + gamma * E[0] = r.
+        #    If we wanted a next-state average, we do:
+        # alpha_next_sum = 0
+        # for _ in range(n_MC):
+        #     a_next = alpha_next(alpha_i, corr, sigma)
+        #     # if we had a V_approx, we'd evaluate it; but here we do 0
+        # Q_val = r + gamma * 0
+        # Because V(...)=0 => Q_val = r
+        Q_val = r
+        
+        if Q_val > best_Q:
+            best_Q = Q_val
+    
+    Q_targets[i] = best_Q
+    # Fill the row of F_mat with features for the current (alpha_i, p_i)
+    F_mat[i, :] = features(alpha_i, p_i, c, corr, t_lambda)
+
+# c) Solve for theta in a least-squares sense: F_mat * theta ~ Q_targets
+theta, residuals, rank, svals = np.linalg.lstsq(F_mat, Q_targets, rcond=None)
+
+print("Learned theta (coefficients) for V(α,p) = θᵀ·features:", theta)
+
+# We'll define V_approx(α,p) = θᵀ · [p^2, α^2, c, corr, t_lambda]
+def V_approx(alpha, p):
+    f = features(alpha, p, c, corr, t_lambda)
+    return np.dot(theta, f)
+
+# ------------------------------
+# 5. Define a Policy from V
+# ------------------------------
+# Once we have V(α,p), the policy π(α,p) is chosen by:
+#   argmax_x [ reward(α,p,x) + gamma * E[ V_approx(α_{next}, p+x) ] ]
+# We'll do a small MC average for α_{next} to approximate the expectation.
+
+def policy(alpha, p, gamma, n_MC=10):
+    best_x = 0.0
+    best_Q = -np.inf
+    for x in np.linspace(x_min, x_max, n_x_candidates):
+        # immediate reward
+        r = reward(alpha, p, x, c, t_lambda)
+        # approximate next-value average
+        v_next_sum = 0.0
+        for _ in range(n_MC):
+            a_next = alpha_next(alpha, corr, sigma)
+            p_next = p + x
+            v_next_sum += V_approx(a_next, p_next)
+        v_next_avg = v_next_sum / n_MC
+        Q_val = r + gamma * v_next_avg
+        
+        if Q_val > best_Q:
+            best_Q = Q_val
+            best_x = x
+    return best_x, best_Q
+
+# ------------------------------
+# 6. Simulation to get Cumulative Rewards
+# ------------------------------
+# We'll simulate N_sim steps of alpha ~ AR(1). 
+# At each step, we choose the action from the policy, observe reward, update p.
+
+# Initial state (alpha_0, p_0). For example, p_0=0, alpha_0=0
+alpha_current = 0.0
+p_current = 0.0
+
+reward_list = []
+
+for t in range(N_sim):
+    # 1) choose action via the approximate policy:
+    x_star, Q_star = policy(alpha_current, p_current, gamma, n_MC=10)
+    
+    # 2) get actual reward now:
+    r_now = reward(alpha_current, p_current, x_star, c, t_lambda)
+    reward_list.append(r_now)
+    
+    # 3) update holdings p:
+    p_current = p_current + x_star
+    
+    # 4) evolve alpha using AR(1):
+    alpha_current = alpha_next(alpha_current, corr, sigma)
+
+# cumulative sum of rewards:
+cumulative_rewards = np.cumsum(reward_list)
+
+# Plot the cumulative rewards:
+plt.figure(figsize=(8,5))
+plt.plot(cumulative_rewards, label='Cumulative Reward')
+plt.title("Cumulative Rewards under ADP Linear-Regression Policy")
+plt.xlabel("Time Step")
+plt.ylabel("Cumulative Reward")
+plt.grid(True)
+plt.legend()
+plt.show()
+
+# Print final cumulative reward
+print("Final cumulative reward after simulation:", cumulative_rewards[-1])
