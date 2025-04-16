@@ -1,0 +1,93 @@
+from __future__ import annotations
+from dataclasses import dataclass
+import numpy as np
+from rl.markov_process import MarkovRewardProcess, NonTerminal, Terminal, State
+from rl.distribution import SampledDistribution, Distribution
+from typing import Tuple, Callable
+
+@dataclass(frozen=True)
+class PortfolioState:
+    """
+    State representing our portfolio.
+      - position: the current position (number of shares)
+      - alpha: the predictive signal (alpha)
+      - corr: the autocorrelation (to be used for updating alpha)
+      - c: cost parameter (for transaction cost)
+      - t_lambda: risk penalty parameter
+    """
+    position: float
+    alpha: float
+    corr: float
+    c: float
+    t_lambda: float
+
+    def __repr__(self) -> str:
+        return (f"PortfolioState(position={self.position:.2f}, alpha={self.alpha:.2f}, "
+                f"corr={self.corr:.2f}, c={self.c:.3f}, t_lambda={self.t_lambda:.3f})")
+
+class PortfolioMRP(MarkovRewardProcess[PortfolioState]):
+    """
+    A Markov Reward Process for a portfolio investment problem.
+    
+    Dynamics:
+      Given a state s = (position, alpha, corr, c, t_lambda) and an action a
+      (chosen by a provided action function), the next state is given by:
+          position_next = position + a
+          alpha_next = corr * alpha + sqrt(1 - corr^2) * noise,   noise ~ N(0,1)
+          (corr, c, t_lambda remain unchanged)
+      
+    Reward:
+      The reward for taking action a in state s is defined as:
+          R = alpha * (position + a) - ( c * |a| + 1 ) - 0.5 * t_lambda * (position + a)^2
+
+    The action function is provided to the PortfolioMRP so that the MRP (which
+    has no explicit actions) is policy-dependent.
+    """
+    def __init__(self, action_func: Callable[[NonTerminal[PortfolioState]], float]) -> None:
+        """
+        action_func: a function that takes a NonTerminal[PortfolioState] and returns a float (the action).
+        """
+        self.action_func = action_func
+
+    def transition_reward(
+        self,
+        state: NonTerminal[PortfolioState]
+    ) -> Distribution[Tuple[State[PortfolioState], float]]:
+        """
+        Given a non-terminal state, sample the next state and reward.
+
+        The transition is computed as:
+          1. Choose an action using self.action_func.
+          2. Compute next state's position as: position + action.
+          3. Compute next state's alpha via the AR(1) update: 
+                 alpha_next = corr * alpha + sqrt(1 - corr^2) * noise.
+          4. The reward is computed as:
+                 R = alpha * (position + action) - ( c * |action| + 1 ) - 0.5*t_lambda*(position + action)^2.
+        """
+        def sample_next_state_reward(state=state) -> Tuple[State[PortfolioState], float]:
+            # Get the current state from the wrapper.
+            current_state = state.state
+            # Choose action according to provided policy.
+            action = self.action_func(state)
+            # Update position.
+            new_position = current_state.position + action
+            # Sample next alpha using the AR(1) update.
+            noise = np.random.randn()  # standard normal
+            new_alpha = current_state.corr * current_state.alpha + np.sqrt(1 - current_state.corr**2) * noise
+            # Other parameters remain unchanged.
+            new_state = PortfolioState(
+                position=new_position,
+                alpha=new_alpha,
+                corr=current_state.corr,
+                c=current_state.c,
+                t_lambda=current_state.t_lambda
+            )
+            # Compute reward.
+            reward = (current_state.alpha * (current_state.position + action) -
+                      (current_state.c * abs(action) + 1) -
+                      0.5 * current_state.t_lambda * (current_state.position + action)**2)
+            return NonTerminal(new_state), reward
+        return SampledDistribution(sample_next_state_reward)
+
+    def __repr__(self) -> str:
+        return f"PortfolioMRP(action_func={self.action_func})"
