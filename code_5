@@ -1,0 +1,189 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# =============================================================================
+# 1. Functions to Sample and Compute Features
+# =============================================================================
+def sampler(n_samples=1000, m_samples=100, mult=1.0, dist="normal"):
+    """
+    Sample states and parameters.
+      - p and alpha: shape (n_samples,1,1)
+      - autocorr (for AR(1)): drawn from Normal(0.9,0.02) and clipped.
+      - c: cost parameter, uniformly from [0.001,0.01]
+      - t_lambda: risk penalty, uniformly from [0.01,0.3]
+      - next_alpha: for each sample, m_samples MC draws computed as
+           next_alpha = alpha * autocorr + sqrt(1 - autocorr^2) * N(0,1)
+    """
+    if dist == "normal":
+        p = np.random.randn(n_samples, 1, 1) * mult
+        alpha = np.random.randn(n_samples, 1, 1) * mult
+    elif dist == "uniform":
+        p = np.random.uniform(-mult, mult, size=(n_samples, 1, 1))
+        alpha = np.random.uniform(-mult, mult, size=(n_samples, 1, 1))
+    # Force first sample to zero
+    p[0, 0, 0] = 0
+    alpha[0, 0, 0] = 0
+
+    # Sample autocorr from Normal(0.9,0.02), clip to avoid instability.
+    autocorr = np.random.normal(0.9, 0.02, size=(n_samples, 1, 1))
+    autocorr = np.clip(autocorr, -0.9999, 0.9999)
+    
+    # Sample c and t_lambda:
+    c_vals = np.random.uniform(0.001, 0.01, size=(n_samples, 1, 1))
+    t_lambda_arr = np.random.uniform(0.01, 0.3, size=(n_samples, 1, 1))
+    
+    # Compute next_alpha: shape (n_samples, 1, m_samples)
+    next_alpha = alpha * autocorr + np.sqrt(1 - autocorr**2) * np.random.randn(n_samples, 1, m_samples)
+    
+    return p, alpha, next_alpha, c_vals, autocorr, t_lambda_arr
+
+def get_features(p, alpha, c_vals, corr_arr, t_lambda_arr):
+    """
+    Compute the feature vector for the current state:
+      [p^2, alpha^2, c, corr, t_lambda]
+    All inputs are assumed to have shape (n_samples,1,1);
+    output is of shape (n_samples, 5).
+    """
+    p_flat     = p[:,0,0]
+    alpha_flat = alpha[:,0,0]
+    c_flat     = c_vals[:,0,0]
+    corr_flat  = corr_arr[:,0,0]
+    tl_flat    = t_lambda_arr[:,0,0]
+    return np.stack([p_flat**2, alpha_flat**2, c_flat, corr_flat, tl_flat], axis=1)
+
+def get_features_eval(p_arr, alpha_arr, fixed_c, fixed_corr, fixed_tl):
+    """
+    Compute features for evaluation (next state). Here, p_arr and alpha_arr
+    are arrays of shape (1, num_actions, m_samples); fixed_c, fixed_corr, fixed_tl
+    are scalars.
+    Returns an array of shape (1, num_actions, m_samples, 5).
+    """
+    feat1 = p_arr**2
+    feat2 = alpha_arr**2
+    feat3 = fixed_c * np.ones_like(p_arr)
+    feat4 = fixed_corr * np.ones_like(p_arr)
+    feat5 = fixed_tl * np.ones_like(p_arr)
+    return np.stack([feat1, feat2, feat3, feat4, feat5], axis=-1)
+
+def evaluate_V(V, features):
+    """
+    Evaluate the approximate value function:
+      features: array of shape (1, num_actions, m_samples, 5)
+      V: vector of shape (5,)
+    Returns dot product along the last axis; output shape: (1, num_actions, m_samples)
+    """
+    return np.tensordot(features, V, axes=([3],[0]))
+
+# =============================================================================
+# 2. New Reward Function
+# =============================================================================
+def get_reward(alpha, p, actions, c_val, t_labda, la=1.0):
+    """
+    Compute one-step reward for a candidate action:
+         R = alpha * (p + action)
+             - c_val * |action|
+             - 0.5 * t_labda * (action)^2
+             - 0.5 * la * (p + action)^2
+    Inputs:
+      - alpha, p, c_val, t_labda: scalars (or 1x1 arrays)
+      - actions: array of shape (1, num_actions, 1)
+    Returns:
+      Array of shape (1, num_actions, 1)
+    """
+    return alpha * (p + actions) - c_val * np.abs(actions) - 0.5 * t_labda * (actions**2) - 0.5 * la * ((p + actions)**2)
+
+# =============================================================================
+# 3. Evaluation (Rollout) Loop Using Fitted V
+# =============================================================================
+# For this evaluation we fix parameters
+fixed_c     = 0.005
+fixed_corr  = 0.9
+fixed_tl    = 0.1
+la          = 1.0
+gamma       = 0.95
+
+# Define candidate actions grid (e.g. from -1 to 1 in steps of 0.01).
+actions = np.arange(-100, 100).reshape(1, -1, 1) * 1e-2  # shape: (1, num_actions, 1)
+
+# For evaluation, generate a chain of alpha values.
+num_steps = 100  # length of evaluation
+chain_sample = []
+alpha_val = 0.0
+for _ in range(num_steps):
+    chain_sample.append(alpha_val)
+    # Update alpha using fixed_corr and random noise:
+    alpha_val = fixed_corr * alpha_val + np.sqrt(1 - fixed_corr**2)*np.random.randn()
+chain_sample = np.array(chain_sample)
+
+# Initialize portfolio holding and lists to collect positions and rewards.
+p = 0.0
+pos_list = []
+reward_list = []
+
+m_samples = 100  # number of Monte Carlo samples for evaluating next state
+
+for i, alpha in enumerate(chain_sample):
+    # Reshape current alpha to shape (1,1,1)
+    alpha_cur = np.array([alpha]).reshape(1, 1, 1)
+    
+    # Sample next_alpha with m_samples from AR(1) with fixed_corr.
+    next_alpha = alpha_cur * fixed_corr + np.sqrt(1 - fixed_corr**2) * np.random.randn(1, 1, m_samples)
+    
+    # Candidate next positions: p plus candidate actions.
+    candidate_p = p + actions             # shape: (1, num_actions, 1)
+    # Tile candidate_p along the m_samples dimension.
+    candidate_p_tiled = np.tile(candidate_p, (1, 1, m_samples))  # shape: (1, num_actions, m_samples)
+    # Tile next_alpha to match candidate actions dimension.
+    candidate_next_alpha = np.tile(next_alpha, (1, actions.shape[1], 1))  # shape: (1, num_actions, m_samples)
+    
+    # Compute features for each candidate next state.
+    features_candidates = get_features_eval(candidate_p_tiled, candidate_next_alpha,
+                                            fixed_c, fixed_corr, fixed_tl)
+    # features_candidates shape: (1, num_actions, m_samples, 5)
+    
+    # Evaluate approximate value for candidate next states.
+    # V is assumed to be a fitted 5-dimensional vector.
+    # (Make sure your V is not the zero vector.)
+    V_candidates = evaluate_V(V, features_candidates)   # shape: (1, num_actions, m_samples)
+    # Average the value estimate over m_samples.
+    V_next_avg = V_candidates.mean(axis=2, keepdims=True)  # shape: (1, num_actions, 1)
+    
+    # Compute the immediate reward for each candidate action at current state.
+    # alpha_cur and p are used. (Both are scalars in this evaluation.)
+    R_immediate = get_reward(alpha_cur, p, actions, fixed_c, fixed_tl, la)  # shape: (1, num_actions, 1)
+    
+    # Candidate Q-value = immediate reward + gamma * V_next_avg.
+    Q_vals = R_immediate + gamma * V_next_avg  # shape: (1, num_actions, 1)
+    
+    # Squeeze to remove trivial dimensions and choose optimal action:
+    Q_vals_squeezed = Q_vals.squeeze()  # shape: (num_actions,)
+    optimal_idx = np.argmax(Q_vals_squeezed)
+    optimal_action = actions[0, optimal_idx, 0]  # scalar
+    
+    # Compute the reward obtained by taking the chosen action.
+    # (We use get_reward once more; note that here p and alpha are scalars.)
+    step_reward = get_reward(np.array(alpha).reshape(1,1,1), 
+                             np.array(p).reshape(1,1,1), 
+                             np.array([[optimal_action]]), 
+                             fixed_c, fixed_tl, la).item()
+    
+    # Update portfolio position.
+    p = p + optimal_action
+    
+    pos_list.append(p)
+    reward_list.append(step_reward)
+
+# =============================================================================
+# 4. Plot Cumulative Reward
+# =============================================================================
+cumulative_reward = np.cumsum(reward_list)
+plt.figure(figsize=(8,5))
+plt.plot(cumulative_reward, label="Cumulative Reward")
+plt.xlabel("Time Step")
+plt.ylabel("Cumulative Reward")
+plt.title("Rollout Cumulative Reward using Fitted V")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+print("Final Portfolio Position:", p)
