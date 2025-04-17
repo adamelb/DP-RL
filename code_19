@@ -1,0 +1,251 @@
+# fqi_nn_augmented.py – PyTorch GPU version (17 features, sampled c, ρ, tλ)
+"""python
+Monte‑Carlo Fitted‑Value Iteration with a neural network **(PyTorch, GPU)**
+===========================================================================
+
+Differences vs. the fixed‑param script:
+
+* **Augmented parameters** sampled per state
+  * `ρ  ~ U(0.8, 0.99)`
+  * `c  ~ U(0, 10)`
+  * `t_λ ~ U(1, 1000)`
+* **17‑D feature vector** (constant, polynomials, sign kinks, cost interactions,
+  raw params, spare slot).
+* Streaming over the 41‑point action grid → low GPU memory (works on 8 GB).
+* `V(0,0)` monitoring uses mid‑range params `(c = 5, ρ = 0.9, tλ = 500)`.
+
+Copy & run as a script, or import and call `eval_policy()` for roll‑outs.
+"""
+
+# -----------------------------------------------------------------------------
+# 0. Imports & device ----------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+import math, time
+import numpy as np
+import torch, torch.nn as nn, torch.nn.functional as F
+
+torch.manual_seed(0)
+np.random.seed(0)
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Device:", DEVICE)
+
+# -----------------------------------------------------------------------------
+# 1. Hyper‑parameters & constants ---------------------------------------------
+# -----------------------------------------------------------------------------
+
+# Parameter ranges
+aRHO_MIN, aRHO_MAX = 0.8, 0.99
+cMIN, cMAX         = 0.0, 10.0
+tlMIN, tlMAX       = 1.0, 1000.0
+SIGMA_EPS          = 0.2
+GAMMA              = 0.99
+
+# Action grid
+ACTIONS = torch.linspace(-1.0, 1.0, steps=41, device=DEVICE)  # (A,)
+A = ACTIONS.numel()
+
+# Training settings
+N_DATASET    = 120_000
+BATCH_SIZE   = 4_096
+M_SAMPLES    = 100
+N_ITERATIONS = 600
+DATA_REFRESH = 50
+LR           = 1e-3
+WEIGHT_DECAY = 1e-5
+
+# -----------------------------------------------------------------------------
+# 2. Dataset sampler -----------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+def resample_dataset(n=N_DATASET):
+    p   = torch.randn(n, device=DEVICE)
+    alpha = torch.randn(n, device=DEVICE)
+    c   = (torch.rand(n, device=DEVICE) * (cMAX-cMIN) + cMIN)
+    tl  = (torch.rand(n, device=DEVICE) * (tlMAX-tlMIN) + tlMIN)
+    rho = (torch.rand(n, device=DEVICE) * (aRHO_MAX-aRHO_MIN) + aRHO_MIN)
+    return p, alpha, c, tl, rho
+
+p_data, a_data, c_data, tl_data, rho_data = resample_dataset()
+
+# -----------------------------------------------------------------------------
+# 3. 17‑D feature builder ------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+_F = 17
+
+@torch.jit.script
+def features(p: torch.Tensor, a: torch.Tensor, c: torch.Tensor, rho: torch.Tensor, tl: torch.Tensor):
+    sg_p  = torch.sign(p)
+    sg_a  = torch.sign(a)
+    return torch.stack([
+        torch.ones_like(p),        # 0 const
+        p, a, p*a,                # 1‑3
+        p**2, a**2,               # 4‑5
+        sg_p, sg_a, a*sg_p, p*sg_a,        # 6‑9
+        c*torch.abs(p),           #10
+        tl*p**2,                 #11
+        c*torch.abs(a),          #12
+        c, rho, tl,              #13‑15
+        torch.zeros_like(p),     #16 spare
+    ], dim=-1)                   # (...,17)
+
+# -----------------------------------------------------------------------------
+# 4. Reward function -----------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+@torch.jit.script
+def reward(alpha: torch.Tensor, p: torch.Tensor, x: torch.Tensor, c: torch.Tensor, tl: torch.Tensor):
+    p_new = p + x
+    return alpha*p_new - c*torch.abs(x) - 0.5*tl*x**2
+
+# -----------------------------------------------------------------------------
+# 5. Value network -------------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+class ValueMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(_F,256), nn.ReLU(),
+            nn.Linear(256,256), nn.ReLU(),
+            nn.Linear(256,1)
+        )
+    def forward(self, phi):
+        return self.net(phi).squeeze(-1)
+
+model = ValueMLP().to(DEVICE)
+opt   = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+
+# -----------------------------------------------------------------------------
+# 6. Training loop with streaming actions -------------------------------------
+# -----------------------------------------------------------------------------
+
+start = time.time()
+for it in range(1, N_ITERATIONS+1):
+    # refresh dataset
+    if it == 1 or it % DATA_REFRESH == 0:
+        p_data, a_data, c_data, tl_data, rho_data = resample_dataset()
+
+    idx = torch.randint(0, N_DATASET, (BATCH_SIZE,), device=DEVICE)
+    p   = p_data[idx]; alpha = a_data[idx]
+    c   = c_data[idx]; tl = tl_data[idx]; rho = rho_data[idx]
+
+    # current value V(s)
+    V_s = model(features(p, alpha, c, rho, tl))  # (B,)
+
+    # Monte‑Carlo next‑alpha (B,M)
+    alpha_next = (
+        alpha.unsqueeze(1)*rho.unsqueeze(1)
+        + torch.randn(BATCH_SIZE, M_SAMPLES, device=DEVICE)*torch.sqrt(1-rho.unsqueeze(1)**2)
+    )
+
+    Q_best = torch.full((BATCH_SIZE,), -1e9, device=DEVICE)
+
+    for a_trd in ACTIONS:  # loop 41 actions, keep memory small
+        p_next = p + a_trd                       # (B,)
+        p_AM   = p_next.unsqueeze(1).expand(-1, M_SAMPLES)
+
+        # features of next state (B,M,17)
+        phi_next = features(p_AM, alpha_next, c.unsqueeze(1), rho.unsqueeze(1), tl.unsqueeze(1))
+        V_next = model(phi_next.reshape(-1,_F)).reshape(BATCH_SIZE, M_SAMPLES)  # (B,M)
+        V_avg  = V_next.mean(dim=1)                 # (B,)
+
+        R = reward(alpha, p, a_trd, c, tl)         # (B,)
+        Q = R + GAMMA * V_avg
+        Q_best = torch.maximum(Q_best, Q)
+
+    # regression target y = Q_best
+    loss = F.mse_loss(V_s, Q_best.detach())
+    opt.zero_grad(); loss.backward(); opt.step()
+
+    if it % 20 == 0:
+        with torch.no_grad():
+            phi00 = features(
+                torch.tensor(0., device=DEVICE), torch.tensor(0., device=DEVICE),
+                torch.tensor(5., device=DEVICE), torch.tensor(0.9, device=DEVICE), torch.tensor(500., device=DEVICE)
+            ).unsqueeze(0)
+            v00 = float(model(phi00))
+        print(f"Iter {it:4d}/{N_ITERATIONS}  loss={loss.item():.4f}  V(0,0)={v00:+.5f}  |  {time.time()-start:.1f}s")
+
+print("Training done ✔  Total time:", time.time()-start)
+
+# -----------------------------------------------------------------------------
+# 7. Greedy policy evaluation (MC per step) -----------------------------------
+# -----------------------------------------------------------------------------
+
+def eval_policy(
+    model: nn.Module,
+    *,
+    fixed_c: float = 5.0,
+    fixed_tl: float = 500.0,
+    fixed_rho: float = 0.90,
+    m_samples: int = 100,
+    num_steps: int = 20_000,
+):
+    """Greedy roll‑out under **fixed** (c, ρ, t_λ).
+
+    Parameters
+    ----------
+    model       : trained ValueMLP
+    fixed_c     : linear trading cost      c
+    fixed_tl    : temporary impact coeff   t_λ
+    fixed_rho   : AR(1) autocorr of alpha  ρ
+    m_samples   : Monte‑Carlo draws to estimate E[V(s')]
+    num_steps   : simulation horizon
+
+    Returns
+    -------
+    positions, rewards, alphas : np.ndarrays of length num_steps (+1 for positions/alphas)
+    """
+    model.eval()
+    alpha = 0.0
+    p     = 0.0
+    pos_hist   = [p]
+    alpha_hist = [alpha]
+    reward_hist= []
+
+    c_tensor  = torch.tensor(fixed_c,  device=DEVICE)
+    tl_tensor = torch.tensor(fixed_tl, device=DEVICE)
+    rho_tensor= torch.tensor(fixed_rho, device=DEVICE)
+
+    with torch.no_grad():
+        for _ in range(num_steps):
+            alpha_t = torch.tensor(alpha, device=DEVICE)
+            p_t     = torch.tensor(p,     device=DEVICE)
+
+            # Monte‑Carlo next‑alpha once per step (M,)
+            eps = torch.randn(m_samples, device=DEVICE)
+            alpha_next = alpha_t*fixed_rho + eps*math.sqrt(1-fixed_rho**2)
+
+            Q_best = -1e9
+            best_a = 0.0
+
+            for a_trd in ACTIONS:  # 41 actions, negligible loop cost
+                # E[V(s')]
+                p_next   = p_t + a_trd                     # scalar tensor
+                p_rep    = p_next.repeat(m_samples)        # (M,)
+                phi_next = features(p_rep, alpha_next,
+                                    c_tensor, rho_tensor, tl_tensor)
+                V_avg    = model(phi_next).mean().item()
+
+                R = reward(alpha_t, p_t, a_trd, c_tensor, tl_tensor).item()
+                Q = R + GAMMA * V_avg
+                if Q > Q_best:
+                    Q_best = Q
+                    best_a = float(a_trd)
+
+            # apply greedy action
+            r_step = reward(alpha_t, p_t, torch.tensor(best_a, device=DEVICE), c_tensor, tl_tensor).item()
+            reward_hist.append(r_step)
+            p += best_a; pos_hist.append(p)
+            alpha = fixed_rho*alpha + math.sqrt(1-fixed_rho**2)*np.random.randn()
+            alpha_hist.append(alpha)
+
+    return np.array(pos_hist), np.array(reward_hist), np.array(alpha_hist), np.array(rew_hist), np.array(alpha_hist)
+
+# ----------------------------------------------------------------------------
+if __name__ == "__main__":
+    pos, rew, alph = eval_policy(model, num_steps=5_000)
+    print("Cumulative PnL:", rew.sum())
