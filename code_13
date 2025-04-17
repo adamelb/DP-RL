@@ -1,0 +1,117 @@
+def eval_policy_nn(
+    model,
+    *,
+    fixed_c: float = 8.0,
+    fixed_corr: float = 0.94,
+    fixed_tl: float = 75.0,
+    gamma: float = 0.99,
+    action_grid: np.ndarray = np.arange(-100, 100).reshape(1, -1, 1) * 1e-2,
+    m_samples: int = 100,
+    num_steps: int = 100_000,
+):
+    """
+    Roll out the greedy policy defined by `model` for `num_steps` steps.
+
+    At each decision point we compute
+        Q(s,x) = R_immediate(s,x) + γ · E_{α'}[ V(s') ]
+    where the expectation is approximated with `m_samples` fresh draws of the
+    next‑alpha innovation *for every candidate action*.
+
+    Returns
+    -------
+    positions : ndarray (num_steps + 1,)
+    rewards   : ndarray (num_steps,)
+    alphas    : ndarray (num_steps + 1,)
+    """
+    rng = rng_global          # use the same generator for reproducibility
+    actions_1d = action_grid.flatten()        # shape (A,)
+    A = actions_1d.size
+
+    # ----- initial state -------------------------------------------------
+    alpha_val = 0.0
+    p         = 0.0
+    pos_hist  = [p]
+    alpha_hist = [alpha_val]
+    reward_hist = []
+
+    model.eval()              # turn off dropout / noisy layers if any
+    with torch.no_grad():
+        for _ in range(num_steps):
+            # -------------------------------------------------------------
+            # 1) Monte‑Carlo simulate *m_samples* next‑alpha values
+            # -------------------------------------------------------------
+            alpha_samples = (
+                alpha_val * fixed_corr
+                + np.sqrt(1.0 - fixed_corr**2) * rng.standard_normal(m_samples)
+            )                                     # shape (M,)
+
+            # broadcast to (A, M)
+            p_next_samples     = p + actions_1d[:, None]
+            alpha_next_samples = alpha_samples[None, :]
+
+            # -------------------------------------------------------------
+            # 2) Evaluate V(s') for all (A · M) samples
+            # -------------------------------------------------------------
+            feat_next = get_features_eval(
+                p_next_samples,                   # (A, M)
+                alpha_next_samples,               # (A, M)
+                fixed_c,
+                fixed_corr,
+                fixed_tl,
+            )                                    # (A, M, F)
+
+            V_next = (
+                model(
+                    torch.tensor(
+                        feat_next.reshape(-1, _F),  # flatten to (A·M, F)
+                        dtype=torch.float32,
+                        device=DEVICE,
+                    )
+                )
+                .cpu()
+                .numpy()
+                .reshape(A, m_samples)
+            )                                    # (A, M)
+
+            V_avg = V_next.mean(axis=1)           # (A,)
+
+            # -------------------------------------------------------------
+            # 3) Immediate reward for each action (doesn’t need MC)
+            # -------------------------------------------------------------
+            R_immed = (
+                alpha_val * (p + actions_1d)
+                - fixed_c * np.abs(actions_1d)
+                - 0.5 * fixed_tl * actions_1d**2
+            )                                    # (A,)
+
+            Q_vals = R_immed + gamma * V_avg      # (A,)
+
+            # -------------------------------------------------------------
+            # 4) Greedy action
+            # -------------------------------------------------------------
+            idx = int(Q_vals.argmax())
+            act = float(actions_1d[idx])
+
+            # realised reward with the chosen action               scalar
+            r_step = (
+                alpha_val * (p + act)
+                - fixed_c * abs(act)
+                - 0.5 * fixed_tl * act**2
+            )
+            reward_hist.append(r_step)
+
+            # inventory & alpha update
+            p += act
+            pos_hist.append(p)
+
+            alpha_val = (
+                fixed_corr * alpha_val
+                + np.sqrt(1.0 - fixed_corr**2) * rng.standard_normal()
+            )
+            alpha_hist.append(alpha_val)
+
+    return (
+        np.array(pos_hist, dtype=float),
+        np.array(reward_hist, dtype=float),
+        np.array(alpha_hist, dtype=float),
+    )
