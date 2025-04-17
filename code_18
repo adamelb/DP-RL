@@ -1,0 +1,36 @@
+# -- new, broadcast‑friendly feature builder ----------------------------------
+@torch.jit.script
+def features(
+    p:   torch.Tensor,   # arbitrary leading dims
+    a:   torch.Tensor,
+    c:   torch.Tensor,
+    rho: torch.Tensor,
+    tl:  torch.Tensor,
+):
+    """
+    Build 17‑D feature vector and **broadcast scalars automatically**.
+    Whatever the shape of p (say (B,M)), c | rho | tl can be (B,1) or (B,)
+    without extra .expand() on the caller side.
+    """
+    # Ensure every tensor matches p's shape (no real memory copy)
+    shape = p.shape
+    ones  = torch.ones_like(p)
+
+    c   = c.view(*shape) if c.shape != shape else c
+    rho = rho.view(*shape) if rho.shape != shape else rho
+    tl  = tl.view(*shape) if tl.shape != shape else tl
+    a   = a.view(*shape)  if a.shape  != shape else a
+
+    sp, sa = torch.sign(p), torch.sign(a)
+
+    return torch.stack([
+        ones,                        # 0 constant
+        p, a, p*a,                   # 1–3
+        p*p, a*a,                    # 4–5
+        sp, sa, a*sp, p*sa,          # 6–9 kinks
+        c*torch.abs(p),              # 10
+        tl*(p*p),                    # 11
+        c*torch.abs(a),              # 12
+        c, rho, tl,                  # 13–15 raw params
+        torch.zeros_like(p),         # 16 spare
+    ], dim=-1)                       # (...,17)
