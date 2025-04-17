@@ -1,0 +1,74 @@
+# --------------------------------------------------------------------------
+# 6. Training loop – streaming actions + AMP + tiny memory footprint
+# --------------------------------------------------------------------------
+scaler       = torch.cuda.amp.GradScaler()
+ACC_STEPS    = 2              # gradient‑accumulation factor
+MICRO_BS     = BATCH_SIZE // ACC_STEPS
+
+start = time.time()
+for it in range(1, N_ITERATIONS + 1):
+
+    # -------- refresh dataset -------------------------------------------
+    if it == 1 or it % DATA_REFRESH == 0:
+        p_data, a_data, c_data, tl_data, rho_data = resample_dataset()
+
+    running_loss = 0.0
+    opt.zero_grad(set_to_none=True)
+
+    # -------- split big batch into micro‑batches -------------------------
+    for k in range(ACC_STEPS):
+        idx = torch.randint(0, N_DATASET, (MICRO_BS,), device=DEVICE)
+        p   = p_data[idx]; alpha = a_data[idx]
+        c   = c_data[idx]; tl    = tl_data[idx]; rho = rho_data[idx]
+
+        # ----- current V(s) ---------------------------------------------
+        with torch.cuda.amp.autocast():
+            V_s = model(features(p, alpha, c, rho, tl))          # (b,)
+
+            # Monte‑Carlo next‑α  (b, M)
+            eps         = torch.randn(MICRO_BS, M_SAMPLES, device=DEVICE)
+            alpha_next  = alpha.unsqueeze(1) * rho.unsqueeze(1) \
+                        + eps * torch.sqrt(1 - rho.unsqueeze(1) ** 2)
+
+            Q_best = torch.full((MICRO_BS,), -1e9, device=DEVICE)
+
+            # --- stream over actions (41 times) -------------------------
+            for a_trd in ACTIONS:            # scalar tensor
+                p_next   = p + a_trd                         # (b,)
+                p_AM     = p_next.unsqueeze(1)               # (b,1) – broadcast
+                # V̄(s′)
+                V_sum = 0.0
+                for m in range(M_SAMPLES):   # 100 tiny passes, negligible cost
+                    phi_next = features(
+                        p_AM,                      # (b,1)   → broadcast to (b,)
+                        alpha_next[:, m],          # (b,)
+                        c, rho, tl
+                    )
+                    V_sum += model(phi_next)
+                V_avg = V_sum / M_SAMPLES          # (b,)
+
+                R   = reward(alpha, p, a_trd, c, tl)
+                Q_a = R + GAMMA * V_avg
+                Q_best = torch.maximum(Q_best, Q_a)
+
+            loss = F.mse_loss(V_s, Q_best.detach()) / ACC_STEPS
+        scaler.scale(loss).backward()
+        running_loss += loss.item()
+
+    scaler.step(opt); scaler.update()
+
+    # -------- logging ----------------------------------------------------
+    if it % 20 == 0:
+        with torch.no_grad():
+            phi00 = features(
+                torch.tensor(0., device=DEVICE),
+                torch.tensor(0., device=DEVICE),
+                torch.tensor(5., device=DEVICE),
+                torch.tensor(0.9, device=DEVICE),
+                torch.tensor(500., device=DEVICE)
+            ).unsqueeze(0)
+            v00 = float(model(phi00))
+        print(f"Iter {it:4d}/{N_ITERATIONS}  "
+              f"loss={running_loss:.4f}  V(0,0)={v00:+.5f}  "
+              f"| Δt={time.time()-start:.1f}s")
+        start = time.time()
