@@ -1,0 +1,348 @@
+"""
+SAC Pipeline for Portfolio Execution
+
+This script implements:
+1. PortfolioEnv: a simple environment modeling asset alpha (AR-1) and position p.
+2. ReplayBuffer: to store transitions for off-policy learning.
+3. Critic and Actor: neural networks for Q-value and policy.
+4. SACAgent: Soft Actor-Critic algorithm implementation.
+5. train(): function to train the SACAgent.
+6. simulate(): function to evaluate a trained SACAgent on a new trajectory.
+
+Each part is fully commented to explain what it does.
+To complexify:
+ - Increase network depth or width
+ - Use prioritized experience replay
+ - Vectorize environments for parallel data collection
+ - Add batch normalization or layer normalization
+ - Experiment with different RL algorithms (TD3, PPO)
+
+Requires: torch, numpy
+Run on GPU if available.
+"""
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from collections import deque
+import random
+
+# Detect device: GPU if available, else CPU
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {DEVICE}")
+
+# --------- 1. Environment ---------
+class PortfolioEnv:
+    """
+    Environment for portfolio execution.
+    State: [alpha, p, rho, t_lambda, c, la]
+    Action: x (trade)
+    Dynamics:
+      alpha_{t+1} = rho * alpha_t + sqrt(1-rho^2) * noise
+      p_{t+1} = p_t + x_t
+    Reward:
+      r = alpha * (p + x) - c * |x| - 0.5*t_lambda*x^2 - la*(p + x)^2
+    """
+    def __init__(self, rho, t_lambda, c, la):
+        self.rho = rho              # autocorrelation
+        self.t_lambda = t_lambda    # temporary impact
+        self.c = c                  # trading cost
+        self.la = la                # risk aversion
+        self.reset()
+
+    def reset(self):
+        # Initialize alpha randomly, position zero
+        self.alpha = np.random.randn()
+        self.p = 0.0
+        return self._get_state()
+
+    def step(self, x):
+        """
+        Apply action x, compute reward, update state.
+        Returns: next_state, reward, done
+        done is always False (non-episodic) for simplicity.
+        """
+        # Compute reward for this trade
+        reward = (
+            self.alpha * (self.p + x)
+            - self.c * abs(x)
+            - 0.5 * self.t_lambda * x**2
+            - self.la * (self.p + x)**2
+        )
+        # Update position
+        self.p += x
+        # Update alpha with AR(1)
+        noise = np.random.randn()
+        self.alpha = self.rho * self.alpha + np.sqrt(1 - self.rho**2) * noise
+        # Return new state
+        return self._get_state(), reward, False
+
+    def _get_state(self):
+        # Return full state as numpy array
+        return np.array([
+            self.alpha,
+            self.p,
+            self.rho,
+            self.t_lambda,
+            self.c,
+            self.la
+        ], dtype=np.float32)
+
+# --------- 2. Replay Buffer ---------
+class ReplayBuffer:
+    """Fixed-size FIFO buffer for experience replay"""
+    def __init__(self, max_size=int(1e6)):
+        self.buffer = deque(maxlen=max_size)
+
+    def push(self, state, action, reward, next_state):
+        # Store a transition
+        self.buffer.append((state, action, reward, next_state))
+
+    def sample(self, batch_size):
+        # Randomly sample a batch of transitions
+        batch = random.sample(self.buffer, batch_size)
+        states, actions, rewards, next_states = zip(*batch)
+        # Convert to PyTorch tensors
+        return (
+            torch.tensor(states, dtype=torch.float32, device=DEVICE),
+            torch.tensor(actions, dtype=torch.float32, device=DEVICE).unsqueeze(1),
+            torch.tensor(rewards, dtype=torch.float32, device=DEVICE).unsqueeze(1),
+            torch.tensor(next_states, dtype=torch.float32, device=DEVICE)
+        )
+
+    def __len__(self):
+        # Return current size of buffer
+        return len(self.buffer)
+
+# --------- 3. Networks ---------
+class Critic(nn.Module):
+    """Critic network Q(s,x) -> scalar value"""
+    def __init__(self, state_dim, hidden_dim=128):
+        super().__init__()
+        # Simple 2-layer MLP
+        self.net = nn.Sequential(
+            nn.Linear(state_dim + 1, hidden_dim),  # +1 for action
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def forward(self, state, action):
+        # Concatenate state and action
+        x = torch.cat([state, action], dim=1)
+        return self.net(x)
+
+class Actor(nn.Module):
+    """Actor network outputs Gaussian policy for action x"""
+    def __init__(self, state_dim, hidden_dim=128, action_limit=None):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+        # Output layers for mean and log_std of Gaussian
+        self.mu_layer = nn.Linear(hidden_dim, 1)
+        self.log_std_layer = nn.Linear(hidden_dim, 1)
+        self.action_limit = action_limit  # scale output if needed
+
+    def forward(self, state):
+        # Produce parameters of Gaussian
+        h = self.net(state)
+        mu = self.mu_layer(h)
+        log_std = self.log_std_layer(h).clamp(-20, 2)
+        std = torch.exp(log_std)
+        return mu, std
+
+    def sample(self, state):
+        """
+        Sample an action with reparameterization trick and compute log-probability.
+        Returns: action, log_prob
+        """
+        mu, std = self(state)
+        dist = torch.distributions.Normal(mu, std)
+        # Reparameterized sample
+        raw_action = dist.rsample()
+        # Squash with tanh to bound between -1 and 1
+        action = torch.tanh(raw_action)
+        # Optionally scale action
+        if self.action_limit is not None:
+            action = action * self.action_limit
+        # Compute log_prob with correction for tanh
+        log_prob = dist.log_prob(raw_action) - torch.log(1 - action.pow(2) + 1e-6)
+        return action, log_prob
+
+# --------- 4. SAC Agent ---------
+class SACAgent:
+    def __init__(self,
+                 state_dim,
+                 action_limit=None,
+                 hidden_dim=128,
+                 gamma=0.99,
+                 tau=0.005,
+                 lr=3e-4,
+                 target_entropy=-1):
+        self.gamma = gamma
+        self.tau = tau
+        # Actor and critics (two for clipped double-Q)
+        self.actor = Actor(state_dim, hidden_dim, action_limit).to(DEVICE)
+        self.critic1 = Critic(state_dim, hidden_dim).to(DEVICE)
+        self.critic2 = Critic(state_dim, hidden_dim).to(DEVICE)
+        # Target networks
+        self.target_critic1 = Critic(state_dim, hidden_dim).to(DEVICE)
+        self.target_critic2 = Critic(state_dim, hidden_dim).to(DEVICE)
+        # Initialize targets
+        self.target_critic1.load_state_dict(self.critic1.state_dict())
+        self.target_critic2.load_state_dict(self.critic2.state_dict())
+        # Optimizers
+        self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
+        self.critic1_opt = optim.Adam(self.critic1.parameters(), lr=lr)
+        self.critic2_opt = optim.Adam(self.critic2.parameters(), lr=lr)
+        # Temperature (entropy coef) and optimizer
+        self.log_alpha = torch.zeros(1, requires_grad=True, device=DEVICE)
+        self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
+        self.target_entropy = target_entropy
+
+    def select_action(self, state, evaluate=False):
+        """Select action given state (numpy). Evaluate=True uses mean"""
+        state_t = torch.tensor(state, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+        if evaluate:
+            mu, _ = self.actor(state_t)
+            action = torch.tanh(mu)
+            return action.detach().cpu().item()
+        action, _ = self.actor.sample(state_t)
+        return action.detach().cpu().item()
+
+    def update(self, replay_buffer, batch_size=256):
+        """Perform one SAC update using a batch from replay_buffer"""
+        # Sample a batch of transitions
+        state, action, reward, next_state = replay_buffer.sample(batch_size)
+        # -- Critic update --
+        with torch.no_grad():
+            # Next action and its log prob
+            next_action, next_logp = self.actor.sample(next_state)
+            # Target Q-values
+            q1_target = self.target_critic1(next_state, next_action)
+            q2_target = self.target_critic2(next_state, next_action)
+            q_target = torch.min(q1_target, q2_target) - torch.exp(self.log_alpha) * next_logp
+            # Bellman backup
+            q_backup = reward + self.gamma * q_target
+        # Current Q estimates
+        q1 = self.critic1(state, action)
+        q2 = self.critic2(state, action)
+        # MSE losses
+        loss_q1 = F.mse_loss(q1, q_backup)
+        loss_q2 = F.mse_loss(q2, q_backup)
+        # Optimize critics
+        self.critic1_opt.zero_grad(); loss_q1.backward(); self.critic1_opt.step()
+        self.critic2_opt.zero_grad(); loss_q2.backward(); self.critic2_opt.step()
+        # -- Actor and alpha update --
+        action_new, logp_new = self.actor.sample(state)
+        q1_new = self.critic1(state, action_new)
+        q2_new = self.critic2(state, action_new)
+        q_new = torch.min(q1_new, q2_new)
+        # Actor loss: maximize Q - alpha*logp
+        loss_actor = (torch.exp(self.log_alpha) * logp_new - q_new).mean()
+        self.actor_opt.zero_grad(); loss_actor.backward(); self.actor_opt.step()
+        # Temperature loss
+        loss_alpha = -(self.log_alpha * (logp_new + self.target_entropy).detach()).mean()
+        self.alpha_opt.zero_grad(); loss_alpha.backward(); self.alpha_opt.step()
+        # -- Soft update target networks --
+        for tgt, src in [(self.target_critic1, self.critic1), (self.target_critic2, self.critic2)]:
+            for tgt_param, src_param in zip(tgt.parameters(), src.parameters()):
+                tgt_param.data.copy_(tgt_param.data * (1 - self.tau) + src_param.data * self.tau)
+
+# --------- 5. Training Function ---------
+def train(
+    num_episodes=500,
+    max_steps=100,
+    start_steps=1000,
+    batch_size=256,
+    buffer_size=int(1e6)
+):
+    """
+    Train SACAgent.
+    Returns trained agent.
+    """
+    # Initialize agent and buffer
+    state_dim = 6  # [alpha, p, rho, t_lambda, c, la]
+    agent = SACAgent(state_dim)  # no .to(DEVICE) here
+    replay_buffer = ReplayBuffer(buffer_size)
+    total_steps = 0
+    # Parameter sampling ranges
+    RHO_RANGE = (0.8, 0.99)
+    TL_RANGE = (0.1, 1.0)
+    C_RANGE = (1e-4, 1e-2)
+    LA_RANGE = (1e-4, 1e-2)
+
+    for ep in range(1, num_episodes+1):
+        # Sample new task parameters
+        rho = np.random.uniform(*RHO_RANGE)
+        t_lambda = np.random.uniform(*TL_RANGE)
+        c = np.random.uniform(*C_RANGE)
+        la = np.random.uniform(*LA_RANGE)
+        env = PortfolioEnv(rho, t_lambda, c, la)
+        state = env.reset()
+        ep_reward = 0.0
+        for t in range(max_steps):
+            if total_steps < start_steps:
+                # Initial random exploration
+                action = np.random.uniform(-1, 1)
+            else:
+                # Policy action
+                action = agent.select_action(state)
+            next_state, reward, done = env.step(action)
+            # Store transition
+            replay_buffer.push(state, action, reward, next_state)
+            state = next_state
+            ep_reward += reward
+            total_steps += 1
+
+            # Update agent after enough samples
+            if len(replay_buffer) > batch_size:
+                agent.update(replay_buffer, batch_size)
+
+            if done:
+                break
+        print(f"Episode {ep}  Reward: {ep_reward:.2f}")
+    return agent
+
+# --------- 6. Simulation / Evaluation ---------
+def simulate(agent, num_steps=100):
+    """
+    Simulate one new trajectory with the trained agent.
+    Returns: rewards list and cumulative rewards list.
+    """
+    # Sample new task parameters for test
+    rho = np.random.uniform(0.8, 0.99)
+    t_lambda = np.random.uniform(0.1, 1.0)
+    c = np.random.uniform(1e-4, 1e-2)
+    la = np.random.uniform(1e-4, 1e-2)
+    env = PortfolioEnv(rho, t_lambda, c, la)
+    state = env.reset()
+    rewards = []
+    cum_rewards = []
+    total = 0.0
+    for _ in range(num_steps):
+        # Greedy action (evaluate mode)
+        action = agent.select_action(state, evaluate=True)
+        state, reward, _ = env.step(action)
+        rewards.append(reward)
+        total += reward
+        cum_rewards.append(total)
+    return rewards, cum_rewards
+
+# Example usage in a notebook:
+# agent = train(num_episodes=500, max_steps=100)
+# rewards, cum_rewards = simulate(agent, num_steps=100)
+# plot rewards and cum_rewards with matplotlib
+
+if __name__ == '__main__':
+    # Simple run
+    agent = train(num_episodes=200, max_steps=100)
+    rewards, cum_rewards = simulate(agent, num_steps=100)
+    print("Simulation cumulative reward:", cum_rewards[-1])
