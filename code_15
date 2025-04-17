@@ -1,0 +1,249 @@
+# fqi_tf_augmented.py – TensorFlow 2 implementation (17 features, sampled parameters)
+"""python
+Fast Monte‑Carlo Fitted‑Value Iteration on GPU (TensorFlow 2.x)
+==============================================================
+
+* **Augmented state** : `(p, α, c, ρ, t_λ)` with
+  * `ρ  ~  U(0.8, 0.99)`
+  * `c  ~  U(0, 10)`
+  * `t_λ ~ U(1, 1000)`.
+* **Features (17)** : constant, polynomials, sign‑kinks, cost interactions,
+  raw parameters – same as earlier.
+* **Value network** : tiny Keras model `Input(17) → 256 → 256 → 1` (ReLU).
+* **Dataset** : pre‑generated once on GPU, mini‑batches sampled each step;
+  re‑sampled every `DATA_REFRESH` iterations.
+* **Streaming over actions** (41 trades) to keep memory low.
+* TensorFlow mixed‑precision is optional; turn on with `tf.keras.mixed_precision.set_global_policy("mixed_float16")`.
+
+Run as a script or import into a notebook.
+"""
+
+# -----------------------------------------------------------------------------
+# 0. Imports & TF setup --------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+import os, time, math
+import numpy as np
+import tensorflow as tf
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # quieter logs
+
+# Enable mixed precision if desired
+# tf.keras.mixed_precision.set_global_policy("mixed_float16")
+
+DEVICE = "/GPU:0" if tf.config.list_physical_devices("GPU") else "/CPU:0"
+print("Device:", DEVICE)
+
+rng = np.random.default_rng(0)
+
+# -----------------------------------------------------------------------------
+# 1. Hyper‑parameters & constants ---------------------------------------------
+# -----------------------------------------------------------------------------
+
+# Environment parameter ranges
+C_MIN, C_MAX       = 0.0, 10.0
+TL_MIN, TL_MAX     = 1.0, 1000.0
+RHO_MIN, RHO_MAX   = 0.8, 0.99
+SIGMA_EPS          = 0.2    # fixed innovation scale
+GAMMA              = 0.99
+
+# Action grid
+ACTIONS = tf.constant(np.linspace(-1.0, 1.0, 41), dtype=tf.float32)  # (A,)
+A = ACTIONS.shape[0]
+
+# Learning settings
+N_DATASET     = 120_000
+BATCH_SIZE    = 4_096
+M_SAMPLES     = 100
+N_ITERATIONS  = 600
+DATA_REFRESH  = 50
+LR            = 1e-3
+WD            = 1e-5
+
+# -----------------------------------------------------------------------------
+# 2. Feature function (17‑D) ---------------------------------------------------
+# -----------------------------------------------------------------------------
+
+@tf.function(jit_compile=True)
+def make_features(p, a, c, rho, tl):
+    """Return 17‑D feature tensor with leading broadcast dims."""
+    sg_p  = tf.sign(p)
+    sg_a  = tf.sign(a)
+    feats = tf.stack([
+        tf.ones_like(p),            # 1
+        p,                          # p
+        a,                          # α
+        p * a,                      # p α
+        tf.square(p),              # p²
+        tf.square(a),              # α²
+        sg_p, sg_a, a * sg_p, p * sg_a,     # kinks
+        c * tf.abs(p),              # c|p|
+        tl * tf.square(p),          # t_λ p²
+        c * tf.abs(a),              # c|α|
+        c, rho, tl,                 # raw params
+        tf.zeros_like(p),           # spare slot
+    ], axis=-1)
+    return feats  # trailing dim = 17
+
+# -----------------------------------------------------------------------------
+# 3. Reward helper -------------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+@tf.function(jit_compile=True)
+def reward(alpha, p, x, c, tl):
+    p_new = p + x
+    return alpha * p_new - c * tf.abs(x) - 0.5 * tl * tf.square(x)
+
+# -----------------------------------------------------------------------------
+# 4. Neural value model --------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+def build_model():
+    inp = tf.keras.layers.Input(shape=(17,))
+    x = tf.keras.layers.Dense(256, activation="relu")(inp)
+    x = tf.keras.layers.Dense(256, activation="relu")(x)
+    out = tf.keras.layers.Dense(1)(x)
+    return tf.keras.Model(inp, out)
+
+model = build_model()
+opt   = tf.keras.optimizers.Adam(learning_rate=LR, weight_decay=WD)
+
+# -----------------------------------------------------------------------------
+# 5. Dataset generator ---------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+def resample_dataset(n=N_DATASET):
+    p    = rng.standard_normal(n).astype(np.float32)
+    a    = rng.standard_normal(n).astype(np.float32)
+    c    = rng.uniform(C_MIN, C_MAX, n).astype(np.float32)
+    tl   = rng.uniform(TL_MIN, TL_MAX, n).astype(np.float32)
+    rho  = rng.uniform(RHO_MIN, RHO_MAX, n).astype(np.float32)
+    return (
+        tf.convert_to_tensor(p),
+        tf.convert_to_tensor(a),
+        tf.convert_to_tensor(c),
+        tf.convert_to_tensor(tl),
+        tf.convert_to_tensor(rho),
+    )
+
+p_data, a_data, c_data, tl_data, rho_data = resample_dataset()
+
+# -----------------------------------------------------------------------------
+# 6. Training step (stream over actions) --------------------------------------
+# -----------------------------------------------------------------------------
+
+@tf.function(jit_compile=True, reduce_retracing=True)
+def train_step(p, a, c, tl, rho):
+    """One SGD step on a mini‑batch (vectorised; stream over actions)."""
+    with tf.GradientTape() as tape:
+        # current V(s)
+        f_s = make_features(p, a, c, rho, tl)
+        V_s = tf.squeeze(model(f_s), axis=-1)       # (B,)
+
+        # Monte‑Carlo next‑alpha samples (B, M)
+        eps   = tf.random.normal((BATCH_SIZE, M_SAMPLES), dtype=tf.float32)
+        alpha_next = a[:, None] * rho[:, None] + tf.sqrt(1 - rho[:, None]**2) * eps
+
+        Q_best = tf.fill([BATCH_SIZE], -1e9)
+
+        for a_trd in ACTIONS:                       # loop over 41 actions
+            p_next = p[:, None] + a_trd             # (B,1) broadcast later
+            p_next_t = tf.repeat(p_next, M_SAMPLES, axis=1)   # (B,M)
+
+            f_next = make_features(
+                p_next_t, alpha_next,               # both (B,M)
+                c[:, None], rho[:, None], tl[:, None]
+            )                                       # (B,M,17)
+            V_next = tf.squeeze(model(tf.reshape(f_next, [-1, 17])), axis=-1)
+            V_next = tf.reshape(V_next, [BATCH_SIZE, M_SAMPLES])  # (B,M)
+            V_avg  = tf.reduce_mean(V_next, axis=1)               # (B,)
+
+            R = reward(a, p, a_trd, c, tl)                       # (B,)
+            Q = R + GAMMA * V_avg
+            Q_best = tf.maximum(Q_best, Q)
+
+        loss = tf.reduce_mean(tf.square(V_s - tf.stop_gradient(Q_best)))
+
+    grads = tape.gradient(loss, model.trainable_variables)
+    opt.apply_gradients(zip(grads, model.trainable_variables))
+    return loss
+
+# -----------------------------------------------------------------------------
+# 7. Main training loop --------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+with tf.device(DEVICE):
+    tic = time.time()
+    for it in range(1, N_ITERATIONS + 1):
+        if it == 1 or it % DATA_REFRESH == 0:
+            p_data, a_data, c_data, tl_data, rho_data = resample_dataset()
+
+        # mini‑batch indices
+        idx = tf.random.uniform([BATCH_SIZE], 0, N_DATASET, dtype=tf.int32)
+        p_b   = tf.gather(p_data, idx)
+        a_b   = tf.gather(a_data, idx)
+        c_b   = tf.gather(c_data, idx)
+        tl_b  = tf.gather(tl_data, idx)
+        rho_b = tf.gather(rho_data, idx)
+
+        loss_val = train_step(p_b, a_b, c_b, tl_b, rho_b)
+
+        if it % 20 == 0:
+            # monitor V(0,0, mid‑params)
+            f00 = make_features(
+                tf.constant(0.0), tf.constant(0.0),
+                tf.constant(5.0), tf.constant(0.9), tf.constant(500.0)
+            )
+            v00 = float(tf.squeeze(model(tf.expand_dims(f00, 0))))
+            print(f"Iter {it:4d}/{N_ITERATIONS}  loss={loss_val:.4f}  V(0,0)={v00:+.5f}  | {time.time()-tic:.1f}s")
+
+print("Training finished ✔")
+
+# -----------------------------------------------------------------------------
+# 8. Greedy‑policy evaluation --------------------------------------------------
+# -----------------------------------------------------------------------------
+
+def eval_policy(model, *, fixed_c=5.0, fixed_corr=0.9, fixed_tl=500.0,
+                num_steps=20_000, m_samples=100):
+    """Return arrays (positions, rewards, alphas)."""
+    with tf.device(DEVICE):
+        alpha_val = tf.constant(0.0, tf.float32)
+        p_val     = tf.constant(0.0, tf.float32)
+        pos_hist  = [0.0]
+        rew_hist  = []
+        alpha_hist= [0.0]
+
+        for _ in range(num_steps):
+            # MC next‑alpha
+            eps = tf.random.normal([m_samples], dtype=tf.float32)
+            alpha_next = alpha_val * fixed_corr + tf.sqrt(1 - fixed_corr**2) * eps  # (M,)
+
+            Q_best = -1e9
+            best_a = 0.0
+
+            for a_trd in ACTIONS:
+                p_next = p_val + a_trd                               # scalar
+                p_AM   = tf.repeat(tf.expand_dims(p_next, 0), m_samples)  # (M,)
+                f_next = make_features(p_AM, alpha_next,
+                                        tf.constant(fixed_c), tf.constant(fixed_corr), tf.constant(fixed_tl))
+                V_next = tf.squeeze(model(f_next), axis=-1)          # (M,)
+                V_avg  = tf.reduce_mean(V_next)
+                R      = reward(alpha_val, p_val, a_trd, fixed_c, fixed_tl)
+                Q      = R + GAMMA * V_avg
+                if Q > Q_best:
+                    Q_best = Q
+                    best_a = float(a_trd)
+
+            # realise step
+            r_step = float(reward(alpha_val, p_val, best_a, fixed_c, fixed_tl))
+            rew_hist.append(r_step)
+            p_val += best_a; pos_hist.append(float(p_val))
+            alpha_val = alpha_val * fixed_corr + tf.random.normal([], stddev=tf.sqrt(1 - fixed_corr**2))
+            alpha_hist.append(float(alpha_val))
+
+    return np.array(pos_hist), np.array(rew_hist), np.array(alpha_hist)
+
+# Example (short):
+if __name__ == "__main__":
+    pos, rew, alph = eval_policy(model, num_steps=5_000)
+    print("Cum PnL:", rew.sum())
