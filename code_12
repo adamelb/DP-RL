@@ -1,0 +1,204 @@
+# notebook_fqi_nn.py – Monte‑Carlo fitted‑value iteration with a neural network
+"""python
+A **drop‑in replacement** for the linear‐OLS version: the value function **V(s)**
+is now approximated by a small feed‑forward neural network that is trained
+online during the fitted‑value iteration loop.
+
+Key points
+----------
+* **Input features** – the same 17‑dimensional hand‑crafted basis
+  (constant, polynomials, sign kinks, cost interactions, raw params).
+  Feel free to swap for raw state variables if you prefer.
+* **Network** – 2 × 256 ReLU → 1 output (scalar V).
+* **Optimiser** – Adam, learning‑rate 1e‑3, weight‑decay 1e‑5.
+* Every outer iteration:
+  1. Sample new transitions (exactly like the linear code).
+  2. Build the *targets* `y = max_a [ r + γ E[V(s′)] ]`.
+  3. **One gradient step** on the network with those `(φ(s), y)` pairs.
+* Accumulates no replay buffer; each iteration is a fresh batch of
+  `n_samples` points – easy to read & extend.
+* `eval_fixed_policy()` returns the full paths of positions, rewards and
+  alphas just like before, but uses the trained network.
+
+Copy this file into a notebook cell, run the *train* example, then the
+*evaluate* example.
+"""
+
+# -----------------------------------------------------------------------------
+# 0. Imports & device ----------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+import numpy as np
+from numpy.linalg import norm
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+rng_global = np.random.default_rng(0)
+
+# -----------------------------------------------------------------------------
+# 1. Monte‑Carlo sampler (unchanged) ------------------------------------------
+# -----------------------------------------------------------------------------
+
+def sampler(*, n_samples:int, m_samples:int, mult:float=1., dist:str="normal"):
+    if dist=="normal":
+        p=rng_global.standard_normal((n_samples,1,1))*mult
+        alpha=rng_global.standard_normal((n_samples,1,1))*mult
+    elif dist=="uniform":
+        p=rng_global.uniform(-mult,mult,size=(n_samples,1,1))
+        alpha=rng_global.uniform(-mult,mult,size=(n_samples,1,1))
+    else:
+        raise ValueError("dist must be 'normal' or 'uniform'")
+    uni=rng_global.uniform(5.,100.,size=(n_samples,1,1))
+    corr_vals=-1+1/uni
+    c_vals=rng_global.uniform(0.,20.,size=(n_samples,1,1))
+    tl_vals=rng_global.uniform(1.,1000.,size=(n_samples,1,1))
+    eps=rng_global.standard_normal((n_samples,1,m_samples))
+    next_alpha=alpha*corr_vals+np.sqrt(1-corr_vals**2)*eps
+    p[0,0,0]=0.; alpha[0,0,0]=0.
+    return p,alpha,next_alpha,c_vals,tl_vals,corr_vals
+
+# -----------------------------------------------------------------------------
+# 2. Feature engineering (unchanged 17‑D basis) -------------------------------
+# -----------------------------------------------------------------------------
+
+_sgn=np.sign; _F=17
+
+def _assemble(p,a,c,rho,tl):
+    return np.stack([
+        np.ones_like(p), p, a, p*a, p**2, a**2,
+        _sgn(p), _sgn(a), a*_sgn(p), p*_sgn(a),
+        c*np.abs(p), tl*p**2, c*np.abs(a),
+        c, rho, tl,
+        np.zeros_like(p)
+    ],axis=-1)
+
+def get_features(p,a,c,rho,tl):  return _assemble(p,a,c,rho,tl)
+
+def get_features_next(pn,an,c,rho,tl): return _assemble(pn,an,c,rho,tl)
+
+def get_features_eval(p,a,fc,fr,t): return _assemble(p,a,fc*np.ones_like(p),fr*np.ones_like(p),t*np.ones_like(p))
+
+# -----------------------------------------------------------------------------
+# 3. Reward & helper -----------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+def reward(alpha,p,x,c,tl):
+    pn=p+x
+    return alpha*pn - c*np.abs(x) - .5*tl*x**2
+
+def dot(theta,feat):
+    return np.tensordot(feat,theta,axes=([-1],[0]))
+
+# -----------------------------------------------------------------------------
+# 4. Neural network for V(s) ---------------------------------------------------
+# -----------------------------------------------------------------------------
+
+class ValueMLP(nn.Module):
+    def __init__(self,input_dim=_F,hidden=256):
+        super().__init__()
+        self.net=nn.Sequential(
+            nn.Linear(input_dim,hidden), nn.ReLU(),
+            nn.Linear(hidden,hidden), nn.ReLU(),
+            nn.Linear(hidden,1)
+        )
+    def forward(self,x):  # x shape (batch,input_dim)
+        return self.net(x).squeeze(-1)  # (batch,)
+
+# -----------------------------------------------------------------------------
+# 5. Fitted‑value iteration with NN -------------------------------------------
+# -----------------------------------------------------------------------------
+
+def fitted_value_nn(*, n_samples=10_000, m_samples=100, num_iterations=300, gamma=.99,
+                    action_grid=np.arange(-100,100).reshape(1,-1,1)*1e-2,
+                    lr=1e-3, weight_decay=1e-5):
+    model=ValueMLP().to(DEVICE)
+    opt=torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    mse=nn.MSELoss()
+
+    for it in range(num_iterations):
+        # ---- sample -------------------------------------------------------
+        p,a,anext,c,tl,rho=sampler(n_samples=n_samples,m_samples=m_samples)
+
+        cand_p=p+action_grid  # (N,A,1)
+        p_next=np.tile(cand_p,(1,1,m_samples))
+        a_next=np.tile(anext,(1,action_grid.shape[1],1))
+        c_t=np.tile(c,(1,action_grid.shape[1],m_samples))
+        tl_t=np.tile(tl,(1,action_grid.shape[1],m_samples))
+        rho_t=np.tile(rho,(1,action_grid.shape[1],m_samples))
+
+        # ---- compute V(s′) expectation ------------------------------------
+        feat_next=get_features_next(p_next,a_next,c_t,rho_t,tl_t)  # (N,A,M,F)
+        feat_next_flat=feat_next.reshape(-1,_F)
+        with torch.no_grad():
+            V_next=model(torch.tensor(feat_next_flat,dtype=torch.float32,device=DEVICE)).cpu().numpy()
+        V_next=V_next.reshape(n_samples,action_grid.shape[1],m_samples)
+        V_avg=V_next.mean(axis=2,keepdims=True)  # (N,A,1)
+
+        # ---- reward --------------------------------------------------------
+        R=reward(a,p,action_grid,c,tl)  # (N,A,1)
+        Q=R+gamma*V_avg  # (N,A,1)
+        Q_best=Q.max(axis=1)  # (N,1)
+
+        # ---- features current --------------------------------------------
+        feat_cur=get_features(p,a,c,rho,tl)[:,0,0,:]  # (N,F)
+        feat_t=torch.tensor(feat_cur,dtype=torch.float32,device=DEVICE)
+        target=torch.tensor(Q_best.squeeze(),dtype=torch.float32,device=DEVICE)
+
+        # ---- gradient step -------------------------------------------------
+        opt.zero_grad()
+        pred=model(feat_t)
+        loss=mse(pred,target)
+        loss.backward()
+        opt.step()
+
+        if (it+1)%50==0:
+            print(f"Iter {it+1}/{num_iterations}  loss={loss.item():.4f}")
+    return model
+
+# -----------------------------------------------------------------------------
+# 6. Evaluation roll‑out -------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+def eval_policy_nn(model, *, fixed_c=8., fixed_corr=.94, fixed_tl=75., gamma=.99,
+                   action_grid=np.arange(-100,100).reshape(1,-1,1)*1e-2,
+                   num_steps=100_000):
+    alpha_val=0.; p=0.
+    pos,rew,alph=[p],[],[alpha_val]
+    with torch.no_grad():
+        for _ in range(num_steps):
+            alpha_cur=np.array([[alpha_val]]); p_cur=np.array([[p]])
+            cand_p=p_cur+action_grid  # (1,A,1)
+            next_alpha=alpha_cur*fixed_corr+np.sqrt(1-fixed_corr**2)*rng_global.standard_normal((1,1,1))
+            p_next=np.tile(cand_p,(1,1,1)); a_next=np.tile(next_alpha,(1,action_grid.shape[1],1))
+            feat_next=get_features_eval(p_next,a_next,fixed_c,fixed_corr,fixed_tl)
+            fn_flat=torch.tensor(feat_next.reshape(-1,_F),dtype=torch.float32,device=DEVICE)
+            V_next=model(fn_flat).cpu().numpy().reshape(action_grid.shape[1])
+            R=reward(alpha_cur,p_cur,action_grid,fixed_c,fixed_tl).reshape(-1)
+            Q=R+gamma*V_next
+            idx=int(Q.argmax())
+            act=float(action_grid[0,idx,0])
+            r_step=reward(alpha_cur,p_cur,np.array([[act]]),fixed_c,fixed_tl).item()
+            rew.append(r_step)
+            p+=act; pos.append(p)
+            alpha_val=fixed_corr*alpha_val+np.sqrt(1-fixed_corr**2)*rng_global.standard_normal()
+            alphas=alph.append(alpha_val)
+    return np.array(pos), np.array(rew), np.array(alph)
+
+# -----------------------------------------------------------------------------
+# 7. Notebook demo -------------------------------------------------------------
+# -----------------------------------------------------------------------------
+"""markdown
+```python
+# --- Train --------------------------------------------------------------
+model = fitted_value_nn(n_samples=10_000, m_samples=100, num_iterations=300)
+```
+
+```python
+# --- Evaluate -----------------------------------------------------------
+pos, rew, alph = eval_policy_nn(model, fixed_c=8., fixed_corr=0.94, fixed_tl=75., num_steps=20_000)
+print(rew.sum())
+```
+"""
