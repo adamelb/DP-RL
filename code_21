@@ -1,0 +1,100 @@
+import torch
+import torch.nn.functional as F
+import time, copy
+
+# ───── Hyper‑parameters ─────────────────────────────────────────
+DEVICE         = "cuda"
+ACC_STEPS      = 2                # micro‑batches before each optimizer.step()
+BATCH_SIZE     = 128
+MICRO_BS       = BATCH_SIZE // ACC_STEPS
+DATA_REFRESH   = 1000             # resample data every this many iterations
+TARGET_UPDATE  = 100              # re‑sync target network every this many its
+N_ITERATIONS   = 10_000
+N_DATASET      = 50_000           # total size of P_data, etc.
+M_SAMPLES      = 16
+GAMMA          = 0.99
+ACTIONS        = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0], device=DEVICE)
+LR             = 1e-3
+
+# ───── Model & Target ────────────────────────────────────────────
+model = MyNetwork().to(DEVICE)
+target_model = copy.deepcopy(model)
+target_model.eval()
+for p in target_model.parameters():
+    p.requires_grad = False       # no grads into target
+
+optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+scaler    = torch.cuda.amp.GradScaler(device="cuda")
+
+torch.cuda.empty_cache()
+
+# ───── Training Loop ─────────────────────────────────────────────
+start_time = time.time()
+for it in range(1, N_ITERATIONS + 1):
+    # 1) resync target network every TARGET_UPDATE iterations
+    if it == 1 or it % TARGET_UPDATE == 0:
+        target_model.load_state_dict(model.state_dict())
+
+    # 2) optionally refresh your dataset
+    if it == 1 or it % DATA_REFRESH == 0:
+        P_data, a_data, c_data, tl_data, rho_data = resample_dataset()
+
+    running_loss = 0.0
+    optimizer.zero_grad(set_to_none=True)
+
+    # 3) ACCUMULATE gradients over ACC_STEPS micro‑batches
+    for k in range(ACC_STEPS):
+        idx   = torch.randint(0, N_DATASET, (MICRO_BS,), device=DEVICE)
+        p     = P_data[idx]
+        alpha = a_data[idx]
+        c     = c_data[idx]
+        tl    = tl_data[idx]
+        rho   = rho_data[idx]
+
+        with torch.cuda.amp.autocast(device_type="cuda"):
+            # online evaluation
+            V_s = model(features(p, alpha, c, rho, tl))               # shape (MICRO_BS,)
+
+            # build next‑state samples
+            eps        = torch.rand(MICRO_BS, M_SAMPLES, device=DEVICE)
+            alpha_next = alpha.unsqueeze(1) * rho.unsqueeze(1) \
+                       + eps * torch.sqrt(1 - rho.unsqueeze(1)**2)
+
+            # compute max_a′ Q using **target_model**
+            Q_best = torch.full((MICRO_BS,), -1e9, device=DEVICE)
+            for a_trd in ACTIONS:
+                P_next = p + a_trd
+                P_AM   = P_next.unsqueeze(1)  # (MICRO_BS,1)
+                V_sum  = 0.0
+                # average over samples
+                for m in range(M_SAMPLES):
+                    phi_next = features(P_AM,
+                                        alpha_next[:, m],
+                                        c, rho, tl)
+                    V_sum = V_sum + target_model(phi_next)
+                V_avg = V_sum / M_SAMPLES
+
+                # reward & bellman
+                R   = reward(alpha, p, a_trd, c, tl)
+                Q   = R + GAMMA * V_avg
+                Q_best = torch.maximum(Q_best, Q)
+
+            loss = F.mse_loss(V_s, Q_best.detach(), reduction="mean")
+            # scale down since we're accumulating
+            loss = loss / ACC_STEPS
+
+        scaler.scale(loss).backward()
+        running_loss += loss.item()
+
+    # 4) apply the accumulated gradients
+    scaler.step(optimizer)
+    scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+
+    # 5) logging
+    if it % 100 == 0:
+        elapsed = time.time() - start_time
+        print(f"[Iter {it:5d}/{N_ITERATIONS}] "
+              f"Loss: {running_loss:.4f}  "
+              f"Time: {elapsed:.1f}s")
+        start_time = time.time()
