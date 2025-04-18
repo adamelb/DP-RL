@@ -1,0 +1,70 @@
+import copy
+import time
+import torch
+from torch.utils.data import TensorDataset, DataLoader
+import torch.nn.functional as F
+
+# hyper‑params
+N_OUTER_ITERS   = 100                # number of Bellman–backups
+DATASET_SIZE    = 50_000             # large sample size per outer iteration
+BATCH_SIZE      = 256                # mini‑batch for inner epochs
+MAX_INNER_EPOCH = 20                 # safety cap
+CONV_TOL        = 1e-3               # rel‑tol for early stopping
+UPDATE_PERIOD   = 5                  # if you still want a periodic target update
+
+# assume model is your online net; optim / scheduler already defined
+target_model    = copy.deepcopy(model)
+for p in target_model.parameters():
+    p.requires_grad = False
+target_model.eval()
+
+for t in range(1, N_OUTER_ITERS+1):
+    # 1) sample a big dataset
+    p_data, a_data, c_data, tl_data, rho_data = resample_dataset(size=DATASET_SIZE)
+    # turn into a DataLoader
+    ds  = TensorDataset(p_data, a_data, c_data, tl_data, rho_data)
+    dl  = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
+    
+    # 2) freeze target
+    target_model.eval()
+    for p in target_model.parameters():
+        p.requires_grad = False
+
+    # 3) fit online model to fixed targets until convergence
+    prev_epoch_loss = float('inf')
+    for epoch in range(1, MAX_INNER_EPOCH+1):
+        running_loss = 0.0
+        for (p_batch, a_batch, c_batch, tl_batch, rho_batch) in dl:
+            # forward + Bellman‑target computation stays the same,
+            # but you always use target_model to produce next‑state values.
+            with torch.cuda.amp.autocast():
+                # ... build phi, compute M_s, actions, next‑states ...
+                # let's say V_pred = model(phi_flat)
+                # and V_target = reward + gamma * target_model(phi_next)
+                loss = F.mse_loss(V_pred, V_target)  
+
+            scaler.scale(loss / ACC_STEPS).backward()
+            if (batch_idx+1) % ACC_STEPS == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+            running_loss += loss.item()
+
+        # scheduler per‑epoch (or per‑batch if you prefer)
+        scheduler.step()
+
+        # check convergence
+        epoch_loss = running_loss / len(dl)
+        rel_change  = abs(prev_epoch_loss - epoch_loss) / (prev_epoch_loss + 1e-8)
+        print(f"[Outer {t:2d} | Epoch {epoch:2d}]  loss={epoch_loss:.6f}  Δ={rel_change:.4f}")
+        if rel_change < CONV_TOL:
+            print(f"  → inner loop converged after {epoch} epochs.")
+            break
+        prev_epoch_loss = epoch_loss
+
+    # 4) update target network
+    if t % UPDATE_PERIOD == 0:
+        target_model.load_state_dict(model.state_dict())
+        print(f"  → target network updated at outer step {t}.")
+
+print("Training complete.")
