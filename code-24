@@ -1,0 +1,145 @@
+import copy
+import time
+import torch
+import torch.nn.functional as F
+
+def fit(
+    model,
+    resample_dataset,
+    features,
+    reward,
+    ACTIONS,
+    M_SAMPLES,
+    gamma,
+    optimizer,
+    scheduler,
+    scaler,
+    N_ITERATIONS,
+    UPDATE_EVERY,
+    DATA_REFRESH,
+    MICRO_BS,
+    ACC_STEPS,
+    MAX_EPOCHS,
+    CONV_TOL,
+    DEVICE="cuda",
+):
+    """
+    Fitted-value iteration:
+      - Each outer iter: sample a big batch once.
+      - Freeze target V^{(t)}.
+      - Inner: do epochs of mini‑batch SGD (with ACC_STEPS accumulation)
+        until epoch-loss converges (rel Δ < CONV_TOL) or MAX_EPOCHS hit.
+      - Copy online → target every UPDATE_EVERY iters.
+    """
+
+    # 1) init target network
+    target_model = copy.deepcopy(model).to(DEVICE)
+    target_model.eval()
+    for p in target_model.parameters():
+        p.requires_grad = False
+
+    for it in range(1, N_ITERATIONS + 1):
+        # 2) maybe update target
+        if it == 1 or it % UPDATE_EVERY == 0:
+            target_model.load_state_dict(model.state_dict())
+
+        # 3) maybe refresh data
+        if it == 1 or it % DATA_REFRESH == 0:
+            p_data, alpha_data, c_data, tl_data, rho_data = resample_dataset()
+            # ensure all on DEVICE
+            p_data     = p_data.to(DEVICE)
+            alpha_data = alpha_data.to(DEVICE)
+            c_data     = c_data.to(DEVICE)
+            tl_data    = tl_data.to(DEVICE)
+            rho_data   = rho_data.to(DEVICE)
+
+        prev_loss = float("inf")
+        N_DATASET = p_data.size(0)
+        # number of gradient‐updates per epoch:
+        n_updates = N_DATASET // (MICRO_BS * ACC_STEPS)
+
+        # 4) inner‐loop epochs
+        for epoch in range(1, MAX_EPOCHS + 1):
+            epoch_loss = 0.0
+            start_time = time.time()
+
+            for upd in range(n_updates):
+                optimizer.zero_grad(set_to_none=True)
+
+                # accumulate gradients over ACC_STEPS micro-batches
+                for _ in range(ACC_STEPS):
+                    # sample a micro‐batch
+                    idx = torch.randint(0, N_DATASET, (MICRO_BS,), device=DEVICE)
+                    p     = p_data[idx]
+                    alpha = alpha_data[idx]
+                    c     = c_data[idx]
+                    tl    = tl_data[idx]
+                    rho   = rho_data[idx]
+
+                    with torch.cuda.amp.autocast():
+                        # --- current V estimate ---
+                        phi        = features(p, alpha, c, rho, tl)            # -> (B, F)
+                        V_pred     = model(phi).view(-1)                      # -> (B,)
+
+                        # --- sample next‐states ---
+                        eps        = torch.randn(MICRO_BS, M_SAMPLES, device=DEVICE)
+                        alpha_next = alpha.unsqueeze(1) * rho.unsqueeze(1) \
+                                     + eps * torch.sqrt(1 - rho.unsqueeze(1)**2)
+
+                        P_exp   = p.unsqueeze(1)   # (B,1)
+                        c_exp   = c.unsqueeze(1)
+                        tl_exp  = tl.unsqueeze(1)
+                        rho_exp = rho.unsqueeze(1)
+                        actions = ACTIONS.view(1, -1, 1)  # (1, A, 1)
+
+                        P_next  = (P_exp.unsqueeze(2) + actions)              # (B, A, 1)
+                        P_next  = P_next.expand(-1, -1, M_SAMPLES)            # (B, A, M)
+
+                        alpha_b = alpha_next.unsqueeze(1).expand(-1, ACTIONS.size(0), -1)
+                        c_b     = c_exp.unsqueeze(2).expand(-1, ACTIONS.size(0), M_SAMPLES)
+                        tl_b    = tl_exp.unsqueeze(2).expand(-1, ACTIONS.size(0), M_SAMPLES)
+                        rho_b   = rho_exp.unsqueeze(2).expand(-1, ACTIONS.size(0), M_SAMPLES)
+
+                        phi_next      = features(P_next, alpha_b, c_b, rho_b, tl_b)  
+                        phi_next_flat = phi_next.view(-1, phi_next.size(-1))         # (B*A*M, F)
+
+                        with torch.no_grad():
+                            v_next = target_model(phi_next_flat).view(
+                                MICRO_BS, ACTIONS.size(0), M_SAMPLES
+                            )  # (B, A, M)
+                            V_avg = v_next.mean(dim=2)               # (B, A)
+
+                        R = reward(
+                            alpha.unsqueeze(1),
+                            P_exp,
+                            actions.squeeze(-1),
+                            c.unsqueeze(1),
+                            tl.unsqueeze(1),
+                        )  # (B, A)
+
+                        Q_target    = R + gamma * V_avg             # (B, A)
+                        Q_best, _   = Q_target.max(dim=1)           # (B,)
+                        loss        = F.mse_loss(V_pred, Q_best.detach()) / ACC_STEPS
+
+                    scaler.scale(loss).backward()
+                    epoch_loss += loss.item()
+
+                # gradient‐step
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+
+            # avg per‐update loss
+            avg_loss   = epoch_loss / n_updates
+            rel_change = abs(prev_loss - avg_loss) / (prev_loss + 1e-8)
+            print(f"[Iter {it:3d} | Epoch {epoch:2d}]  loss={avg_loss:.6f}  Δ={rel_change:.4f}  "
+                  f"({time.time()-start_time:.1f}s)")
+
+            if rel_change < CONV_TOL:
+                print(f" → Converged after {epoch} epochs (Δ<{CONV_TOL}).\n")
+                break
+            prev_loss = avg_loss
+
+    # final save
+    torch.save(model.state_dict(), "model_fitted.pth")
+    print("✅ Training complete, model saved to model_fitted.pth")
