@@ -1,0 +1,16 @@
+To evaluate the performance and generalization ability of approximate models (e.g., neural networks), we define a relative error metric.
+We simulate a fixed path of return signals \alpha_i generated via an AR(1) process with a fixed autocorrelation \rho.
+For a given choice of fixed parameters \rho, c, t_\lambda, we compute the cumulative rewards of:
+	•	the tabular dynamic programming policy (used as the ground truth),
+	•	the neural network policy obtained from the general model \Pi_{\text{NN}}(p, \alpha, \rho, c, t_\lambda).
+
+The relative deviation from optimality is then measured as:
+
+\text{Evaluation Metric} =
+\frac{
+\mathbb{E}_{\text{path}}\left[ R^{\text{Tabular}} \right]
+-
+\mathbb{E}_{\text{path}}\left[ R^{\text{NN}} \right]
+}{
+\mathbb{E}_{\text{path}}\left[ R^{\text{Tabular}} \right]
+}
