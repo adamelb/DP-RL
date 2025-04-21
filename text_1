@@ -1,0 +1,185 @@
+<!--‐‐  Confluence page  ‐‐>
+<h1>Stochastic Control for Portfolio Optimization</h1>
+
+<h2>1&nbsp;&nbsp;Problem Statement</h2>
+
+<p>
+This work extends <em>multi‑period portfolio optimization</em> into the
+stochastic‑control framework.  Classical Model Predictive Control (MPC)
+treats the future as deterministic and is therefore brittle when market
+dynamics deviate from the forecast.  We replace MPC by a true stochastic
+control formulation so that the trading policy adapts on‑line to noisy
+returns and transaction frictions.
+(<a href="INSERT_LINK_TO_MPC_NOTE">detailed MPC review</a>)
+</p>
+
+<h3>1.1 Infinite‑Horizon Discounted Objective</h3>
+
+<p style="margin-left:2em">
+Maximize over policies \( \Pi \bigl(p_i,\alpha_i,\rho,c,t_\lambda\bigr) \):
+</p>
+
+<div style="margin-left:4em">
+\[
+\max_{\Pi}\;
+\sum_{i=0}^{\infty}
+\gamma^{\,i}\;
+\mathbb E\!\Bigl[
+\,\alpha_i\bigl(p_i+x_i\bigr)
+\;-\;C_i(\dots,x_i)
+\;-\;\tfrac12\lambda\bigl(p_i+x_i\bigr)^{2}
+\Bigr]
+\]
+</div>
+
+<ul style="margin-left:2em">
+<li>\(\alpha_i\): return forecast — AR(1)  \(
+\alpha_{i+1}= \rho\,\alpha_i + \sqrt{1-\rho^{2}}\;\varepsilon_i,\quad 
+\varepsilon_i\sim\mathcal N(0,1)
+\)</li>
+<li>\(C_i(x_i)= c\,|x_i| + \tfrac12 t_\lambda\,x_i^{2}\)</li>
+<li>\(x_i = \Pi(p_i,\alpha_i,\rho,c,t_\lambda)\)  (control)</li>
+<li>State \(s_i=(p_i,\alpha_i,\rho,c,t_\lambda)\)</li>
+</ul>
+
+<h3>1.2 Bellman Equation</h3>
+
+<div style="margin-left:2em">
+\[
+V_i(s_i)=
+\max_{x_i}\Bigl[
+\alpha_i\bigl(p_i+x_i\bigr)
+-c|x_i|
+-\tfrac12 t_\lambda x_i^{2}
+-\tfrac12\lambda\bigl(p_i+x_i\bigr)^{2}
++\gamma\;
+\mathbb E\bigl[
+V_{i+1}(p_i+x_i,\alpha_{i+1},\rho,c,t_\lambda)
+\bigr]\Bigr]
+\]
+</div>
+
+<p>
+In an <em>exact</em> setting the expectation is computed from the AR(1)
+density; in practice we use Monte‑Carlo sampling when a closed form is
+not available.
+</p>
+
+<h2>2&nbsp;&nbsp;Tabular Approach — Exact Dynamic Programming</h2>
+
+<h3>2.1 Simplifying Assumptions</h3>
+<ul>
+<li>Fix \(\rho,c,t_\lambda\); state \((p,\alpha)\) only.</li>
+<li>Discretize<br>
+&nbsp;&nbsp;&nbsp;• \(p\) grid <span style="font-size:90%;">→ </span> &nbsp;\(N_p\) points<br>
+&nbsp;&nbsp;&nbsp;• \(\alpha\) grid <span style="font-size:90%;">→ </span> &nbsp;\(N_\alpha\) points</li>
+<li>Discretize actions: 200 equi‑spaced values in \([-1,1]\).</li>
+</ul>
+
+<h3>2.2 Backward Recursion</h3>
+
+<div style="margin-left:2em">
+\( V_{i}(p,\alpha) = 
+\max_{x\in\mathcal A}
+\bigl\{ R(p,\alpha,x)+
+\gamma\,
+\mathbb E_{\alpha'}[V_{i+1}(p+x,\alpha')]
+\bigr\} \)
+</div>
+
+<p>
+For each grid point you evaluate all 200 actions, store the maximizer, and
+iterate until convergence (Bellman contraction).  The resulting policy is
+provably optimal <em>on the grid</em>.
+</p>
+
+<h3>2.3 Results & Limitations</h3>
+<ul>
+<li>Converges to the exact grid‑optimal policy.</li>
+<li>Computation explodes: \(\mathcal O(N_pN_\alpha|\mathcal A|)\) per sweep
+ ⇒ infeasible when we reinstate \(\rho,c,t_\lambda\).</li>
+</ul>
+
+<h2>3&nbsp;&nbsp;Approximate Dynamic Programming (ADP)</h2>
+
+<h3>3.1 Algorithm Template</h3>
+
+<ol>
+<li><strong>Sampling</strong>  
+ <ul>
+ <li>Select \(N\) states
+ \(s^{(k)}=(p^{(k)},\alpha^{(k)},\rho^{(k)},c^{(k)},t_\lambda^{(k)})\).</li>
+ <li>Sample \(M\) next‑states for each \((s^{(k)},x)\).</li>
+ </ul></li>
+
+<li><strong>Bellman Targets</strong>  
+ \[
+\widehat V_i\bigl(s^{(k)}\bigr)=
+\max_{x}
+\Bigl[
+R\bigl(s^{(k)},x\bigr)+
+\gamma\frac1M
+\sum_{j=1}^{M}V_{i+1}\!\bigl(s'^{(k,j)}\bigr)
+\Bigr]
+\]</li>
+
+<li><strong>Function Approximation</strong>  
+ <ul>
+ <li><em>Linear</em>: \(V_\theta=\theta_0+ \theta_1\alpha^2+\theta_2p^2+\theta_3\alpha p
++\theta_4c+\theta_5\rho+\theta_6 t_\lambda\).</li>
+ <li><em>Neural Network</em>: 3 hidden layers (256 ReLU units).</li>
+ </ul></li>
+
+<li><strong>Least‑Squares Fit</strong> (or SGD for NN) on the
+    \((N\) states, targets).</li>
+<li>Repeat backward in time (finite horizon) or iterate to fixed point
+    (infinite horizon).</li>
+</ol>
+
+<h3>3.2 Linear ADP — Fixed \(\rho,c,t_\lambda\)</h3>
+<ul>
+<li>Fits in <0.1 s per iteration.</li>
+<li>Value surface matches tabular DP on grid.</li>
+<li>Generalizes smoothly but deteriorates outside training range.</li>
+</ul>
+
+<h3>3.3 Linear ADP — Full Parameter State&nbsp;(ρ,c,tλ)</h3>
+<ul>
+<li>State dim = 5 ⇒ linear model still tractable.</li>
+<li>Quality drops: single linear surface cannot capture the strong
+ non‑linear interaction between α, ρ and cost terms ⇒ sub‑optimal policy.</li>
+</ul>
+
+<h3>3.4 Neural ADP </h3>
+
+<h4>Fixed Parameters</h4>
+<ul>
+<li>Network : 3×256 ReLU.</li>
+<li>Converges reliably; reproduces tabular baseline.</li>
+</ul>
+
+<h4>Full Parameter Grid</h4>
+<ul>
+<li>Training grid  
+ <ul>
+ <li>\(\rho\in\{0.80,0.90,0.95,0.99\}\)</li>
+ <li>\(c\in\{0,5,10\}\)</li>
+ <li>\(t_\lambda\in\{60,100,500\}\)</li>
+ </ul></li>
+<li>Iterative “<em>fitted value iteration</em>”  
+    (100–200 outer loops, fresh 10 k samples each loop).</li>
+<li>Reasonable interpolation inside the grid; extrapolation unstable.</li>
+<li>Future work ▶ transfer‑learning: progressively densify parameter grid
+ to cover the continuous domain.</li>
+</ul>
+
+<h3>3.5 Key Take‑aways</h3>
+
+<ul>
+<li>Exact DP is gold‑standard but explodes beyond 2D.</li>
+<li>Linear ADP is lightning‑fast; adequate only if value surface is close
+ to quadratic.</li>
+<li>Neural ADP scales better but needs careful curriculum (parameter
+ scheduling, transfer learning) to converge on high‑dimensional
+ parameter spaces.</li>
+</ul>
