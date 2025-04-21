@@ -1,0 +1,140 @@
+\title{Stochastic Control for Portfolio Optimization}
+\author{}
+\date{}
+
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb}
+\usepackage{enumitem}
+
+\begin{document}
+\maketitle
+
+\section{Problem Statement}
+
+This study revisits multi--period portfolio construction from a {\it stochastic‑control} angle.  
+Classical Model Predictive Control (MPC) solves a deterministic horizon at every step; once market noise deviates from the forecast, the policy can become brittle.  
+We formulate an \emph{infinite‑horizon discounted} control problem that explicitly models uncertainty in returns and trading frictions.
+
+\paragraph{Objective.}  
+For a trading policy $\Pi$ define the state at period $i$ as
+\[
+s_i=(p_i,\alpha_i,\rho,c,t_\lambda),
+\]
+where $p_i$ is the current position, $\alpha_i$ the return signal,  
+$\rho$ the AR(1) persistence, $c$ the proportional cost and $t_\lambda$ the quadratic cost.  
+The goal is to maximise
+\[
+\max_{\Pi}\;
+\sum_{i=0}^{\infty}
+\gamma^{\,i}\,
+\mathbb E\!\Bigl[
+\alpha_i\!\left(p_i+x_i\right)
+-C_i(x_i)
+-\tfrac12 \lambda \!\left(p_i+x_i\right)^{2}
+\Bigr],
+\qquad
+C_i(x_i)=c|x_i|+\tfrac12 t_\lambda x_i^{2},
+\]
+subject to the AR(1) signal dynamics
+\[
+\alpha_{i+1} = \rho\,\alpha_i + \sqrt{1-\rho^{2}}\;\varepsilon_i,\quad
+\varepsilon_i\sim\mathcal N(0,1),
+\]
+and the control rule $x_i=\Pi(s_i)$.
+
+\paragraph{Bellman equation.}
+\begin{equation}\label{eq:bellman_full}
+V_i(s_i)=
+\max_{x_i}\Bigl[
+\alpha_i(p_i+x_i)-c|x_i|
+-\tfrac12 t_\lambda x_i^{2}
+-\tfrac12 \lambda (p_i+x_i)^{2}
++\gamma\,\mathbb E_{\,\alpha_{i+1}}
+\bigl[V_{i+1}(p_i+x_i,\alpha_{i+1},\rho,c,t_\lambda)\bigr]
+\Bigr].
+\end{equation}
+
+Because the expectation involves only $\alpha_{i+1}$, the process is Markov and Dynamic Programming (DP) applies.
+
+We will first fix $(\rho,c,t_\lambda)$ and solve for $\Pi$ over $(p,\alpha)$, then return to the full five–dimensional state.
+
+%--------------------------------------------------------------------
+\section{Tabular Approach: Exact Dynamic Programming}
+
+\subsection{Setup}
+
+\begin{itemize}[leftmargin=*]
+\item Freeze $(\rho,c,t_\lambda)$; state $\;(p,\alpha)$ only.
+\item Discrete grids: $p\in[-10,10]$ ($N_p$ points), $\alpha\in[-1,1]$ ($N_\alpha$ points).
+\item Action grid: $200$ equispaced trades in $[-1,1]$.
+\end{itemize}
+
+\subsection{Backward Recursion}
+
+For every grid state evaluate all actions, compute the Gaussian expectation in~\eqref{eq:bellman_full}, take the maximiser, and iterate until
+$\lVert V^{(k+1)}-V^{(k)}\rVert_\infty<\varepsilon$.
+
+\subsection{Results and Limitations}
+
+\begin{itemize}[leftmargin=*]
+\item Converges to the grid‑optimal policy and matches intuition (plots omitted).
+\item Complexity $\mathcal O(N_p N_\alpha |\mathcal A|)$ per sweep $\;\Rightarrow\;$ impractical once $(\rho,c,t_\lambda)$ are added.\@
+\end{itemize}
+
+%--------------------------------------------------------------------
+\section{Approximate Dynamic Programming (ADP)}
+
+\subsection{Generic ADP Loop}
+
+\begin{enumerate}[leftmargin=*]
+\item Sample $N$ states $s^{(k)}$ from the continuous space.
+\item For each $s^{(k)}$ and each candidate action compute  
+      \[
+      \widehat{V}_i(s^{(k)})=
+      \max_x\Bigl[R(s^{(k)},x)+
+      \gamma\,\frac1M\sum_{j=1}^{M}
+      V_{i+1}\bigl(s'^{(k,j)}\bigr)\Bigr],
+      \]
+      where $s'^{(k,j)}$ are Monte‑Carlo next states.
+\item Fit a function approximator $V_{\theta}$ to
+      $\bigl\{s^{(k)},\widehat V_i(s^{(k)})\bigr\}_{k=1}^{N}$.
+\item Repeat backward (finite horizon) or iterate to a fixed point
+      (infinite horizon).
+\end{enumerate}
+
+\subsection{Linear Value Function}
+
+\[
+V_\theta(s)=
+\theta_0+\theta_1\alpha^{2}+\theta_2p^{2}+\theta_3\alpha p
++\theta_4 c+\theta_5 \rho+\theta_6 t_\lambda .
+\]
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Fixed parameters} $(\rho,c,t_\lambda)$: converges rapidly, reproduces exact DP.
+\item \textbf{Full parameter state}: one global quadratic surface cannot
+      capture the curvature $\;\Rightarrow\;$ policy is noticeably sub‑optimal.
+\end{itemize}
+
+\subsection{Neural Value Function}
+
+\begin{itemize}[leftmargin=*]
+\item Architecture: 3 hidden layers $\times$ 256 ReLU units.
+\item Training: fitted‑value–iteration with $10\,000$ samples per outer loop.
+\item \textbf{Fixed parameters}: stable, matches tabular DP.
+\item \textbf{Full parameter grid}: direct training unstable;  
+      improve via curriculum / transfer learning  
+      (train on extreme corners, progressively densify the grid).
+\end{itemize}
+
+\subsection{Key Take‑aways}
+
+\begin{itemize}[leftmargin=*]
+\item Exact DP is the benchmark but suffers from the curse of dimensionality.
+\item Linear ADP is fast and works when the value surface is nearly quadratic.
+\item Neural ADP scales better but needs careful sampling
+      and learning‑rate scheduling; transfer learning across
+      $(\rho,c,t_\lambda)$ is a promising next step.
+\end{itemize}
+
+\end{document}
