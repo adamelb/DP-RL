@@ -1,0 +1,5 @@
+% Immediate reward
+R(s, x) = \alpha \cdot (p + x) - c \cdot |x| - \frac{1}{2} \, t_\lambda \, x^2 - \frac{1}{2} \, \lambda \, (p + x)^2
+
+% Bellman target
+y(s, x) = R(s, x) + \gamma \cdot \frac{1}{M} \sum_{j=1}^{M} V_t(s'_j)
