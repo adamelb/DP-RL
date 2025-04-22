@@ -1,0 +1,40 @@
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+
+# Grid
+alpha = np.linspace(-1, 1, 100)
+p = np.linspace(-1, 1, 100)
+ALPHA, P = np.meshgrid(alpha, p)
+
+# Device + tensors
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+alpha_t = torch.tensor(ALPHA, dtype=torch.float32).to(DEVICE)
+p_t = torch.tensor(P, dtype=torch.float32).to(DEVICE)
+
+# Constants
+fixed_tl, fixed_c, fixed_rho = 500, 0, 0.9
+c_t = torch.tensor(fixed_c).to(DEVICE)
+rho_t = torch.tensor(fixed_rho).to(DEVICE)
+tl_t = torch.tensor(fixed_tl).to(DEVICE)
+
+# Closed-form solution
+Z_closed = closed_sol(ALPHA, P)
+
+# NN prediction
+phi = features(p_t, alpha_t, c_t, rho_t, tl_t)  # (100, 100, D)
+phi_flat = phi.view(-1, phi.shape[-1])          # (10000, D)
+with torch.no_grad():
+    Z_nn_flat = model(phi_flat).cpu().numpy()   # (10000,)
+Z_nn = Z_nn_flat.reshape(ALPHA.shape)           # (100, 100)
+
+# Plot
+fig = plt.figure(figsize=(10, 6))
+ax = plt.axes(projection='3d')
+ax.plot_surface(ALPHA, P, Z_closed, alpha=0.6, cmap='viridis')
+ax.plot_surface(ALPHA, P, Z_nn, alpha=0.6, cmap='plasma')
+ax.set_xlabel('alpha')
+ax.set_ylabel('p')
+ax.set_zlabel('solution')
+plt.title('Closed-form vs Neural Net')
+plt.show()
