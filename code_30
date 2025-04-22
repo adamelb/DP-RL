@@ -1,0 +1,43 @@
+import numpy as np
+
+def function_distance_L2(f, g, N=500):
+    """
+    Approximate the L2 distance:
+        dist = sqrt( ∫_{-1}^1 ∫_{-1}^1 (f(x,y)-g(x,y))^2 dx dy )
+    by a uniform N×N grid.
+    
+    Args:
+        f, g : callables f(x,y), g(x,y) that accept NumPy arrays
+        N    : number of points per axis (higher → more accurate)
+        
+    Returns:
+        approx L2 distance (float)
+    """
+    xs = np.linspace(-1, 1, N)
+    ys = np.linspace(-1, 1, N)
+    X, Y = np.meshgrid(xs, ys, indexing='xy')
+    
+    # evaluate both functions on the grid
+    F = f(X, Y)
+    G = g(X, Y)
+    
+    # squared difference
+    sq = (F - G)**2
+    
+    # average squared diff × area = integral
+    area = (2.0 * 2.0)  # width in x times width in y
+    integral = sq.mean() * area
+    
+    return np.sqrt(integral)
+
+
+# Example usage:
+
+def f1(x, y):
+    return x**2 + y**2
+
+def f2(x, y):
+    return x*y
+
+dist = function_distance_L2(f1, f2, N=1000)
+print(f"L2 distance ≈ {dist:.6f}")
