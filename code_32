@@ -1,0 +1,53 @@
+import numpy as np
+
+def V2(p, alpha, rho, tl, gamma, sigma2=0.0):
+    """
+    Compute V_2(p, alpha) after two Bellman iterations.
+    
+    Parameters:
+    - p: current p value
+    - alpha: current alpha value
+    - rho: AR(1) correlation coefficient for alpha
+    - tl: parameter t_ℓ
+    - gamma: discount factor
+    - sigma2: variance of the AR(1) shock (default 0)
+    
+    Returns:
+    - V2: float, the value V^{(2)}(p, alpha)
+    """
+    # intermediate
+    d = tl + 1
+    
+    # optimal x at iteration 2
+    numerator_x2 = alpha * (d + gamma * tl * rho) - p * (d + gamma * tl)
+    denominator_x2 = d**2 + gamma * tl
+    x2 = numerator_x2 / denominator_x2
+    
+    # expectation of V1 at (p + x2, alpha')
+    EV1 = (
+        (rho**2 * alpha**2 + sigma2) + 
+        2 * tl * (p + x2) * rho * alpha - 
+        tl * (p + x2)**2
+    ) / (2 * d)
+    
+    # Bellman update at iteration 2
+    V2_val = (
+        alpha * (p + x2)
+        - 0.5 * tl * x2**2
+        - 0.5 * (p + x2)**2
+        + gamma * EV1
+    )
+    return V2_val
+
+# Example usage
+if __name__ == "__main__":
+    # sample parameters
+    p_val = 1.0
+    alpha_val = 0.5
+    rho_val = 0.9
+    tl_val = 2.0
+    gamma_val = 0.95
+    sigma2_val = 0.1
+
+    result = V2(p_val, alpha_val, rho_val, tl_val, gamma_val, sigma2_val)
+    print(f"V2({p_val}, {alpha_val}) = {result:.4f}")
