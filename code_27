@@ -1,0 +1,202 @@
+import time, copy
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
+# ─── Hyper‑parameters ───────────────────────────────────────────────
+DEVICE         = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# outer fitted‑VI iterations
+N_OUTER_ITERS  = 100
+
+# size of the “big” sample per outer iteration
+SAMPLE_SIZE    = 10_000
+
+# inner fitted‑VI epochs + early stopping
+MAX_EPOCHS     = 200
+PATIENCE       = 5         # how many epochs w/o improvement
+MIN_DELTA      = 1e-4      # minimum loss drop to count as improvement
+
+# gradient‑accumulation
+BATCH_SIZE     = 128
+ACC_STEPS      = 2
+MICRO_BS       = BATCH_SIZE // ACC_STEPS
+
+# quantile approximation
+N_QUANTILES    = 20
+
+# problem constants
+GAMMA          = 0.99
+ACTIONS        = torch.tensor([-2., -1., 0., 1., 2.], device=DEVICE)   # shape [A]
+LR             = 1e-3
+WEIGHT_DECAY   = 1e-5
+
+# ─── Your model, feature & reward definitions ───────────────────────
+class ValueMLP(nn.Module):
+    def __init__(self, in_dim=15, hidden=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+    def forward(self, x):
+        # x: [B,feat_dim]
+        return self.net(x).squeeze(-1)  # → [B]
+
+def features(
+    p:   torch.Tensor,
+    a:   torch.Tensor,
+    c:   torch.Tensor,
+    rho: torch.Tensor,
+    tl:  torch.Tensor
+) -> torch.Tensor:
+    # broadcast all inputs
+    shape = torch.broadcast_shapes(p.shape, a.shape, c.shape, rho.shape, tl.shape)
+    p, a, c, rho, tl = [t.expand(shape) for t in (p, a, c, rho, tl)]
+
+    sp, sa = p.sign(), a.sign()
+    # stack whatever you like; here's the example from your screenshot:
+    phi = torch.stack([
+        p, a, sp, sa,
+        p*a, p*sa, a*sa,
+        p*p, a*a, sp*sa,
+        tl.abs(), p*tl, a*tl, sa*tl,
+        rho
+    ], dim=-1)  # → [..., 15]
+    return phi
+
+def reward(alpha, p, a, c, tl):
+    # immediate reward R(α,p,a,c,tl) → [B]
+    return - (p + a * c).abs()
+
+def resample_dataset(N):
+    # return P, α, c, tl, ρ each [N]
+    P   = torch.rand(N, device=DEVICE) * 10
+    α   = torch.rand(N, device=DEVICE)
+    c   = torch.rand(N, device=DEVICE) * 5
+    tl  = torch.rand(N, device=DEVICE) * 2
+    ρ   = torch.rand(N, device=DEVICE) * 0.9
+    return P, α, c, tl, ρ
+
+# ─── Precompute quantile z‐values ───────────────────────────────────
+# mid‐points of [0,1]: (0.5/20, 1.5/20, ... 19.5/20)
+qs      = (torch.arange(N_QUANTILES, device=DEVICE).float() + 0.5) / N_QUANTILES
+z_vals  = torch.sqrt(torch.tensor(2.0, device=DEVICE)) * torch.special.erfinv(2*qs - 1)
+# z_vals: [Q]
+
+# ─── Training loop ─────────────────────────────────────────────────
+def train_fitted_VI():
+    # 1) initialize frozen target network Vₜ
+    target_net = ValueMLP().to(DEVICE).eval()
+    for p in target_net.parameters():
+        p.requires_grad = False
+
+    for it in range(1, N_OUTER_ITERS+1):
+        print(f"\n=== Outer Iter {it}/{N_OUTER_ITERS} ===")
+        t0 = time.time()
+
+        # 2) sample one large batch of transitions
+        P_data, α_data, c_data, tl_data, ρ_data = resample_dataset(SAMPLE_SIZE)
+
+        # 3) copy it into a trainable model
+        model      = copy.deepcopy(target_net).train().to(DEVICE)
+        optimizer  = optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+        scaler     = torch.cuda.amp.GradScaler(device_type=DEVICE.type)
+
+        best_loss  = float('inf')
+        patience   = 0
+
+        # 4) inner fitted‐VI epochs with early stopping
+        for epoch in range(1, MAX_EPOCHS+1):
+            perm       = torch.randperm(SAMPLE_SIZE, device=DEVICE)
+            epoch_loss = 0.0
+            optimizer.zero_grad(set_to_none=True)
+
+            # break into BATCH_SIZE chunks
+            for bi in range(0, SAMPLE_SIZE, BATCH_SIZE):
+                idx     = perm[bi:bi+BATCH_SIZE]
+                p       = P_data[idx]        # [B]
+                α       = α_data[idx]
+                c       = c_data[idx]
+                tl      = tl_data[idx]
+                ρ       = ρ_data[idx]
+
+                # — vectorized quantiles for αₙₑₓₜ —
+                # mean & std: [B,1]
+                mu_q    = (α * ρ).unsqueeze(1)
+                sigma_q = torch.sqrt(1 - ρ*ρ).unsqueeze(1)
+                # α_next: [B, Q]
+                α_next  = mu_q + sigma_q * z_vals.unsqueeze(0)
+
+                # — vectorized actions + quantiles —
+                # P_next: [B, A, Q]
+                P_e     = p.unsqueeze(1).unsqueeze(2) + ACTIONS.view(1,-1,1)
+                P_e     = P_e.expand(-1, -1, N_QUANTILES)
+                α_e     = α_next.unsqueeze(1).expand(-1, ACTIONS.size(0), -1)
+                c_e     = c.unsqueeze(1).unsqueeze(2).expand(-1, ACTIONS.size(0), N_QUANTILES)
+                tl_e    = tl.unsqueeze(1).unsqueeze(2).expand(-1, ACTIONS.size(0), N_QUANTILES)
+                rho_e   = ρ.unsqueeze(1).unsqueeze(2).expand(-1, ACTIONS.size(0), N_QUANTILES)
+
+                # — build one big feature batch for target_net —
+                B,A,Q   = P_e.shape
+                feat_nxt= features(
+                    P_e.reshape(-1),
+                    α_e.reshape(-1),
+                    c_e.reshape(-1),
+                    rho_e.reshape(-1),
+                    tl_e.reshape(-1)
+                )                            # → [B*A*Q, feat_dim]
+                with torch.no_grad(), torch.cuda.amp.autocast():
+                    Vn = target_net(feat_nxt)  # [B*A*Q]
+                Vn        = Vn.view(B, A, Q)
+                V_avg     = Vn.mean(dim=2)   # [B, A]
+
+                # — compute Bellman max over A —
+                R_e       = reward(α.unsqueeze(1), p.unsqueeze(1), 
+                                   ACTIONS.view(1,-1), c.unsqueeze(1), tl.unsqueeze(1))
+                Q_targ    = R_e + GAMMA * V_avg   # [B, A]
+                Q_best, _ = Q_targ.max(dim=1)     # [B]
+
+                # — forward pass of trainable model —
+                with torch.cuda.amp.autocast():
+                    V_pred  = model(features(p, α, c, ρ, tl))  # [B]
+                    loss    = F.mse_loss(V_pred, Q_best, reduction='mean') / ACC_STEPS
+
+                scaler.scale(loss).backward()
+                epoch_loss += loss.item() * ACC_STEPS
+
+                # optimizer.step() every ACC_STEPS micro‑batches
+                micro_i = (bi // BATCH_SIZE) + 1
+                if micro_i % ACC_STEPS == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+
+            # end of all batches
+            avg_loss = epoch_loss / SAMPLE_SIZE
+            rel_imp  = (best_loss - avg_loss) / (best_loss + 1e-8)
+            print(f" Epoch {epoch:3d}  loss={avg_loss:.6f}  "
+                  f"(best={best_loss:.6f}, rel_imp={rel_imp:.2e}, pat={patience}/{PATIENCE})")
+
+            # early‑stopping check
+            if avg_loss + MIN_DELTA < best_loss:
+                best_loss = avg_loss
+                patience  = 0
+            else:
+                patience += 1
+
+            if patience >= PATIENCE:
+                print(f"  → early‐stopped at epoch {epoch}\n")
+                break
+
+        # sync the newly trained model back into target_net
+        target_net.load_state_dict(model.state_dict())
+
+        print(f"Completed outer iter {it} in {time.time() - t0:.1f}s.")
+
+    return target_net
+
+if __name__ == "__main__":
+    final_model = train_fitted_VI()
