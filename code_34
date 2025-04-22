@@ -1,0 +1,35 @@
+import numpy as np
+from scipy.stats import norm
+from scipy import integrate, optimize
+
+def V2_scalar(alpha, p, rho, t1, gamma=0.99):
+    """
+    V2 pour un alpha scalaire
+    """
+    # fonction à minimiser (on maximise x + ρ E[V1])
+    def obj_neg(x):
+        mu_ap = alpha - p*x                # <-- ici mu dépend de x
+        integrand = lambda ap: norm.pdf(ap, loc=mu_ap, scale=t1) * V1(ap, p, rho, t1, gamma)
+        EV1, _ = integrate.quad(integrand, -np.inf, np.inf)
+        return -(x + rho * EV1)
+    
+    # résolution de l’optimisation
+    res = optimize.minimize_scalar(obj_neg,
+                                   bounds=(0, alpha/p),
+                                   method='bounded')
+    x_star = res.x
+
+    # reconstruction de la valeur
+    mu_ap = alpha - p*x_star
+    integrand = lambda ap: norm.pdf(ap, loc=mu_ap, scale=t1) * V1(ap, p, rho, t1, gamma)
+    EV1, _ = integrate.quad(integrand, -np.inf, np.inf)
+    return x_star + rho * EV1
+
+def V2(alpha, p, rho, t1, gamma=0.99):
+    """
+    V2 peut prendre en entrée un scalaire ou un vecteur alpha.
+    """
+    alpha = np.atleast_1d(alpha)
+    V2_vals = np.array([V2_scalar(a, p, rho, t1, gamma) for a in alpha])
+    # si l'entrée était scalaire, on renvoie un scalaire
+    return V2_vals.item() if V2_vals.size==1 else V2_vals
