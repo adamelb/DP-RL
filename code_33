@@ -1,0 +1,56 @@
+import numpy as np
+from scipy.stats import norm
+from scipy import integrate, optimize
+
+def V1(p, alpha, rho, tl, gamma):
+    """
+    First iterate of the Bellman operator starting from V=0.
+    Closed‐form solution.
+    """
+    # optimal x*
+    x_star = (alpha - p) / (tl + 1)
+    d = p + x_star
+    # value
+    V = alpha * d \
+        - 0.5 * tl * x_star**2 \
+        - 0.5 * d**2
+    return V
+
+def V2(p, alpha, rho, tl, gamma):
+    """
+    Second Bellman iterate, V2 = B(V1).
+    Numerical integration over alpha' and 1D optimization in x.
+    """
+    # Precompute parameters of alpha' distribution
+    mu_ap = rho * alpha
+    sigma_ap = np.sqrt(1 - rho**2)
+    # define the inner Bellman objective as a function of x
+    def obj(x):
+        d = p + x
+        # immediate payoff
+        payoff = alpha * d - 0.5 * tl * x**2 - 0.5 * d**2
+        # expectation of V1 at (d, alpha')
+        integrand = lambda ap: V1(d, ap, rho, tl, gamma) * norm.pdf(ap, loc=mu_ap, scale=sigma_ap)
+        exp_V1, _ = integrate.quad(integrand, mu_ap - 5*sigma_ap, mu_ap + 5*sigma_ap)
+        return -(payoff + gamma * exp_V1)  # negative for minimization
+    
+    # find x that minimizes -objective (i.e., maximizes the objective)
+    res = optimize.minimize_scalar(obj, bounds=(-10, 10), method='bounded')
+    x_star = res.x
+    return -(res.fun)
+
+def V3(p, alpha, rho, tl, gamma):
+    """
+    Third Bellman iterate, V3 = B(V2).
+    Same structure as V2, but expectation of V2.
+    """
+    mu_ap = rho * alpha
+    sigma_ap = np.sqrt(1 - rho**2)
+    def obj(x):
+        d = p + x
+        payoff = alpha * d - 0.5 * tl * x**2 - 0.5 * d**2
+        integrand = lambda ap: V2(d, ap, rho, tl, gamma) * norm.pdf(ap, loc=mu_ap, scale=sigma_ap)
+        exp_V2, _ = integrate.quad(integrand, mu_ap - 5*sigma_ap, mu_ap + 5*sigma_ap)
+        return -(payoff + gamma * exp_V2)
+    res = optimize.minimize_scalar(obj, bounds=(-10,10), method='bounded')
+    return -(res.fun)
