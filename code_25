@@ -1,0 +1,150 @@
+import time, copy
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
+# ─── Hyper‑parameters ───────────────────────────────────────────────
+DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+N_ITER      = 100            # number of fitted‑VI iterations
+SAMPLE_SIZE = 10_000         # size of the “big” sample each iteration
+
+# Early‐stopping settings:
+MAX_EPOCHS  = 200            # absolute cap on epochs
+PATIENCE    = 5              # how many “dry” epochs before stopping
+MIN_DELTA   = 1e-4           # minimum loss improvement to reset patience
+
+LR          = 1e-3
+BATCH_SIZE  = 128
+ACC_STEPS   = 2
+MICRO_BS    = BATCH_SIZE // ACC_STEPS
+GAMMA       = 0.99
+M_SAMPLES   = 16
+ACTIONS     = torch.tensor([-2., -1., 0., 1., 2.], device=DEVICE)
+
+# ─── Problem‑specific stubs (fill these in) ─────────────────────────
+class MyNetwork(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(5, 64), nn.ReLU(),
+            nn.Linear(64, 64), nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+
+def features(p, alpha, c, rho, tl):
+    return torch.stack([p, alpha, c, rho, tl], dim=-1)
+
+def reward(alpha, p, a, c, tl):
+    return - (p + a * c).abs()
+
+def resample_dataset(N):
+    P   = torch.rand(N, device=DEVICE) * 10
+    α   = torch.rand(N, device=DEVICE)
+    c   = torch.rand(N, device=DEVICE) * 5
+    tl  = torch.rand(N, device=DEVICE) * 2
+    ρ   = torch.rand(N, device=DEVICE) * 0.9
+    return P, α, c, tl, ρ
+
+# ─── Fitted VI with Early‑Stopping ───────────────────────────────────
+def train_fitted_value_iteration():
+    # initialize frozen target net Vₜ
+    target_model = MyNetwork().to(DEVICE).eval()
+    for p in target_model.parameters():
+        p.requires_grad = False
+
+    for it in range(1, N_ITER+1):
+        print(f"\n=== Outer Iteration {it}/{N_ITER} ===")
+        t0 = time.time()
+
+        # 1) draw large batch
+        P_data, α_data, c_data, tl_data, ρ_data = resample_dataset(SAMPLE_SIZE)
+
+        # 2) make a fresh trainable copy of Vₜ
+        model     = copy.deepcopy(target_model).train()
+        optimizer = optim.Adam(model.parameters(), lr=LR)
+        scaler    = torch.cuda.amp.GradScaler(device_type=DEVICE.type)
+
+        # 3) epoch loop with early stopping
+        best_loss       = float('inf')
+        patience_count  = 0
+
+        for epoch in range(1, MAX_EPOCHS+1):
+            perm       = torch.randperm(SAMPLE_SIZE, device=DEVICE)
+            epoch_loss = 0.0
+
+            optimizer.zero_grad(set_to_none=True)
+            # break the large batch into BATCH_SIZE sub‑batches
+            for bi in range(0, SAMPLE_SIZE, BATCH_SIZE):
+                idx = perm[bi:bi + BATCH_SIZE]
+                p   = P_data[idx];   α   = α_data[idx]
+                c   = c_data[idx];   tl  = tl_data[idx]
+                ρ   = ρ_data[idx]
+
+                # ── Bellman targets via frozen target_model ──
+                with torch.no_grad(), torch.cuda.amp.autocast():
+                    eps         = torch.rand(BATCH_SIZE, M_SAMPLES, device=DEVICE)
+                    α_next      = α.unsqueeze(1)*ρ.unsqueeze(1) \
+                                + eps * torch.sqrt(1 - ρ.unsqueeze(1)**2)
+                    Q_best      = torch.full((BATCH_SIZE,), -1e9, device=DEVICE)
+
+                    for a_trd in ACTIONS:
+                        P_next = p + a_trd
+                        V_sum  = 0.0
+                        for m in range(M_SAMPLES):
+                            phi = features(
+                                P_next.unsqueeze(1),
+                                α_next[:, m],
+                                c, ρ, tl
+                            )
+                            V_sum += target_model(phi)
+                        V_avg = V_sum / M_SAMPLES
+
+                        R   = reward(α, p, a_trd, c, tl)
+                        Q   = R + GAMMA * V_avg
+                        Q_best = torch.maximum(Q_best, Q)
+
+                # ── forward + backward on trainable model ──
+                with torch.cuda.amp.autocast():
+                    V_s  = model(features(p, α, c, ρ, tl))
+                    loss = F.mse_loss(V_s, Q_best, reduction='mean') / ACC_STEPS
+
+                scaler.scale(loss).backward()
+                epoch_loss += loss.item() * ACC_STEPS
+
+                # optimizer.step() every ACC_STEPS micro‑batches
+                micro_idx = (bi // BATCH_SIZE) + 1
+                if micro_idx % ACC_STEPS == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+
+            epoch_loss /= SAMPLE_SIZE
+            print(f" Epoch {epoch:3d}   loss={epoch_loss:.6f}   "
+                  f"(best={best_loss:.6f}, patience={patience_count}/{PATIENCE})")
+
+            # early‑stopping logic
+            if best_loss - epoch_loss > MIN_DELTA:
+                best_loss      = epoch_loss
+                patience_count = 0
+            else:
+                patience_count += 1
+
+            if patience_count >= PATIENCE:
+                print(f" → early‐stopped at epoch {epoch}")
+                break
+
+        else:
+            # if we exit the for‐loop *without* break
+            print(f" ⚠️  reached MAX_EPOCHS={MAX_EPOCHS} without convergence!")
+
+        # 4) sync target_model ← model
+        target_model.load_state_dict(model.state_dict())
+        print(f"Finished Iter {it} in {time.time() - t0:.1f}s.")
+
+    return target_model
+
+if __name__ == "__main__":
+    final_model = train_fitted_value_iteration()
