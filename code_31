@@ -1,0 +1,180 @@
+import time, copy
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
+# ─── Hyper‑parameters ───────────────────────────────────────────────
+DEVICE         = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# outer fitted‑VI
+N_OUTER_ITERS  = 100
+SAMPLE_SIZE    = 10_000
+
+# inner fitted‑VI + early stopping
+MAX_EPOCHS     = 200
+PATIENCE       = 5
+MIN_DELTA      = 1e-4
+
+# gradient‑accumulation
+BATCH_SIZE     = 128
+ACC_STEPS      = 2
+
+# quantile approx
+N_QUANTILES    = 20
+
+# base learning‑rate settings
+BASE_LR        = 1e-3
+FINAL_LR_FRAC  = 0.1       # by the last outer iter, startLR = BASE_LR * FINAL_LR_FRAC
+MIN_LR_FRAC    = 0.01      # within each iteration, decay down to startLR * MIN_LR_FRAC
+
+WEIGHT_DECAY   = 1e-4      # now used in AdamW
+
+# problem constants
+GAMMA          = 0.99
+ACTIONS        = torch.tensor([-2., -1., 0., 1., 2.], device=DEVICE)
+
+# ─── Model + utils (unchanged) ──────────────────────────────────────
+class ValueMLP(nn.Module):
+    def __init__(self, in_dim=15, hidden=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+
+def features(p,a,c,rho,tl):
+    shape = torch.broadcast_shapes(p.shape,a.shape,c.shape,rho.shape,tl.shape)
+    p,a,c,rho,tl = [t.expand(shape) for t in (p,a,c,rho,tl)]
+    sp, sa = p.sign(), a.sign()
+    return torch.stack([
+        p, a, sp, sa,
+        p*a, p*sa, a*sa,
+        p*p, a*a, sp*sa,
+        tl.abs(), p*tl, a*tl, sa*tl,
+        rho
+    ], dim=-1)
+
+def reward(α,p,a,c,tl):
+    return - (p + a*c).abs()
+
+def resample_dataset(N):
+    return (
+        torch.rand(N, device=DEVICE)*10,
+        torch.rand(N, device=DEVICE),
+        torch.rand(N, device=DEVICE)*5,
+        torch.rand(N, device=DEVICE)*2,
+        torch.rand(N, device=DEVICE)*0.9,
+    )
+
+# precompute mid‑quantile z’s
+qs     = (torch.arange(N_QUANTILES, device=DEVICE).float()+0.5)/N_QUANTILES
+z_vals = torch.sqrt(torch.tensor(2.0, device=DEVICE)) * torch.special.erfinv(2*qs - 1)
+
+# ─── Training loop with improved scheduling ─────────────────────────
+def train_fitted_VI():
+    # 1) build net + frozen copy
+    net = ValueMLP().to(DEVICE)
+    target_net = copy.deepcopy(net).eval()
+    for p in target_net.parameters(): p.requires_grad = False
+
+    # 2) one optimizer for all outer iterations
+    optimizer      = optim.AdamW(net.parameters(), lr=BASE_LR, weight_decay=WEIGHT_DECAY)
+    # 3) macro scheduler: exponential decay of the *start* LR
+    outer_gamma    = (FINAL_LR_FRAC)**(1/(N_OUTER_ITERS-1))
+    outer_scheduler= optim.lr_scheduler.ExponentialLR(optimizer, gamma=outer_gamma)
+
+    scaler = torch.cuda.amp.GradScaler()
+
+    for it in range(1, N_OUTER_ITERS+1):
+        print(f"\n=== Outer {it}/{N_OUTER_ITERS} | start‐LR={optimizer.param_groups[0]['lr']:.2e} ===")
+        t0 = time.time()
+        P_data, α_data, c_data, tl_data, ρ_data = resample_dataset(SAMPLE_SIZE)
+
+        # 4) micro scheduler for this iteration
+        start_lr = optimizer.param_groups[0]['lr']
+        min_lr   = start_lr * MIN_LR_FRAC
+        micro_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=MAX_EPOCHS,
+            eta_min=min_lr
+        )
+
+        best_loss, patience = float('inf'), 0
+        for epoch in range(1, MAX_EPOCHS+1):
+            perm, epoch_loss = torch.randperm(SAMPLE_SIZE, device=DEVICE), 0.0
+            optimizer.zero_grad(set_to_none=True)
+
+            # break into BATCH‐SIZE batches
+            for bi in range(0, SAMPLE_SIZE, BATCH_SIZE):
+                idx = perm[bi:bi+BATCH_SIZE]
+                p, α, c, tl, ρ = (P_data[idx], α_data[idx], c_data[idx],
+                                 tl_data[idx], ρ_data[idx])
+
+                # build α_next via mid‐quantiles
+                mu_q    = (α*ρ).unsqueeze(1)
+                sigma_q = torch.sqrt(1-ρ*ρ).unsqueeze(1)
+                α_next  = mu_q + sigma_q * z_vals.unsqueeze(0)  # [B, Q]
+
+                # vectorized next‐states [B,A,Q]
+                B = p.size(0)
+                P_e   = (p.unsqueeze(1).unsqueeze(2) + ACTIONS.view(1,-1,1)
+                        ).expand(-1,-1,N_QUANTILES)
+                α_e   = α_next.unsqueeze(1).expand(-1,ACTIONS.size(0),-1)
+                c_e   = c.unsqueeze(1).unsqueeze(2).expand(-1,ACTIONS.size(0),N_QUANTILES)
+                tl_e  = tl.unsqueeze(1).unsqueeze(2).expand(-1,ACTIONS.size(0),N_QUANTILES)
+                rho_e = ρ.unsqueeze(1).unsqueeze(2).expand(-1,ACTIONS.size(0),N_QUANTILES)
+
+                feat_nxt = features(
+                    P_e.reshape(-1), α_e.reshape(-1),
+                    c_e.reshape(-1), rho_e.reshape(-1),
+                    tl_e.reshape(-1)
+                )
+                with torch.no_grad(), torch.cuda.amp.autocast():
+                    Vn   = target_net(feat_nxt).view(B, -1, N_QUANTILES)
+                    Vavg = Vn.mean(dim=2)
+
+                R_e     = reward(α.unsqueeze(1), p.unsqueeze(1),
+                                 ACTIONS.view(1,-1),
+                                 c.unsqueeze(1), tl.unsqueeze(1))
+                Q_targ  = R_e + GAMMA * Vavg
+                Q_best, _ = Q_targ.max(dim=1)
+
+                with torch.cuda.amp.autocast():
+                    V_pred = net(features(p,α,c,ρ,tl))
+                    loss   = F.mse_loss(V_pred, Q_best, reduction='mean')/ACC_STEPS
+
+                scaler.scale(loss).backward()
+                epoch_loss += loss.item()*ACC_STEPS
+                if ((bi//BATCH_SIZE)+1) % ACC_STEPS == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+
+            avg_loss = epoch_loss / SAMPLE_SIZE
+            print(f" Epoch {epoch:3d}  loss={avg_loss:.6f}  lr={optimizer.param_groups[0]['lr']:.2e}"
+                  f"  (best={best_loss:.6f}, pat={patience}/{PATIENCE})")
+
+            micro_scheduler.step()
+
+            # early stopping
+            if avg_loss + MIN_DELTA < best_loss:
+                best_loss, patience = avg_loss, 0
+            else:
+                patience += 1
+            if patience >= PATIENCE:
+                print(f"  → early‐stopped at epoch {epoch}\n")
+                break
+
+        # sync and step the macro scheduler
+        target_net.load_state_dict(net.state_dict())
+        outer_scheduler.step()
+        print(f"Completed outer {it} in {time.time()-t0:.1f}s.")
+
+    return net
+
+if __name__ == "__main__":
+    final_model = train_fitted_VI()
