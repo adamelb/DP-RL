@@ -1,0 +1,44 @@
+import math, torch
+from torch.distributions import Normal
+
+def truncated_normal_bin_means(N: int,
+                               device: torch.device = None,
+                               eps: float = 1e-6
+                              ) -> torch.Tensor:
+    """
+    Returns a tensor m_k of shape [N], where
+      m_k = E[X | X in the k-th equal-prob bin]
+    for X ~ N(0,1).
+    We clamp probabilities away from 0/1 by `eps` to avoid ±inf.
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 1) build the equal-prob edges [0, 1/N, 2/N, ..., 1]
+    probs = torch.linspace(0, 1, N+1, device=device)
+
+    # 2) clamp to avoid exact 0 or 1
+    lower = probs[:-1].clamp(min=eps, max=1-eps)  # [N]
+    upper = probs[1: ].clamp(min=eps, max=1-eps)  # [N]
+
+    # 3) invert to get the z-edges a_k, b_k
+    std_normal = Normal(0.0, 1.0)
+    a_k = std_normal.icdf(lower)  # [N]
+    b_k = std_normal.icdf(upper)  # [N]
+
+    # 4) pdf of standard normal
+    def phi(x: torch.Tensor) -> torch.Tensor:
+        return torch.exp(-0.5 * x*x) / math.sqrt(2 * math.pi)
+
+    # 5) truncated means: (φ(a_k) - φ(b_k)) / (1/N) = N * [φ(a_k)-φ(b_k)]
+    m_k = (phi(a_k) - phi(b_k)) * N
+
+    return m_k
+
+# ── Example ─────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    N = 20
+    m = truncated_normal_bin_means(N, device)
+    print("bin means m_k:", m)
+    print("sorted? ", m[1:] >= m[:-1])  # should all be True
