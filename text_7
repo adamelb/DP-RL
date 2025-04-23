@@ -1,0 +1,30 @@
+\section{Quantile-Based Approximation for Bellman Backup}
+
+\subsection*{Motivation and Efficiency}
+
+To accelerate the Bellman backup step and reduce the variance inherent in Monte Carlo sampling, we replace stochastic sampling with a quantile-based expectation approximation. Rather than drawing random samples from a standard normal distribution for each state transition, we precompute deterministic means of the standard normal over fixed quantile intervals.
+
+\subsection*{Quantile Mean Computation}
+
+Let the standard normal distribution be partitioned into \( K \) equal-probability intervals using quantiles \( \{q_0, q_1, \dots, q_K\} \), where \( q_0 = -\infty \), \( q_K = +\infty \), and each interval satisfies:
+
+\[
+\Phi(q_k) - \Phi(q_{k-1}) = \frac{1}{K}, \quad \text{for all } k = 1, \dots, K
+\]
+
+We then compute the mean of the standard normal within each interval:
+
+\[
+m_k = \frac{1}{\Phi(q_k) - \Phi(q_{k-1})} \int_{q_{k-1}}^{q_k} z \cdot \phi(z) \, dz
+= K \cdot \int_{q_{k-1}}^{q_k} z \cdot \phi(z) \, dz
+\]
+
+These means \( \{m_1, \dots, m_K\} \) are fixed once and reused in all value computations. For any state \( s = (p, \alpha, \rho, c, t_\lambda) \) and action \( x \), the expectation over the next signal \( \alpha' \) under AR(1) dynamics is approximated by:
+
+\[
+\mathbb{E}_{\alpha'}[V(p+x, \alpha')] 
+\approx 
+\frac{1}{K} \sum_{k=1}^{K} V(p+x, \rho \cdot \alpha + \sqrt{1 - \rho^2} \cdot m_k)
+\]
+
+This avoids repeated sampling during training and significantly reduces computational cost while retaining a smooth and low-variance approximation of the expected future value.
