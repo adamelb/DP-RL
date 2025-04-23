@@ -1,0 +1,79 @@
+import numpy as np
+
+def optimal_x(p, α, tl, c):
+    """
+    Closed-form argmax x^* in [-1,1] of
+      α*(p+x) - 0.5*tl*x^2 - 0.5*(p+x)^2 - c*|x|.
+    """
+    # candidate in [0,1]
+    x_plus = (α - p - c) / (tl + 1)
+    x_star_plus = min(max(x_plus, 0.0), 1.0)
+
+    # candidate in [-1,0]
+    x_minus = (α - p + c) / (tl + 1)
+    x_star_minus = min(max(x_minus, -1.0), 0.0)
+
+    # evaluate the three
+    def f(x):
+        return (
+            α*(p + x)
+            - 0.5*tl*x*x
+            - 0.5*(p + x)**2
+            - c*abs(x)
+        )
+
+    vals = [(x_star_plus, f(x_star_plus)),
+            (x_star_minus, f(x_star_minus)),
+            (0.0, f(0.0))]
+
+    # pick the x with largest f
+    x_opt, _ = max(vals, key=lambda pair: pair[1])
+    return x_opt
+
+
+def bellman_operator(V_old, p, α, ρ, c, tl, γ, n_samples=10_000):
+    """
+    Generic Bellman operator T[V_old] at state (p, α).
+    Approximates the expectation by Monte Carlo on α'.
+    """
+    # 1) compute optimal x
+    x_star = optimal_x(p, α, tl, c)
+
+    # 2) immediate payoff
+    immediate = (α*(p + x_star)
+                 - 0.5*tl*x_star**2
+                 - 0.5*(p + x_star)**2
+                 - c*abs(x_star))
+
+    # 3) sample α' ~ N(ρ α, 1-ρ²)
+    eps = np.random.randn(n_samples) * np.sqrt(1 - ρ**2)
+    alphas_next = ρ*α + eps
+
+    # 4) approximate E[V_old(p+x, α')]
+    p_next = p + x_star
+    V_samples = np.array([V_old(p_next, an) for an in alphas_next])
+    expected = V_samples.mean()
+
+    return immediate + γ * expected
+
+
+def V1(p, α, ρ, c, tl, γ):
+    """
+    First iterate of the Bellman equation, starting from V0≡0:
+      V1(p,α) = T[V0](p,α) = max (immediate payoff) + γ*0.
+    """
+    # since V0 is 0, expectation term vanishes:
+    x_star = optimal_x(p, α, tl, c)
+    return (
+        α*(p + x_star)
+        - 0.5*tl*x_star**2
+        - 0.5*(p + x_star)**2
+        - c*abs(x_p, α = 0.5, 1.2
+
+
+ρ, c, tl, γ = 0.9, 2.0, 10.0, 0.95
+
+print("x* =", optimal_x(p, α, tl, c))
+print("V1 =", V1(p, α, ρ, c, tl, γ))
+print("Bellman(T,V1) ≈", bellman_operator(V1, p, α, ρ, c, tl, γ))
+
