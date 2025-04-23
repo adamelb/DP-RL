@@ -1,0 +1,44 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+def optimal_x(p, alpha, tl, c):
+    x_plus = (alpha - p - c) / (tl + 1)
+    x_star_plus = np.minimum(np.maximum(x_plus, 0), 1)
+    x_minus = (alpha - p + c) / (tl + 1)
+    x_star_minus = np.minimum(np.maximum(x_minus, -1), 0)
+    f_plus = alpha*(p + x_star_plus) - 0.5*tl*x_star_plus**2 - 0.5*(p + x_star_plus)**2 - c*abs(x_star_plus)
+    f_minus = alpha*(p + x_star_minus) - 0.5*tl*x_star_minus**2 - 0.5*(p + x_star_minus)**2 - c*abs(x_star_minus)
+    f_zero = alpha*p - 0.5*p**2
+    x_opts = [x_star_plus, x_star_minus, 0.0]
+    f_vals = [f_plus, f_minus, f_zero]
+    return x_opts[int(np.argmax(f_vals))]
+
+def V1(p, alpha, c, tl):
+    x_star = optimal_x(p, alpha, tl, c)
+    return alpha*(p + x_star) - 0.5*tl*x_star**2 - 0.5*(p + x_star)**2 - c*abs(x_star)
+
+# Fixed parameters (modify these as needed)
+c = 2.0
+tl = 10.0
+
+# Grid for p and alpha in [-1,1]
+N = 50
+p_vals = np.linspace(-1, 1, N)
+alpha_vals = np.linspace(-1, 1, N)
+P, A = np.meshgrid(p_vals, alpha_vals)
+V = np.zeros_like(P)
+
+for i in range(N):
+    for j in range(N):
+        V[i, j] = V1(P[i, j], A[i, j], c, tl)
+
+# Plotting the 3D surface
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+ax.plot_surface(P, A, V)
+ax.set_xlabel('p')
+ax.set_ylabel('alpha')
+ax.set_zlabel('V1(p, alpha)')
+ax.set_title(f'V1 Surface (c={c}, tl={tl})')
+plt.show()
