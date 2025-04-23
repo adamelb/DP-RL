@@ -1,0 +1,29 @@
+\subsection*{True Bin-Mean of a Truncated Normal}
+
+To approximate the expectation of a standard normal random variable using quantile bins, we compute the true mean over each interval rather than simply using midpoints.
+
+We define the mean value within the $k$-th bin as:
+\[
+m_k = \mathbb{E} \left[ X \,\middle|\, F^{-1}(q_{k-1}) < X < F^{-1}(q_k) \right]
+\]
+
+For each bin $[q_{k-1}, q_k]$, there is a closed-form expression involving the standard normal probability density function $\phi$ and the cumulative distribution function $\Phi$:
+
+\[
+m_k = \frac{\phi(a_k) - \phi(b_k)}{\Phi(b_k) - \Phi(a_k)}
+\quad \text{where} \quad
+a_k = \Phi^{-1}(q_{k-1}), \quad
+b_k = \Phi^{-1}(q_k)
+\]
+
+If the bins are uniformly spaced in probability, meaning:
+\[
+\Phi(b_k) - \Phi(a_k) = \frac{1}{N}
+\]
+
+Then this simplifies to:
+\[
+m_k = N \cdot \left[ \phi(a_k) - \phi(b_k) \right]
+\]
+
+These $m_k$ values can be precomputed once and reused in all expectation approximations
