@@ -1,0 +1,81 @@
+import numpy as np
+import torch
+
+class EarlyStopping:
+    """
+    Stops the training if validation loss doesn’t improve after a given patience.
+    """
+    def __init__(self, patience=5, min_delta=0.0, verbose=False, path='checkpoint.pt'):
+        """
+        Args:
+            patience (int): how many epochs to wait after last time validation loss improved.
+            min_delta (float): minimum change in the monitored quantity to qualify as an improvement.
+            verbose (bool): if True, prints a message for each validation loss improvement.
+            path (str): where to save the best model.
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.verbose = verbose
+        self.path = path
+
+        self.best_loss = np.Inf
+        self.counter = 0
+        self.early_stop = False
+
+    def __call__(self, val_loss, model):
+        if val_loss < self.best_loss - self.min_delta:
+            if self.verbose:
+                print(f'Validation loss improved ({self.best_loss:.6f} → {val_loss:.6f}).  Saving model …')
+            self.best_loss = val_loss
+            self.counter = 0
+            # save checkpoint of best model so far
+            torch.save(model.state_dict(), self.path)
+        else:
+            self.counter += 1
+            if self.verbose:
+                print(f'No improvement in validation loss for {self.counter}/{self.patience} epochs.')
+            if self.counter >= self.patience:
+                if self.verbose:
+                    print('Early stopping triggered.')
+                self.early_stop = True
+
+
+# instantiate early-stopper
+early_stopper = EarlyStopping(
+    patience=10,        # stop after 10 epochs with no improvement
+    min_delta=1e-4,     # require at least this much improvement
+    verbose=True,
+    path='best_model.pt'
+)
+
+for epoch in range(1, num_epochs+1):
+    model.train()
+    train_loss = 0.0
+    for xb, yb in train_loader:
+        optimizer.zero_grad()
+        preds = model(xb)
+        loss = criterion(preds, yb)
+        loss.backward()
+        optimizer.step()
+        train_loss += loss.item() * xb.size(0)
+    train_loss /= len(train_loader.dataset)
+
+    model.eval()
+    val_loss = 0.0
+    with torch.no_grad():
+        for xb, yb in val_loader:
+            preds = model(xb)
+            loss = criterion(preds, yb)
+            val_loss += loss.item() * xb.size(0)
+    val_loss /= len(val_loader.dataset)
+
+    print(f"Epoch {epoch:3d} — train_loss: {train_loss:.4f}, val_loss: {val_loss:.4f}")
+
+    # check early stopping
+    early_stopper(val_loss, model)
+    if early_stopper.early_stop:
+        print(f"Stopping early at epoch {epoch}")
+        break
+
+# later, to load best model back:
+model.load_state_dict(torch.load('best_model.pt'))
