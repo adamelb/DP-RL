@@ -1,0 +1,97 @@
+\section{Quantile-Based Approximation for Bellman Backup}
+
+\subsection*{Motivation and Efficiency}
+
+To reduce the variance and computational overhead associated with Monte Carlo simulation of the Bellman operator, we replace the stochastic sampling with a quantile-based approximation. Instead of sampling $M$ normal noise realizations at each backup step, we precompute a set of $K$ quantiles from the standard normal distribution (e.g., $K = 20$). These quantiles are fixed once and reused across all states and iterations. This strategy leads to significantly faster and more stable value estimates.
+
+\subsection*{Quantile Mean Evaluation}
+
+For a state $s = (p, \alpha, \rho, c, t_\lambda)$ and action $x$, we evaluate:
+\[
+\mathbb{E}_{\alpha'}[V(p+x, \alpha')] 
+\approx 
+\frac{1}{K} \sum_{k=1}^{K} V\left(p+x, \rho \alpha + \sqrt{1 - \rho^2} \cdot q_k\right),
+\]
+where $q_k$ is the $k$-th quantile of $\mathcal{N}(0,1)$.
+
+This precomputed structure removes the need to generate new random samples for every state transition, saving both memory and time during training.
+
+\section{Section 1: Convergence Validation on Initial Iterations}
+
+\subsection{First Iteration with Known Closed-Form}
+
+To verify the soundness of the training pipeline and the Bellman implementation, we begin with a simplified setting:
+\begin{itemize}
+    \item Terminal value function: $V_T = 0$
+    \item Linear cost coefficient: $c = 0$
+\end{itemize}
+
+Under these conditions, we know the analytical form of the Bellman update. Specifically, for any state $s_i = (p_i, \alpha_i, \rho, c, t_\lambda)$, the value at $T-1$ becomes:
+
+\[
+V_{T-1}(s_i) = \max_{x_i} \left\{
+\alpha_i(p_i + x_i) 
+- \frac{1}{2} t_\lambda x_i^2 
+- \frac{1}{2} \lambda (p_i + x_i)^2 
+\right\}.
+\]
+
+This expression reduces to a quadratic maximization, yielding an explicit optimal $x_i^*$ and corresponding value $V_{T-1}$.
+
+We then use this $V_{T-1}$ as a ground truth and compare it with the neural network output after one iteration. This serves as a **sanity check** to verify the Bellman operator is correctly implemented and that the training dynamics are effective.
+
+\subsection{Second Iteration Convergence}
+
+To further validate the robustness of the model, we compute $V_{T-2}(s)$ based on a Bellman backup using the known $V_{T-1}$. While no longer analytically solvable, this iteration can be computed using the same quantile approximation method and provides a second benchmark for neural convergence.
+
+A well-implemented algorithm should preserve the structure of the value function and show consistent convergence over these early iterations.
+
+\subsection{Plots}
+
+\begin{itemize}
+    \item Fix $\rho$, $t_\lambda$, and $c$
+    \item Plot $V_{T-1}(p, \alpha)$ and its neural approximation over a grid in $(p, \alpha) \in [-1, 1]^2$
+    \item Repeat for $V_{T-2}$ and its neural estimate
+\end{itemize}
+
+These plots will provide a clear visualization of how well the neural network captures the true value surface over the first two iterations.
+
+\section{Section 2: Full Model Convergence and Policy Evaluation}
+
+Once the early iterations are verified to match analytical and semi-analytical references, we train the full model by repeating Bellman iterations until convergence toward the fixed point.
+
+\subsection{Final Value Approximation}
+
+The value function after sufficient iterations is assumed to approximate the fixed point of the Bellman operator. We use this final function $V_0$ to extract policies and evaluate performance.
+
+\subsection{Policy Evaluation}
+
+We simulate AR(1) paths of $\alpha_i$ under fixed $(\rho, c, t_\lambda)$ and run two policies:
+\begin{itemize}
+    \item the one derived from the tabular DP method,
+    \item the one induced by the neural value function.
+\end{itemize}
+
+\subsection{Evaluation Metric}
+
+To compare both policies, we use the relative deviation in expected reward:
+
+\[
+\text{Error} =
+\frac{
+\mathbb{E}_{\text{path}}[ R^{\text{Tabular}} ] -
+\mathbb{E}_{\text{path}}[ R^{\text{NN}} ]
+}{
+\mathbb{E}_{\text{path}}[ R^{\text{Tabular}} ]
+}
+\]
+
+This metric provides a quantitative measure of how well the learned policy generalizes across states and parameters.
+
+\subsection{Plots}
+
+\begin{itemize}
+    \item Plot cumulative reward trajectories for both policies.
+    \item Plot relative error metric as a function of $(\rho, c, t_\lambda)$.
+    \item Optionally show policy surfaces or action maps derived from $V_0$.
+\end{itemize}
