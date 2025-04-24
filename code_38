@@ -1,0 +1,43 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+# — assume —
+# V       : np.ndarray, shape (600,600), covering p,alpha in [-3,3]
+# (if you have 601×601 replace 600 below with 601)
+
+# 1) reconstruct the original grid
+N = V.shape[0]           # 600
+P_space = np.linspace(-3, 3, N)
+A_space = P_space.copy() # square grid
+
+# 2) find indices within [-1,1]
+mask = (P_space >= -1) & (P_space <= 1)
+idx_full = np.where(mask)[0]      # contiguous block
+
+# down‐sample to 200 indices
+idx200 = np.linspace(idx_full[0], idx_full[-1], 200).astype(int)
+
+# corresponding p/alpha arrays
+p200     = P_space[idx200]        # length 200
+alpha200 = A_space[idx200]        # length 200
+
+# 3) extract the 200×200 submatrix of V
+V_sub = V[np.ix_(idx200, idx200)] # shape (200,200)
+
+# 4) plot
+P, A = np.meshgrid(p200, alpha200)
+
+fig = plt.figure(figsize=(8,6))
+ax  = fig.add_subplot(111, projection='3d')
+surf = ax.plot_surface(P, A, V_sub,
+                       cmap='viridis',
+                       rstride=1, cstride=1,
+                       linewidth=0, antialiased=True)
+ax.set_xlabel('p')
+ax.set_ylabel('alpha')
+ax.set_zlabel('V(p,alpha)')
+ax.set_title('V on [-1,1]^2 (200×200 sample)')
+fig.colorbar(surf, shrink=0.6, aspect=10, label='V value')
+plt.tight_layout()
+plt.show()
