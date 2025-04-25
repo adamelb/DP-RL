@@ -1,0 +1,136 @@
+"""
+ADP critic with zero‑initialised target net (first outer iter)
+============================================================
+Change requested:
+* **Outer‑1**: target network outputs exactly 0 everywhere.  
+  From outer‑2 onward we continue copying the fitted model as before.
+
+Implementation
+--------------
+```python
+if outer == 1:
+    target.apply(lambda m: nn.init.zeros_(m.weight)
+                             if isinstance(m, nn.Linear) else None)
+    target.apply(lambda m: nn.init.zeros_(m.bias)
+                             if isinstance(m, nn.Linear) and m.bias is not None else None)
+else:
+    target.load_state_dict(model.state_dict())
+```
+All other logic (anchor loss, cosine LR) remains unchanged.
+"""
+from __future__ import annotations
+import math, time
+from pathlib import Path
+from typing import Tuple
+import numpy as np, torch, torch.nn as nn, torch.nn.functional as F
+from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from tqdm import trange
+
+# ---- constants ---------------------------------------------------------------
+SEED, DEVICE = 42, torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+np.random.seed(SEED); torch.manual_seed(SEED)
+
+GAMMA, VALUE_SCALE = 0.90, 100.0
+C_MIN, C_MAX = 0.0, 10.0
+TL_MIN, TL_MAX = 10.0, 1000.0
+RHO_MIN, RHO_MAX = 0.70, 0.99
+
+ACTIONS = torch.linspace(-1., 1., 101, device=DEVICE)
+
+N_DATASET, BATCH, M_SAMPLES = 2_000, 512, 64
+OUTER_ITERS, INNER_EPOCHS = 20, 400
+ACC_STEPS = 2
+LR0, OUTER_DECAY, WD = 5e-4, 0.9, 1e-4
+ETA_MIN_RATIO = 1/100
+CLIP, LAMBDA_ANCHOR = 1.0, 1e-2
+
+# ---- helpers -----------------------------------------------------------------
+
+def resample_dataset(n=N_DATASET):
+    p = torch.randn(n, DEVICE)
+    a = torch.randn_like(p)
+    c = torch.rand_like(p)*(C_MAX-C_MIN)+C_MIN
+    tl = torch.rand_like(p)*(TL_MAX-TL_MIN)+TL_MIN
+    rho = torch.rand_like(p)*(RHO_MIN-RHO_MAX)+RHO_MAX  # uniform on [min,max]
+    return p, a, c, tl, rho
+
+F_FEAT = 15
+
+def features(p,a,c,tl,rho):
+    p,a,c,tl,rho = torch.broadcast_tensors(p,a,c,tl,rho)
+    sp, sa = torch.sign(p), torch.sign(a)
+    return torch.stack([
+        p, a, p*a, p*p, a*a,
+        sp*sa, a*sp, p*sa,
+        c*p.abs(), tl*(p*p), c*a.abs(), a*tl.abs(),
+        c, tl, rho,
+    ], -1)
+
+def reward(a,p,x,c,tl):
+    p_new=p+x
+    r=a*p_new - c*x.abs() - 0.5*tl*x**2 - 0.5*p_new**2
+    return r/VALUE_SCALE
+
+# ---- model -------------------------------------------------------------------
+class VNet(nn.Module):
+    def __init__(self, hidden=(512,256,256)):
+        super().__init__(); d=F_FEAT; layers=[]
+        for h in hidden:
+            layers += [nn.Linear(d,h), nn.LayerNorm(h), nn.ReLU()]; d=h
+        layers.append(nn.Linear(d,1)); self.f=nn.Sequential(*layers)
+        self.apply(self._init)
+    @staticmethod
+    def _init(m):
+        if isinstance(m,nn.Linear): nn.init.orthogonal_(m.weight); nn.init.zeros_(m.bias)
+    def forward(self,x): return self.f(x).squeeze(-1)
+
+# ---- training step -----------------------------------------------------------
+@torch.compile(dynamic=True)
+def step(model,target,opt,scaler,p,a,c,tl,rho):
+    bs=p.size(0)
+    v_s=model(features(p,a,c,tl,rho))
+    eps=torch.randn(bs,M_SAMPLES,device=DEVICE)
+    a_next=a[:,None]*rho[:,None]+eps*torch.sqrt(1-rho[:,None]**2)
+    p_rep=p[:,None,None]; c_rep=c[:,None,None]; tl_rep=tl[:,None,None]; rho_rep=rho[:,None,None]
+    p_next=p_rep+ACTIONS.view(1,-1,1); p_next=p_next.expand(-1,-1,M_SAMPLES)
+    a_b=a_next[:,None,:].expand_as(p_next)
+    c_b=c_rep.expand_as(p_next); tl_b=tl_rep.expand_as(p_next); rho_b=rho_rep.expand_as(p_next)
+    v_next=target(features(p_next,a_b,c_b,tl_b,rho_b).view(-1,F_FEAT)).view(bs,-1,M_SAMPLES).mean(-1)
+    q=(reward(a[:,None],p[:,None],ACTIONS,c[:,None],tl[:,None])+GAMMA*v_next).max(1).values
+    anchor=model(features(torch.zeros_like(c),torch.zeros_like(c),c,tl,rho)).pow(2).mean()
+    loss=F.mse_loss(v_s,q.detach())+LAMBDA_ANCHOR*anchor
+    scaler.scale(loss).backward(); return loss
+
+# ---- outer loop --------------------------------------------------------------
+model,target=VNet().to(DEVICE),VNet().to(DEVICE)
+scaler=torch.cuda.amp.GradScaler(True)
+
+for outer in range(1,OUTER_ITERS+1):
+    LR_outer=LR0*OUTER_DECAY**(outer-1)
+    opt=Adam(model.parameters(),lr=LR_outer,weight_decay=WD)
+    sched=CosineAnnealingLR(opt,T_max=INNER_EPOCHS,eta_min=LR_outer*ETA_MIN_RATIO)
+    pdat,adat,cdat,tldat,rhodat=resample_dataset()
+
+    # target initialisation --------------------------------------------------
+    if outer==1:
+        for m in target.modules():
+            if isinstance(m,nn.Linear):
+                nn.init.zeros_(m.weight); nn.init.zeros_(m.bias)
+    else:
+        target.load_state_dict(model.state_dict())
+    target.eval()
+
+    t0=time.time(); epoch_loss=0.0
+    for ep in range(1,INNER_EPOCHS+1):
+        opt.zero_grad(set_to_none=True)
+        for _ in range(ACC_STEPS):
+            idx=torch.randint(0,N_DATASET,(BATCH//ACC_STEPS,),device=DEVICE)
+            loss=step(model,target,opt,scaler,pdat[idx],adat[idx],cdat[idx],tldat[idx],rhodat[idx])
+            epoch_loss+=loss.item()
+        scaler.unscale_(opt); nn.utils.clip_grad_norm_(model.parameters(),CLIP)
+        scaler.step(opt); scaler.update(); sched.step()
+        if ep%200==0: target.load_state_dict(model.state_dict())
+    print(f"outer {outer}/{OUTER_ITERS} | loss {(epoch_loss/INNER_EPOCHS):.3e} | lr0 {LR_outer:.1e} | Δt {time.time()-t0:.1f}s")
+
+Path("model_final.pt").write_bytes(torch.save(model.state_dict(),'model_final.pt'))
