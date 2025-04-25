@@ -1,0 +1,134 @@
+"""
+ADP critic − full state (p, α, c, τ, ρ) + cosine LR schedule
+============================================================
+* τ (tl) and ρ are now **state variables**, added back to the feature vector.
+* **Adam** optimiser (not AdamW) with uniform weight‑decay (biases included).
+* Two‑level LR schedule
+    1. **Outer** iteration: initial‑LR decays geometrically → `LR0 * OUTER_DECAY**(outer‑1)`
+    2. **Inner** loop (epochs): cosine annealing from that initial LR down to `eta_min = LR_outer/100`.
+* Symmetry in (p, α) is guaranteed by invariant features.
+* Anchor loss enforces `V(0,0,c,τ,ρ)=0` for all (c,τ,ρ).
+* Retains torch.compile and mixed precision for speed.
+"""
+from __future__ import annotations
+import math, time
+from pathlib import Path
+from typing import Tuple
+import numpy as np, torch, torch.nn as nn, torch.nn.functional as F
+from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from tqdm import trange
+
+# ---- constants ---------------------------------------------------------------
+SEED, DEVICE = 42, torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+np.random.seed(SEED); torch.manual_seed(SEED)
+
+GAMMA, VALUE_SCALE = 0.90, 100.0        # discount & reward scaling
+C_MIN, C_MAX = 0.0, 10.0                # c range
+TL_MIN, TL_MAX = 10.0, 1000.0           # τ range
+RHO_MIN, RHO_MAX = 0.70, 0.99           # ρ range
+
+ACTIONS = torch.linspace(-1., 1., 101, device=DEVICE)
+
+N_DATASET, BATCH, M_SAMPLES = 2_000, 512, 64
+OUTER_ITERS, INNER_EPOCHS = 20, 400
+ACC_STEPS = 2
+LR0, OUTER_DECAY, WD = 5e-4, 0.9, 1e-4
+ETA_MIN_RATIO = 1/100                      # eta_min = LR_inner*ratio
+CLIP, LAMBDA_ANCHOR = 1.0, 1e-2
+
+# ---- helpers -----------------------------------------------------------------
+
+def resample_dataset(n=N_DATASET):
+    p = torch.randn(n, DEVICE)
+    a = torch.randn_like(p)
+    c = torch.rand_like(p)*(C_MAX-C_MIN)+C_MIN
+    tl = torch.rand_like(p)*(TL_MAX-TL_MIN)+TL_MIN
+    rho = torch.rand_like(p)*(RHO_MAX-RHO_MIN)+RHO_MIN
+    return p, a, c, tl, rho
+
+F_FEAT = 15
+
+def features(p,a,c,tl,rho):
+    shape = torch.broadcast_shapes(p.shape,a.shape,c.shape,tl.shape,rho.shape)
+    p,a,c,tl,rho = [t.expand(shape) for t in (p,a,c,tl,rho)]
+    sp, sa = torch.sign(p), torch.sign(a)
+    return torch.stack([
+        p, a,
+        p*a, p*p, a*a,
+        sp*sa, a*sp, p*sa,
+        c*p.abs(), tl*(p*p), c*a.abs(), a*tl.abs(),
+        c, tl, rho,
+    ], -1)
+
+def reward(a, p, x, c, tl):
+    p_new = p + x
+    r = a*p_new - c*x.abs() - 0.5*tl*x**2 - 0.5*p_new**2
+    return r / VALUE_SCALE
+
+# ---- model -------------------------------------------------------------------
+class VNet(nn.Module):
+    def __init__(self, hidden=(512,256,256)):
+        super().__init__(); d=F_FEAT; layers=[]
+        for h in hidden:
+            layers += [nn.Linear(d,h), nn.LayerNorm(h), nn.ReLU()]; d=h
+        layers.append(nn.Linear(d,1)); self.f=nn.Sequential(*layers); self.apply(self._init)
+    @staticmethod
+    def _init(m):
+        if isinstance(m,nn.Linear): nn.init.orthogonal_(m.weight); nn.init.zeros_(m.bias)
+    def forward(self,x): return self.f(x).squeeze(-1)
+
+# ---- single micro‑step (compiled) -------------------------------------------
+
+def step(model,target,opt,scaler,p,a,c,tl,rho):
+    bs=p.size(0)
+    v_s = model(features(p,a,c,tl,rho))
+    eps=torch.randn(bs,M_SAMPLES,device=DEVICE)
+    a_next=a.unsqueeze(1)*rho.unsqueeze(1)+eps*torch.sqrt(1-rho.unsqueeze(1)**2)
+
+    p_rep=p[:,None,None]; c_rep=c[:,None,None]; tl_rep=tl[:,None,None]; rho_rep=rho[:,None,None]
+    p_next = p_rep + ACTIONS.view(1,-1,1)
+    p_next = p_next.expand(-1,-1,M_SAMPLES)
+    a_next_b = a_next[:,None,:].expand_as(p_next)
+    c_b=c_rep.expand_as(p_next); tl_b=tl_rep.expand_as(p_next); rho_b=rho_rep.expand_as(p_next)
+
+    v_next = target(features(p_next,a_next_b,c_b,tl_b,rho_b).view(-1,F_FEAT)).view(bs,-1,M_SAMPLES).mean(-1)
+    r = reward(a[:,None],p[:,None],ACTIONS,c[:,None],tl[:,None])
+    q_best = (r + GAMMA*v_next).max(1).values
+
+    # anchor: V(0,0,c,tl,rho)=0 -------------------------------------------
+    phi0 = features(torch.zeros_like(c),torch.zeros_like(c),c,tl,rho)
+    anchor = model(phi0).pow(2).mean()
+
+    loss = F.mse_loss(v_s,q_best.detach()) + LAMBDA_ANCHOR*anchor
+    scaler.scale(loss).backward(); return loss
+
+step = torch.compile(step, dynamic=True)
+
+# ---- training outer loop ------------------------------------------------------
+model, target = VNet().to(DEVICE), VNet().to(DEVICE)
+scaler = torch.cuda.amp.GradScaler(True)
+
+for outer in range(1, OUTER_ITERS+1):
+    LR_outer = LR0 * (OUTER_DECAY ** (outer-1))
+    opt = Adam(model.parameters(), lr=LR_outer, weight_decay=WD)
+    scheduler = CosineAnnealingLR(opt, T_max=INNER_EPOCHS, eta_min=LR_outer*ETA_MIN_RATIO)
+
+    # refresh dataset & target copy once per outer iter
+    pdat, adat, cdat, tldat, rhodat = resample_dataset()
+    target.load_state_dict(model.state_dict()); target.eval()
+
+    t_iter=time.time(); epoch_loss=0.0
+    for epoch in range(1, INNER_EPOCHS+1):
+        opt.zero_grad(set_to_none=True)
+        for _ in range(ACC_STEPS):
+            idx=torch.randint(0,N_DATASET,(BATCH//ACC_STEPS,),device=DEVICE)
+            loss = step(model,target,opt,scaler,
+                         pdat[idx],adat[idx],cdat[idx],tldat[idx],rhodat[idx])
+            epoch_loss += loss.item()
+        scaler.unscale_(opt); nn.utils.clip_grad_norm_(model.parameters(),CLIP)
+        scaler.step(opt); scaler.update(); scheduler.step()
+        if epoch%200==0: target.load_state_dict(model.state_dict())
+    print(f"outer {outer}/{OUTER_ITERS} | mean epoch loss {(epoch_loss/INNER_EPOCHS):.3e} | lr0 {LR_outer:.1e} | Δt {time.time()-t_iter:.1f}s")
+
+Path("model_final.pt").write_bytes(torch.save(model.state_dict(),'model_final.pt'))
