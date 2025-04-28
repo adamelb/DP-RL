@@ -1,0 +1,226 @@
+# ==========================================================
+#  Value-Function Learning pour 3 actions avec impact linéaire
+# ==========================================================
+#
+#  * Inventaire       p  ∈ ℝ³
+#  * Alpha (signal)   α  ∈ ℝ³     AR(1) avec coeffs ρ
+#  * Impact résiduel  i  ∈ ℝ³     iₜ₊₁ = φ ⊙ iₜ + k ⊙ xₜ
+#
+#  Récompense instantanée
+#      r(s,x) = αᵀ(p+x) − c·|x| − ½ xᵀ(t+k)x − ½ λ (p+x)ᵀΣ(p+x) − iᵀx
+#
+#  V(s) = maxₓ  r(s,x) + γ 𝔼[V(s')]
+#
+# ----------------------------------------------------------
+import itertools, math, time, copy, random, functools
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.distributions import Normal, MultivariateNormal
+
+# ---------- 1. Configuration générale ---------------------------------------
+SEED               = 0
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+
+DEVICE             = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+DIM                = 3                    # nombre d’actions
+GAMMA              = 0.99                 # facteur d’actualisation
+LAMBDA_RISK        = 1.0                  # aversion au risque λ
+N_DATASET          = 30_000               # états tirés hors-ligne
+BATCH_SIZE         = 512
+N_EPOCHS           = 50
+LR                 = 2e-3
+WEIGHT_DECAY       = 1e-4                 # L2 sur les poids
+N_ACTIONS_1D       = 41                   # grille unidimensionnelle -1…+1
+ACTION_GRID_1D     = torch.linspace(-1., 1., N_ACTIONS_1D, device=DEVICE)
+ACTION_GRID_CARTE  = torch.tensor(list(itertools.product(
+                             ACTION_GRID_1D, ACTION_GRID_1D, ACTION_GRID_1D)),
+                             device=DEVICE)                                   # (A,3)
+N_ACTIONS          = ACTION_GRID_CARTE.shape[0]
+
+# ---------- 2. Génération d’une matrice de corrélation Σ --------------------
+def random_correlation_matrix(dim: int = DIM) -> torch.Tensor:
+    """
+    Génère une matrice de corrélation SPD via la méthode de Bendel-Mickey :
+    Σ = QΛQᵀ puis normalisation -> diag(Σ)=1.
+    """
+    A = torch.randn(dim, dim)
+    Q, _ = torch.linalg.qr(A)
+    l = torch.rand(dim) + 0.5          # valeurs propres positives
+    Σ   = (Q * l).matmul(Q.T)
+    d   = torch.sqrt(torch.diag(Σ))
+    Σ   = Σ / (d.outer(d))             # renormalise en vraies corrélations
+    return Σ.to(DEVICE)
+
+SIGMA = random_correlation_matrix()    # constante pendant tout le run
+SIGMA_CHOL = torch.linalg.cholesky(SIGMA)   # pour simuler le bruit
+
+# ---------- 3. Hyper-paramètres à tirer aléatoirement -----------------------
+RHO_MIN, RHO_MAX = 0.0, 1.0            # autocorrélation alpha
+C_MIN,  C_MAX    = 0.0, 10.0           # coût linéaire
+T_MIN,  T_MAX    = 1.0, 1000.0         # coût quadratique temporaire
+K_MIN,  K_MAX    = 0.0,  1.0           # slippage linéaire
+TAU_MIN, TAU_MAX = 1.0, 20.0           # temps de décroissance de l’impact
+
+# ---------- 4. Génération d’un batch d’états hors-ligne ---------------------
+@torch.no_grad()
+def resample_dataset(n: int = N_DATASET):
+    """
+    Tire n états (p, α, i, c, t, k, ρ, τ, φ) indépendants ;
+    l’impact résiduel initial i₀ est mis à 0 (optionnelment aléatoire).
+    """
+    p     = torch.empty((n, DIM), device=DEVICE).uniform_(-1., 1.)
+    alpha = torch.empty((n, DIM), device=DEVICE).uniform_(-1., 1.)
+    impact= torch.zeros_like(p)                           # i₀ = 0 (facultatif : rand)
+    c     = torch.empty((n, DIM), device=DEVICE).uniform_(C_MIN,  C_MAX)
+    t     = torch.empty((n, DIM), device=DEVICE).uniform_(T_MIN,  T_MAX)
+    k     = torch.empty((n, DIM), device=DEVICE).uniform_(K_MIN,  K_MAX)
+    rho   = torch.empty((n, DIM), device=DEVICE).uniform_(RHO_MIN, RHO_MAX)
+    tau   = torch.empty((n, DIM), device=DEVICE).uniform_(TAU_MIN, TAU_MAX)
+    phi   = torch.exp(-1. / tau)                         # φ = e^{-1/τ}
+    return p, alpha, impact, c, t, k, rho, tau, phi
+
+# ---------- 5. Construction de features f(s) --------------------------------
+def features(p, alpha, impact, c, t, k, rho, phi):
+    """
+    Concatène des composantes invariantes par permutation de signe
+    (|.|) et leurs signes afin d’aider le réseau.
+    """
+    comps = [
+        p, alpha, impact,
+        c, t, k, rho, phi,
+        torch.abs(p), torch.abs(alpha), torch.abs(impact),
+        torch.sign(p), torch.sign(alpha)
+    ]
+    return torch.cat(comps, dim=-1)                       # shape (..., F)
+
+_F = features(*[torch.zeros((1, DIM), device=DEVICE) for _ in range(8)]).numel()
+
+# ---------- 6. Reward instantanée r(s,a) ------------------------------------
+def reward(alpha, p, impact, x, c, t, k):
+    """
+    Implémente exactement :
+        r = αᵀ(p+x) − c·|x| − ½ xᵀ(t+k) x − ½ λ (p+x)ᵀ Σ (p+x) − impactᵀ x
+    α, p, impact, x, c, t, k : (...,3)
+    """
+    p_new   = p + x
+    lin_co  = (alpha * p_new).sum(dim=-1)
+    exec_lin= (c * torch.abs(x)).sum(dim=-1)
+    quad    = 0.5 * ((t + k) * x**2).sum(dim=-1)
+    risk    = 0.5 * LAMBDA_RISK * \
+              torch.einsum('...i,ij,...j->...', p_new, SIGMA, p_new)
+    impact_term = (impact * x).sum(dim=-1)
+    return lin_co - exec_lin - quad - risk - impact_term   # shape (...)
+
+# ---------- 7. Réseau de valeur V_\theta ------------------------------------
+class ValueMLP(nn.Module):
+    def __init__(self, dim_in=_F):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim_in, 128), nn.ReLU(),
+            nn.Linear(128, 128),    nn.ReLU(),
+            nn.Linear(128, 128),    nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+    def forward(self, φ):      # φ shape (batch, _F)
+        return self.net(φ).squeeze(-1)   # shape (batch,)
+
+# ---------- 8. Pas de dynamique : s --a--> s' -------------------------------
+def step_dynamics(p, alpha, impact, x, rho, phi, k):
+    """
+    Construit le prochain état s' donné s et action x.
+    * alpha'  = rho ⊙ alpha + √(1-rho²) ε   avec ε~N(0,Σ)
+    * p'      = p + x
+    * impact' = phi ⊙ (impact + k ⊙ x)
+    """
+    # bruit gaussien multivarié corrélé
+    ε_std = torch.randn_like(alpha) @ SIGMA_CHOL.T      # shape (...,3)
+    alpha_next = rho * alpha + torch.sqrt(1. - rho**2) * ε_std
+    p_next     = p + x
+    impact_next= phi * (impact + k * x)
+    return p_next, alpha_next, impact_next
+
+# ---------- 9.  Boucle d’entraînement --------------------------------------
+def train_value_function():
+    # 9-1  dataset hors-ligne
+    p_ds, a_ds, i_ds, c_ds, t_ds, k_ds, rho_ds, tau_ds, phi_ds = resample_dataset()
+    N = p_ds.size(0)
+
+    model = ValueMLP().to(DEVICE)
+    target = copy.deepcopy(model).eval()
+    for p in target.parameters(): p.requires_grad_(False)
+
+    opt = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.99)
+
+    start = time.time()
+    for epoch in range(1, N_EPOCHS+1):
+        perm = torch.randperm(N, device=DEVICE)
+        epoch_loss = 0.0
+        for batch_start in range(0, N, BATCH_SIZE):
+            idx = perm[batch_start:batch_start+BATCH_SIZE]
+            p      = p_ds[idx];   alpha = a_ds[idx];  impact = i_ds[idx]
+            c      = c_ds[idx];   t     = t_ds[idx];  k      = k_ds[idx]
+            rho    = rho_ds[idx]; phi   = phi_ds[idx]
+
+            # ---------- valeurs actuelles ----------------------------------
+            φ      = features(p, alpha, impact, c, t, k, rho, phi)
+            V_pred = model(φ)                                        # (B,)
+
+            # ---------- énumération des actions (ACTIONS x B) ------------
+            #  actions : (A,3)  ->  (B,A,3)
+            x_all   = ACTION_GRID_CARTE.unsqueeze(0).expand(p.size(0), -1, -1)
+
+            # broadcast states (B,1,3) -> (B,A,3)
+            p_b     = p.unsqueeze(1).expand_as(x_all)
+            a_b     = alpha.unsqueeze(1).expand_as(x_all)
+            i_b     = impact.unsqueeze(1).expand_as(x_all)
+            c_b     = c.unsqueeze(1).expand_as(x_all)
+            t_b     = t.unsqueeze(1).expand_as(x_all)
+            k_b     = k.unsqueeze(1).expand_as(x_all)
+            rho_b   = rho.unsqueeze(1).expand_as(x_all)
+            phi_b   = phi.unsqueeze(1).expand_as(x_all)
+
+            # reward immédiat
+            r_immed = reward(a_b, p_b, i_b, x_all, c_b, t_b, k_b)   # (B,A)
+
+            # next state
+            p_n, a_n, i_n = step_dynamics(p_b, a_b, i_b, x_all, rho_b, phi_b, k_b)
+            φ_next  = features(p_n, a_n, i_n, c_b, t_b, k_b, rho_b, phi_b)
+            φ_next  = φ_next.view(-1, _F)
+            with torch.no_grad():
+                v_next = target(φ_next).view(p.size(0), N_ACTIONS)   # (B,A)
+
+            q_values = r_immed + GAMMA * v_next                     # (B,A)
+            v_target = q_values.max(dim=1).values                   # (B,)
+
+            # ---------- MSE -------------------------------------------------
+            loss = nn.functional.mse_loss(V_pred, v_target)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            epoch_loss += loss.item() * p.size(0)
+
+        # mise à jour soft du réseau cible
+        with torch.no_grad():
+            tau_soft = 0.01
+            for θ_t, θ in zip(target.parameters(), model.parameters()):
+                θ_t.data.mul_(1-tau_soft).add_(tau_soft * θ.data)
+
+        scheduler.step()
+        print(f"[Epoch {epoch:02d}] loss = {epoch_loss/N:.6f}")
+
+    print(f"Entraînement terminé en {time.time()-start:.1f} s")
+    return model
+
+# ----------- 10. Exemple d’appel -------------------------------------------
+if __name__ == '__main__':
+    trained_model = train_value_function()
+
+    # --- évaluation sur un état aléatoire (drawn on the fly) ---------------
+    p, alpha, impact, c, t, k, rho, tau, phi = [x[:1] for x in resample_dataset(1)]
+    φ = features(p, alpha, impact, c, t, k, rho, phi)
+    v_hat = trained_model(φ)
+    print("\nValeur estimée V̂(s) =", v_hat.item())
