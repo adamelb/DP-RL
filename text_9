@@ -1,0 +1,112 @@
+%----------------------------------------------------------
+%  Modèle d’impact multiday à impact linéaire & déclin exponentiel
+%----------------------------------------------------------
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\odot}{\!\circ\!}  % produit de Hadamard
+\newcommand{\E}{\mathbb{E}}
+
+%----------------------------------------------------------
+% 1. Table de notations
+%----------------------------------------------------------
+\begin{center}
+\begin{tabular}{cll}
+\toprule
+Symbole & Type (dimension) & Signification \\ \midrule
+$p_t$          & vecteur $\in\R^{3}$           & Inventaire (positions) détenu juste \emph{avant} le trade $t$ \\
+$\alpha_t$     & vecteur $\in\R^{3}$           & Alpha (signal prévisible) avant trading \\
+$i_t$          & vecteur $\in\R^{3}$           & Impact résiduel encore présent dans le carnet \\
+$x_t$          & vecteur $\in\R^{3}$           & Action de trading (ordre signé) au temps $t$ \\
+$\rho$         & vecteur $\in(-1,1)^{3}$       & Coefficients AR(1) individuels des alphas \\
+$\Sigma$       & matrice $\in\mathbb{S}_{++}^{3}$ & Matrice de covariance des chocs gaussiens \\
+$k$            & vecteur $\in\R_{+}^{3}$       & Coefficients d’impact linéaire ``self–impact'' \\
+$c$            & vecteur $\in\R_{+}^{3}$       & Coûts d’exécution linéaires \\
+$t$            & vecteur $\in\R_{+}^{3}$       & Coûts quadratiques temporaires \\
+$\lambda$      & scalaire $>0$                 & Aversion au risque instantané \\
+$\Phi$         & matrice $\diag(\phi_1,\phi_2,\phi_3)\!,\;0<\phi_i<1$ & Facteur de décroissance exponentielle ($\phi_i=e^{-\Delta/\tau_i}$) \\
+$K$            & matrice $\diag(k)$            & Version diagonale de $k$ \\
+$T$            & matrice $\diag(t)+\diag(k)$   & Coûts quadratiques totaux (temp. + impact) \\
+$G$            & matrice                     & Matrice de Cholesky $\bigl(I-\diag\rho^{2}\bigr)^{1/2}\Sigma^{1/2}$ \\
+$\gamma$       & scalaire $\in(0,1)$           & Facteur d’actualisation dynamique \\
+$\varepsilon_{t}$ & vecteur $\mathcal N(0,\Sigma)$ & Bruit gaussien corrélé entre actifs \\
+$s_t$          & vecteur $\in\R^{9}$           & État \;\; $s_t=(p_t,\alpha_t,i_t)$ \\
+$V(\cdot)$     & fonction $\R^{9}\!\to\R$     & Fonction de valeur optimale \\ \bottomrule
+\end{tabular}
+\end{center}
+
+%----------------------------------------------------------
+% 2. Dynamique de l’état
+%----------------------------------------------------------
+\[
+\boxed{
+\begin{aligned}
+\alpha_{t+1} &= \rho\odot\alpha_t \;+\; \bigl(I-\diag\rho^{2}\bigr)^{1/2}\varepsilon_{t+1}, \\[4pt]
+i_{t+1}      &= \Phi\,i_t + K\,x_t, \\[4pt]
+p_{t+1}      &= p_t + x_t.
+\end{aligned}}
+\]
+
+%----------------------------------------------------------
+% 3. Récompense instantanée
+%----------------------------------------------------------
+Le coût de slippage dû au stock d’impact $i_t$ et au nouvel ordre $x_t$ est
+\(
+i_t^{\top}x_t + \tfrac12\,k^{\top}x_t^{\odot2}.
+\)
+En agrégeant profit, coûts et risque :
+
+\[
+\boxed{
+r(s_t,x_t)=
+\underbrace{\alpha_t^{\top}(p_t+x_t)}_{\text{profit prévisible}}
+-\underbrace{c^{\top}|x_t|}_{\text{coût linéaire}}
+-\tfrac12\,x_t^{\top}T x_t
+-\tfrac12\,\lambda\,(p_t+x_t)^{\top}\Sigma(p_t+x_t)
+-\underbrace{i_t^{\top}x_t}_{\text{impact résiduel}} }.
+\]
+
+%----------------------------------------------------------
+% 4. Équation de Bellman
+%----------------------------------------------------------
+\[
+\boxed{
+V(p,\alpha,i)=
+\max_{x\in\R^{3}}
+\Bigl\{
+\alpha^{\top}(p+x)
+-c^{\top}|x|
+-\tfrac12\,x^{\top}T x
+-\tfrac12\,\lambda\,(p+x)^{\top}\Sigma(p+x)
+-i^{\top}x
++\gamma\;
+\E_{\varepsilon}\bigl[
+V\!\bigl(p+x,\,
+         \rho\odot\alpha+G\varepsilon,\,
+         \Phi i+Kx\bigr)
+\bigr]
+\Bigr\}
+}.
+\]
+
+%----------------------------------------------------------
+% 5. Lecture des composantes
+%----------------------------------------------------------
+\begin{itemize}
+  \item \textbf{Profit prévisible} : $\alpha^{\top}(p+x)$.
+  \item \textbf{Frais d’exécution} : linéaire $c^{\top}|x|$ ; quadratique $x^{\top}T x/2$ comprenant le coût temporaire $t$ et l’impact direct $k$.
+  \item \textbf{Impact résiduel} : terme linéaire $i^{\top}x$ ; le résidu évolue via $i_{t+1}=\Phi i_t+Kx_t$.
+  \item \textbf{Risque instantané} : $-\frac12\lambda(p+x)^{\top}\Sigma(p+x)$.
+  \item \textbf{Actualisation \& transitions} : l’espérance $\E_{\varepsilon}$ est prise sur le bruit gaussien du signal, tandis que l’inventaire et l’impact suivent des dynamiques déterministes pour un contrôle donné $x$.
+\end{itemize}
+
+%----------------------------------------------------------
+% 6. Comment résoudre ?
+%----------------------------------------------------------
+Avec des constantes données $(k,c,t,\lambda,\rho,\Sigma,\Phi,\gamma)$ le problème est un contrôle stochastique discret à horizon infini.  
+Deux approches courantes :
+
+\begin{enumerate}
+  \item \emph{Approximation quadratique} (type LQG) : on linéarise le terme $|x|$ ou on suppose $x_t$ suffisamment petit pour l’ignorer, menant à une solution analytique de type Riccati.
+  \item \emph{Programmation dynamique numérique} : maillage sur $(p,i)$, quadrature gaussienne sur $\alpha$ ou régression/RL pour approximer $V$.
+\end{enumerate}
