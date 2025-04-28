@@ -1,0 +1,43 @@
+def next_states_quad(p, a, impact, x, rho, phi, k, z_vals=Z_VALUES):
+    """
+    p,a,impact,x,rho,phi,k : (B, A, 3)
+    → p',a',impact'        : (B, A, Q, 3)
+    """
+    B, A, _ = x.shape
+    Q = z_vals.numel()
+
+    # --- broadcast des états ------------------------------------------------
+    # (B,A,1,3) -> (B,A,Q,3)
+    expand = lambda t: t.unsqueeze(2).expand(-1, -1, Q, -1)
+    p, a, impact, rho, phi, k, x = map(expand, (p, a, impact, rho, phi, k, x))
+
+    # --- bruit : z_k  répété sur les 3 dimensions ---------------------------
+    # eps_uncorr  (Q,1) -> (B,A,Q,3)
+    eps_uncorr = z_vals.view(1, 1, Q, 1).expand(B, A, Q, 3)
+    # corrélation via Σ^{1/2}
+    eps_corr = torch.matmul(eps_uncorr, SIGMA_CHOL.T)    # (B,A,Q,3)
+
+    # --- dynamique ----------------------------------------------------------
+    a_next = rho * a + torch.sqrt(1. - rho ** 2) * eps_corr
+    p_next = p + x
+    i_next = phi * (impact + k * x)
+    return p_next, a_next, i_next                        # (B,A,Q,3)
+
+# reward immédiat ─ (B,A)
+r_im = reward(a_b, p_b, imp_b, x_all, c_b, t_b, k_b)
+
+# états suivants sur Q nœuds déterministes
+p_n, a_n, i_n = next_states_quad(p_b, a_b, imp_b,
+                                 x_all, rho_b, phi_b, k_b)     # (B,A,Q,3)
+
+φ_next = features(p_n, a_n, i_n,
+                  c_b.unsqueeze(2), t_b.unsqueeze(2),
+                  k_b.unsqueeze(2), rho_b.unsqueeze(2),
+                  phi_b.unsqueeze(2))                          # (B,A,Q,F)
+φ_next = φ_next.view(-1, _F)
+with torch.no_grad():
+    v_next = target(φ_next).view(B, A, N_QUANT)                # (B,A,Q)
+
+v_exp  = v_next.mean(dim=2)                                    # (B,A)
+q_val  = r_im + GAMMA * v_exp
+v_targ = q_val.max(dim=1).values                               # (B,)
