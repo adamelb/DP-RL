@@ -1,3 +1,20 @@
+Pour simuler un processus $AR(1)$ multivarié avec une matrice de corrélation $\Sigma$, 
+on procède ainsi :
+
+\[
+\varepsilon_{t+1} \sim \mathcal{N}(0, I),
+\quad\quad
+\eta_{t+1} = L\,\varepsilon_{t+1}
+\quad\quad\text{où}\quad L = \text{Cholesky}(\Sigma)
+\]
+
+Ainsi, $\eta_{t+1}$ suit bien une loi $\mathcal{N}(0, \Sigma)$ 
+car la décomposition de Cholesky $L$ satisfait $LL^\top = \Sigma$.
+On injecte alors ce bruit corrélé dans la dynamique de l'AR(1).
+
+
+
+
 def next_state(p, a, i, x, rho, phi, k, z):        # all tensors on GPU
     """
     p,a,i,x : (B , A_c , 3)
