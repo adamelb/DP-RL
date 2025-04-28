@@ -1,3 +1,19 @@
+\[
+\begin{aligned}
+&X\sim\mathcal{N}(0, I_3),\\
+&\text{QR-décomposition :}\quad X = Q\,R,\quad Q^\top Q = I_3,\\
+&\lambda_i \overset{\mathrm{iid}}{\sim} \mathcal{U}[0.5,\,1.5],\quad 
+ D = \mathrm{diag}(\lambda_1,\lambda_2,\lambda_3),\\
+&A = Q\,D\,Q^\top\quad (\text{symétrique définie positive}),\\
+&C_{ij} 
+ = \frac{A_{ij}}{\sqrt{A_{ii}\,A_{jj}}}
+ \quad\Longrightarrow\quad
+ C = (C_{ij})_{1\le i,j\le 3}\ \text{est une matrice de corrélation.}
+\end{aligned}
+\]
+
+
+
 Pour simuler un processus $AR(1)$ multivarié avec une matrice de corrélation $\Sigma$, 
 on procède ainsi :
 
