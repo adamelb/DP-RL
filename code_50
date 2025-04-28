@@ -1,3 +1,57 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D   # noqa: F401
+
+def V1_vec(alpha1, alpha2, p, tl, phi, imbalance):
+    A = alpha1 + alpha2
+    B = p
+    a = 1.5 * tl * (1 - phi)
+    b = 1 + tl * phi * imbalance
+
+    if abs(a) < 1e-12:                             # cas quasi-linéaire
+        x_star = (A - B) / b
+    else:
+        c = -(A - B)
+        disc = np.maximum(b*b - 4*a*c, 0.0)
+        sqrt_disc = np.sqrt(disc)
+        x1 = (-b + sqrt_disc) / (2*a)
+        x2 = (-b - sqrt_disc) / (2*a)
+
+        def F(x):
+            imb_t = (1 - phi)*x + phi*imbalance
+            return A*(B + x) - 0.5*tl*imb_t*x**2 - 0.5*(B + x)**2
+
+        x_star = np.where(F(x1) > F(x2), x1, x2)
+
+    imb_t = (1 - phi)*x_star + phi*imbalance
+    V = A*(B + x_star) - 0.5*tl*imb_t*x_star**2 - 0.5*(B + x_star)**2
+    return V, x_star
+
+
+# ---- paramètres "figés" ------------------------------------------------------
+alpha2    = 0.2
+tl        = 0.05
+phi       = 0.3
+imbalance = 0.0
+
+# grille alpha1 × p
+alpha1_vals = np.linspace(-1, 1, 60)
+p_vals      = np.linspace(-1, 1, 60)
+A_grid, P_grid = np.meshgrid(alpha1_vals, p_vals, indexing='ij')
+
+V_grid, _ = V1_vec(A_grid, alpha2, P_grid, tl, phi, imbalance)
+
+# ---- plot --------------------------------------------------------------------
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+ax.plot_surface(A_grid, P_grid, V_grid, rstride=1, cstride=1,
+                linewidth=0, antialiased=False)
+ax.set_xlabel(r'$\alpha_1$')
+ax.set_ylabel(r'$p$')
+ax.set_zlabel(r'$V_1$')
+plt.tight_layout(); plt.show()
+
+
 
 import math
 from typing import Tuple
