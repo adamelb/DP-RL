@@ -1,0 +1,186 @@
+# ================================================================
+#   Memory-efficient Bellman iterations (CPU dataset → GPU fit)
+# ================================================================
+import math, itertools, copy, time, numpy as np, torch, torch.nn as nn
+from torch.distributions import Normal
+# ------------------------------------------------ config ---------
+DIM   = 3
+A_1D  = 21                     # -> |A| = 21³ = 9261
+N_Q   = 10                     # quantiles
+BATCH = 500
+N_DAT = 10_000
+N_EPOCH = 40
+N_ITER  = 6
+A_CHUNK = 512                  # streamed per mini step
+Q_CHUNK = 5
+LR   = 3e-3
+GAMMA = 0.99
+LAMBDA = 1.0
+DEVICE = torch.device('cuda:0')
+DTYPE  = torch.bfloat16        # H100 native
+SEED = 0
+torch.manual_seed(SEED); np.random.seed(SEED)
+# ------------------------------------------------ helpers --------
+def bin_means(N:int, device='cpu', eps=1e-6):
+    """mean of N equiprobable bins of N(0,1)."""
+    p   = torch.linspace(0., 1., N+1, device=device)
+    lo, up = p[:-1].clamp(eps,1-eps), p[1:].clamp(eps,1-eps)
+    icdf = Normal(0.,1.).icdf
+    a, b = icdf(lo), icdf(up)
+    phi  = lambda x: torch.exp(-0.5*x*x)/math.sqrt(2*math.pi)
+    return (phi(a)-phi(b))/(up-lo)          # (N,)
+Z_CPU = bin_means(N_Q)                      # stays on CPU
+# full action grid on CPU
+a1 = torch.linspace(-1.,1.,A_1D)
+ACTION_CPU = torch.tensor(list(itertools.product(a1,a1,a1))) # (A,3)
+A_TOTAL = ACTION_CPU.size(0)
+# ------------------------------------------------ random Σ -------
+def random_corr(d=DIM):
+    q,_=torch.linalg.qr(torch.randn(d,d))
+    lam=torch.rand(d)+.5
+    s=(q*lam).matmul(q.T)
+    d=torch.sqrt(torch.diag(s));   return s/d.outer(d)
+SIGMA = random_corr().to(DEVICE)
+SIG_CH = torch.linalg.cholesky(SIGMA)
+
+# ------------- dataset (CPU) ------------------------------------
+RHO_MIN,RHO_MAX,C_MIN,C_MAX,T_MIN,T_MAX = 0.,1.,0.,10.,1.,1e3
+K_MIN,K_MAX,TAU_MIN,TAU_MAX = 0.,1.,1.,20.
+def build_dataset(n=N_DAT):
+    p  = torch.empty(n,DIM).uniform_(-1,1)
+    a  = torch.empty_like(p).uniform_(-1,1)
+    i  = torch.zeros_like(p)
+    c  = torch.empty_like(p).uniform_(C_MIN,C_MAX)
+    t  = torch.empty_like(p).uniform_(T_MIN,T_MAX)
+    k  = torch.empty_like(p).uniform_(K_MIN,K_MAX)
+    rho= torch.empty_like(p).uniform_(RHO_MIN,RHO_MAX)
+    tau= torch.empty_like(p).uniform_(TAU_MIN,TAU_MAX)
+    phi= torch.exp(-1./tau)
+    return [x.pin_memory() for x in (p,a,i,c,t,k,rho,phi)]
+DATA_CPU = build_dataset()
+
+# ------------- feature builder (broadcast safe) -----------------
+def features(*tensors):
+    # broadcast to common shape (… ,3) then concat dim-1
+    tgt = torch.broadcast_shapes(*[x.shape for x in tensors])
+    T = [x.expand(tgt) for x in tensors]
+    p,a,i,c,t,k,rho,phi = T
+    return torch.cat(
+        (p,a,i,c,t,k,rho,phi,
+         p.abs(),a.abs(),i.abs(),
+         p.sign(),a.sign()), dim=-1)
+
+F_DIM = features(*[torch.zeros(1,3)]*8).size(-1)
+
+# ------------- reward -------------------------------------------
+def reward(alpha,p,impact,x,c,t,k):
+    p_new = p+x
+    return (alpha*p_new).sum(-1) \
+        - (c*x.abs()).sum(-1) \
+        - 0.5*((t+k)*x**2).sum(-1) \
+        - 0.5*LAMBDA*torch.einsum('...i,ij,...j->...',p_new,SIGMA,p_new) \
+        - (impact*x).sum(-1)
+
+# ------------- model --------------------------------------------
+class ValueMLP(nn.Module):
+    def __init__(self, zero=False):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(F_DIM,128), nn.ReLU(),
+            nn.Linear(128,128),   nn.ReLU(),
+            nn.Linear(128,128),   nn.ReLU(),
+            nn.Linear(128,1))
+        if zero:
+            for p in self.parameters(): nn.init.zeros_(p)
+    def forward(self,x): return self.net(x).squeeze(-1)
+
+# ------------- next-state (for a quantile block) ----------------
+def next_state(p,a,i,x,rho,phi,k,z):           # all tensors on GPU
+    # z shape (q,) -> (…,q,1) expand
+    eps = z.view(1,1,-1,1)*torch.ones_like(p).unsqueeze(2)
+    eps = eps @ SIG_CH.T                       # correlate
+    a_n = rho*a + (1-rho**2).sqrt()*eps
+    p_n = p + x
+    i_n = phi*(i + k*x)
+    return p_n,a_n,i_n
+
+# ------------- Bellman iteration (one outer step) ---------------
+def bellman_step(target:ValueMLP):
+    model = ValueMLP().to(DEVICE)
+    opt   = torch.optim.Adam(model.parameters(), lr=LR)
+    scaler= torch.cuda.amp.GradScaler()
+    n_batches = (N_DAT+BATCH-1)//BATCH
+
+    for epoch in range(1, N_EPOCH+1):
+        idx = torch.randperm(N_DAT)
+        ep_loss=0.
+        for b in range(n_batches):
+            sel = idx[b*BATCH:(b+1)*BATCH]
+            # ---- move mini-batch to GPU (non-blocking) -------------
+            p,a,i,c,t,k,rho,phi = [x[sel].to(DEVICE,non_blocking=True)
+                                   for x in DATA_CPU]
+
+            # ---- broadcast over actions once -----------------------
+            A = ACTION_CPU.size(0)
+            v_max = torch.full((p.size(0),), -1e30, device=DEVICE, dtype=DTYPE)
+
+            for x_blk_cpu in torch.split(ACTION_CPU, A_CHUNK):
+                x_blk = x_blk_cpu.to(DEVICE, dtype=DTYPE)         # (A_c,3)
+                x_blk = x_blk.unsqueeze(0).expand(p.size(0),-1,-1) # (B,A_c,3)
+
+                # broadcast constants
+                expand = lambda z: z.unsqueeze(1).expand(-1, x_blk.size(1),-1)
+                p_b,a_b,i_b,c_b,t_b,k_b,rho_b,phi_b = map(expand,(p,a,i,c,t,k,rho,phi))
+
+                r_im = reward(a_b,p_b,i_b,x_blk,c_b,t_b,k_b)      # (B,A_c)
+
+                v_sum = torch.zeros_like(r_im, dtype=DTYPE)
+                # stream quantiles
+                for z_blk_cpu in torch.split(Z_CPU, Q_CHUNK):
+                    z_blk = z_blk_cpu.to(DEVICE, dtype=DTYPE)     # (q,)
+                    p_n,a_n,i_n = next_state(p_b,a_b,i_b,
+                                             x_blk,rho_b,phi_b,k_b,z_blk)
+                    φ = features(p_n,a_n,i_n,
+                                 c_b.unsqueeze(2),t_b.unsqueeze(2),
+                                 k_b.unsqueeze(2),rho_b.unsqueeze(2),
+                                 phi_b.unsqueeze(2)).to(DTYPE)
+
+                    φ = φ.view(-1, F_DIM)
+                    with torch.no_grad(), torch.cuda.amp.autocast(dtype=DTYPE):
+                        v_blk = target(φ).view(*p_n.shape[:3])     # (B,A_c,q)
+                    v_sum += v_blk.mean(2)                        # accumulate
+
+                v_exp = v_sum * (Q_CHUNK / N_Q)
+                q_val = r_im + GAMMA*v_exp
+                v_max = torch.maximum(v_max, q_val.max(1).values)
+
+            # ------- loss & backward (still on GPU) -------------
+            φ0 = features(p,a,i,c,t,k,rho,phi).to(DTYPE)
+            with torch.cuda.amp.autocast(dtype=DTYPE):
+                v_pred = model(φ0)
+                loss   = nn.functional.mse_loss(v_pred, v_max)
+
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(opt); scaler.update()
+            ep_loss += loss.item()*p.size(0)
+
+        print(f"  epoch {epoch:02d}  loss={ep_loss/N_DAT:.6f}")
+    return model           # B[V_target]
+
+# ------------- outer loop ---------------------------------------
+def main():
+    target = ValueMLP(zero=True).to(DEVICE)
+    for n in range(1, N_ITER+1):
+        t0=time.time()
+        print(f"\n=== Bellman iter {n}/{N_ITER} ===")
+        target = bellman_step(target).eval()
+        for p in target.parameters(): p.requires_grad_(False)
+        # quick sanity : value of a random state
+        with torch.no_grad():
+            s = [x[torch.randint(0,N_DAT,(1,))].to(DEVICE) for x in DATA_CPU]
+            v = target(features(*s).to(DTYPE)).item()
+        print(f"  V_{n}(sample) = {v:+.4f}   [{time.time()-t0:.1f}s]")
+
+if __name__ == "__main__":
+    main()
