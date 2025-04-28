@@ -1,0 +1,193 @@
+# ================================================================
+#       Bellman Power Iteration — sans soft-update
+# ================================================================
+import itertools, math, time, copy, numpy as np, torch, torch.nn as nn
+from torch.distributions import Normal
+
+# ------------------ 0.  config global -------------------------------------------------
+SEED = 0;  torch.manual_seed(SEED);  np.random.seed(SEED)
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+DIM = 3
+GAMMA = 0.99
+LAMBDA_RISK = 1.0
+
+# data / optimisation
+N_OUTER_ITERS = 6            # ← nombre d’itérations de puissance
+N_EPOCHS      = 50           # ← entraînement interne par itération
+N_DATASET     = 30_000
+BATCH_SIZE    = 512
+LR            = 2e-3
+WEIGHT_DECAY  = 1e-4
+
+# grille d’actions (41³ ≈ 69k vecteurs)
+N_A_1D  = 41
+A_1D    = torch.linspace(-1., 1., N_A_1D, device=DEVICE)
+ACTION_GRID = torch.tensor(list(itertools.product(A_1D, A_1D, A_1D)),
+                           device=DEVICE)                 # (A,3)
+N_ACTIONS = ACTION_GRID.size(0)
+
+# quadrature sur Q quantiles
+def truncated_normal_bin_means(N: int, device, eps=1e-6):
+    probs  = torch.linspace(0., 1., N + 1, device=device)
+    lower  = probs[:-1].clamp(eps, 1 - eps)
+    upper  = probs[1: ].clamp(eps, 1 - eps)
+    stdn   = Normal(0., 1.)
+    a, b   = stdn.icdf(lower), stdn.icdf(upper)
+    ϕ      = lambda x: torch.exp(-0.5 * x * x) / math.sqrt(2*math.pi)
+    m_k    = (ϕ(a) - ϕ(b)) / (upper - lower)
+    return m_k
+
+N_QUANT  = 11
+Z_VALUES = truncated_normal_bin_means(N_QUANT, DEVICE)      # (Q,)
+
+# ------------------ 1.  une matrice de corrélation Σ fixe -------------------
+def random_corr(dim=DIM) -> torch.Tensor:
+    A = torch.randn(dim, dim)
+    Q, _ = torch.linalg.qr(A)
+    lam  = torch.rand(dim) + 0.5
+    S    = (Q * lam).matmul(Q.T)
+    d    = torch.sqrt(torch.diag(S))
+    return (S / d.outer(d)).to(DEVICE)
+
+SIGMA      = random_corr()
+SIGMA_CHOL = torch.linalg.cholesky(SIGMA)                   # (3,3)
+
+# ------------------ 2.  sampling des états ---------------------------------
+RHO_MIN, RHO_MAX = 0.0, 1.0
+C_MIN , C_MAX    = 0.0, 10.0
+T_MIN , T_MAX    = 1.0, 1000.0
+K_MIN , K_MAX    = 0.0, 1.0
+TAU_MIN, TAU_MAX = 1.0, 20.0
+
+@torch.no_grad()
+def resample_dataset(n=N_DATASET):
+    p     = torch.empty((n,DIM), device=DEVICE).uniform_(-1., 1.)
+    a     = torch.empty_like(p).uniform_(-1., 1.)
+    i     = torch.zeros_like(p)
+    c     = torch.empty_like(p).uniform_(C_MIN, C_MAX)
+    t     = torch.empty_like(p).uniform_(T_MIN, T_MAX)
+    k     = torch.empty_like(p).uniform_(K_MIN, K_MAX)
+    rho   = torch.empty_like(p).uniform_(RHO_MIN, RHO_MAX)
+    tau   = torch.empty_like(p).uniform_(TAU_MIN, TAU_MAX)
+    phi   = torch.exp(-1. / tau)
+    return p, a, i, c, t, k, rho, tau, phi
+
+# ------------------ 3.  features -------------------------------------------
+def features(p,a,i,c,t,k,rho,phi):
+    comps=[p,a,i,c,t,k,rho,phi,
+           torch.abs(p),torch.abs(a),torch.abs(i),
+           torch.sign(p),torch.sign(a)]
+    return torch.cat(comps,-1)
+
+_F = features(*[torch.zeros((1,DIM),device=DEVICE) for _ in range(8)]).numel()
+
+# ------------------ 4.  reward ---------------------------------------------
+def reward(alpha,p,impact,x,c,t,k):
+    p_new = p + x
+    return (alpha*p_new).sum(-1) \
+         - (c*torch.abs(x)).sum(-1) \
+         - 0.5 * ((t+k)*x**2).sum(-1) \
+         - 0.5 * LAMBDA_RISK * torch.einsum('...i,ij,...j->...', p_new, SIGMA, p_new) \
+         - (impact*x).sum(-1)
+
+# ------------------ 5.  réseau de valeur & init zéro -----------------------
+class ValueMLP(nn.Module):
+    def __init__(self, dim_in=_F, zero=False):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim_in,128), nn.ReLU(),
+            nn.Linear(128,128),    nn.ReLU(),
+            nn.Linear(128,128),    nn.ReLU(),
+            nn.Linear(128,1))
+        if zero:
+            for p in self.parameters(): nn.init.zeros_(p)
+
+    def forward(self,φ): return self.net(φ).squeeze(-1)
+
+# ------------------ 6.  dynamique (quadrature) -----------------------------
+def next_states_quad(p,a,impact,x,rho,phi,k,z_vals=Z_VALUES):
+    B,A,_ = x.shape;  Q = z_vals.numel()
+    expd = lambda t: t.unsqueeze(2).expand(-1,-1,Q,-1)      # (B,A,Q,3)
+    p,a,impact,rho,phi,k,x = map(expd, (p,a,impact,rho,phi,k,x))
+
+    eps_u = z_vals.view(1,1,Q,1).expand(B,A,Q,3)
+    eps_c = torch.matmul(eps_u, SIGMA_CHOL.T)               # (B,A,Q,3)
+
+    a_n = rho*a + torch.sqrt(1. - rho**2) * eps_c
+    p_n = p + x
+    i_n = phi * (impact + k * x)
+    return p_n, a_n, i_n                                    # (B,A,Q,3)
+
+# ------------------ 7.  entraînement d’une itération -----------------------
+def train_single_iter(target):
+    model = ValueMLP().to(DEVICE)         # ← réseau aléatoire neuf
+    opt   = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+
+    # dataset figé pour l’itération (possible de re-échantillonner à chaque epoch)
+    p_ds,a_ds,i_ds,c_ds,t_ds,k_ds,rho_ds,tau_ds,phi_ds = resample_dataset()
+    N = p_ds.size(0)
+
+    for epoch in range(1, N_EPOCHS+1):
+        perm  = torch.randperm(N, device=DEVICE)
+        epoch_loss = .0
+        for b0 in range(0, N, BATCH_SIZE):
+            idx = perm[b0:b0+BATCH_SIZE]
+            p,a,imp,c,t,k,rho,phi = (x[idx] for x in
+                                     (p_ds,a_ds,i_ds,c_ds,t_ds,k_ds,rho_ds,phi_ds))
+
+            φ      = features(p,a,imp,c,t,k,rho,phi)
+            V_pred = model(φ)                                   # (B,)
+
+            # ------- grille actions & broadcast état -----------------------
+            x_all  = ACTION_GRID.unsqueeze(0).expand(p.size(0), -1, -1)    # (B,A,3)
+            A = x_all.size(1)
+            expand1 = lambda z: z.unsqueeze(1).expand(-1, A, -1)
+            p_b,a_b,imp_b,c_b,t_b,k_b,rho_b,phi_b = map(expand1,
+                  (p,a,imp,c,t,k,rho,phi))
+
+            # ------- reward immédiat & next-state -------------------------
+            r_im = reward(a_b,p_b,imp_b,x_all,c_b,t_b,k_b)                 # (B,A)
+            p_n,a_n,i_n = next_states_quad(p_b,a_b,imp_b,
+                                           x_all,rho_b,phi_b,k_b)          # (B,A,Q,3)
+
+            φ_next = features(p_n,a_n,i_n,
+                              c_b.unsqueeze(2), t_b.unsqueeze(2),
+                              k_b.unsqueeze(2), rho_b.unsqueeze(2),
+                              phi_b.unsqueeze(2)).view(-1,_F)              # (B*A*Q,F)
+
+            with torch.no_grad():
+                v_next = target(φ_next).view(p.size(0), A, N_QUANT)        # (B,A,Q)
+
+            v_exp  = v_next.mean(dim=2)                                    # (B,A)
+            q_val  = r_im + GAMMA * v_exp
+            v_targ = q_val.max(dim=1).values                               # (B,)
+
+            loss = nn.functional.mse_loss(V_pred, v_targ)
+            opt.zero_grad(); loss.backward(); opt.step()
+            epoch_loss += loss.item() * p.size(0)
+
+        print(f"    ↳ epoch {epoch:02d}  loss={epoch_loss/N:.6f}")
+    return model                       # ← approximation de 𝔅[V_target]
+
+# ------------------ 8.  boucle d’itérations de puissance -------------------
+def bellman_power_iteration():
+    target = ValueMLP(zero=True).to(DEVICE)        # V₀ ≡ 0
+    print("Initial target V₀ = 0")
+
+    for it in range(1, N_OUTER_ITERS+1):
+        print(f"\n=== Outer iteration {it}/{N_OUTER_ITERS} ===")
+        model = train_single_iter(target)          # V ≈ 𝔅[V_{it-1}]
+        target = copy.deepcopy(model).eval()       # V_{it} ← V
+        for p in target.parameters(): p.requires_grad_(False)
+        #  -------- évaluation sur 1 état aléatoire -------------------------
+        test_state = [x[:1] for x in resample_dataset(1)]
+        V_est = target(features(*test_state)).item()
+        print(f"   V_{it}(test) = {V_est:+.5f}")
+
+    print("\n≈≈≈  Entraînement terminé  ≈≈≈")
+    return target
+
+# ------------------ 9.  lancement ------------------------------------------
+if __name__ == "__main__":
+    final_V = bellman_power_iteration()
