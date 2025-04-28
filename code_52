@@ -1,0 +1,135 @@
+import numpy as np
+from matplotlib import pyplot as plt
+
+# ───────────────────────────────────────────────────
+# 1. PARAMETERS
+# ───────────────────────────────────────────────────
+rho1, rho2 = 0.90, 0.70          # α-process autocorrelations
+C, TLA, LA = 5.0, 60.0, 1.0      # cost parameters
+phi        = 0.90                # imbalance decay
+GAMMA      = 0.99                # discount factor
+
+N_GRID     = 4                   # ⇒ 2·N+1 = 9 points per axis
+MAX_ITERS  = 60                  # value-iteration sweeps
+T_SIM      = 600                 # steps for the out-of-sample run
+
+# ───────────────────────────────────────────────────
+# 2. DISCRETE GRIDS
+# ───────────────────────────────────────────────────
+alpha_space = np.linspace(-3, 3, 2*N_GRID+1)
+p_space     = np.linspace(-2, 2, 2*N_GRID+1)
+imb_space   = np.linspace(-1, 1, 2*N_GRID+1)
+x_space     = np.linspace(-1, 1, 2*N_GRID+1)      # action grid
+
+# helper ─ nearest-neighbour projection onto a 1-D grid
+def nn_idx(grid, v):
+    v = np.asarray(v)
+    return np.abs(v[..., None] - grid).argmin(-1)
+
+# ───────────────────────────────────────────────────
+# 3. ALPHA-TRANSITION MATRICES  (empirical, cheap)
+# ───────────────────────────────────────────────────
+def ar1_transition(rho, grid, n_draws=8000, seed=0):
+    """P[i,j] ≈  P( α_{t+1}=grid[j] | α_t = grid[i] )."""
+    rng  = np.random.default_rng(seed)
+    std  = np.sqrt(1-rho**2)
+    P    = np.zeros((len(grid), len(grid)))
+    for i, a in enumerate(grid):
+        draws = rho*a + std*rng.standard_normal(n_draws)
+        j     = nn_idx(grid, draws)          # project to grid
+        cnts  = np.bincount(j, minlength=len(grid))
+        P[i]  = cnts / cnts.sum()
+    return P
+
+P1 = ar1_transition(rho1, alpha_space, seed=1)
+P2 = ar1_transition(rho2, alpha_space, seed=2)
+
+# ───────────────────────────────────────────────────
+# 4. PRE-COMPUTE EVERYTHING THAT DOES NOT CHANGE
+# ───────────────────────────────────────────────────
+P, A, I, M = len(p_space), len(alpha_space), len(imb_space), len(x_space)
+
+# broadcasted state/action tensors – shape = (P, A1, A2, I, M)
+p_mat   = p_space   .reshape(-1,1,1,1,1)
+a1_mat  = alpha_space.reshape(1,-1,1,1,1)
+a2_mat  = alpha_space.reshape(1,1,-1,1,1)
+imb_mat = imb_space .reshape(1,1,1,-1,1)
+x_mat   = x_space   .reshape(1,1,1,1,-1)
+
+# deterministic next-indices for p and imbalance
+p_next_idx   = nn_idx(p_space,  p_mat + x_mat)
+imb_next_idx = nn_idx(imb_space,(1-phi)*x_mat + phi*imb_mat)
+
+# one-step reward
+reward = (a1_mat + a2_mat)*(p_mat + x_mat)          \
+         - C*np.abs(x_mat)                          \
+         - 0.5*TLA*x_mat**2                         \
+         - 0.5*LA*(p_mat + x_mat)**2                \
+         - 0.5*imb_mat*x_mat**2                     # impact term
+
+# ───────────────────────────────────────────────────
+# 5.  VALUE ITERATION  (memory-friendly)
+# ───────────────────────────────────────────────────
+V = np.zeros((P, A, A, I))                          # V(s)
+Q = np.zeros(reward.shape)                          # Q(s,a)
+
+def integrate_alphas(Vin):
+    """ E[ V | α1,α2 dynamics ]. """
+    tmp  = np.einsum('pijm,ik->pkjm', Vin, P1)      # integrate α1
+    return np.einsum('pkjm,jl->pklm', tmp, P2)      # integrate α2
+
+for _ in range(MAX_ITERS):
+    V_next = np.empty_like(Q)                       # V(s') for each a
+    V_alpha = integrate_alphas(V)
+
+    for k in range(M):                              # gather once per action
+        V_next[..., k] = V_alpha[
+            p_next_idx[..., k],
+            :,
+            :,
+            imb_next_idx[..., k]
+        ]
+
+    Q_new = reward + GAMMA * V_next
+    V_new = Q_new.max(axis=-1)
+
+    if np.max(np.abs(V_new - V)) < 1e-4:            # converged
+        Q = Q_new
+        break
+    V, Q = V_new, Q_new
+
+policy_idx = Q.argmax(axis=-1)                      # greedy optimal action
+
+# ───────────────────────────────────────────────────
+# 6.  OUT-OF-SAMPLE TRAJECTORY  (cumulative reward)
+# ───────────────────────────────────────────────────
+rng = np.random.default_rng(123)
+alpha1 = alpha2 = p = imb = 0.0
+cum_rew = []
+
+for _ in range(T_SIM):
+    s = ( nn_idx(p_space, p),
+          nn_idx(alpha_space, alpha1),
+          nn_idx(alpha_space, alpha2),
+          nn_idx(imb_space,  imb) )
+    x = x_space[ policy_idx[s] ]
+
+    r = (alpha1+alpha2)*(p+x) - C*abs(x) \
+        - 0.5*TLA*x**2 - 0.5*LA*(p+x)**2 - 0.5*imb*x**2
+    cum_rew.append( r + (cum_rew[-1] if cum_rew else 0.0) )
+
+    # evolve state
+    p   += x
+    imb  = (1-phi)*x + phi*imb
+    alpha1 = rho1*alpha1 + np.sqrt(1-rho1**2)*rng.standard_normal()
+    alpha2 = rho2*alpha2 + np.sqrt(1-rho2**2)*rng.standard_normal()
+
+# ───────────────────────────────────────────────────
+# 7.  PLOT
+# ───────────────────────────────────────────────────
+plt.plot(cum_rew)
+plt.title("Cumulative reward – 2-factor alpha with impact")
+plt.xlabel("time step")
+plt.ylabel("cum reward")
+plt.tight_layout()
+plt.show()
