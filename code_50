@@ -1,3 +1,35 @@
+def next_state(p, a, i, x, rho, phi, k, z):        # all tensors on GPU
+    """
+    p,a,i,x : (B , A_c , 3)
+    z      : (q,)
+    return     (B , A_c , q , 3)  pour *toutes* les variables
+    """
+    q = z.numel()
+
+    # ---- bruit corrélé ---------------------------------------------------
+    eps = z.view(1,1,q,1)*torch.ones_like(p).unsqueeze(2)   # (B,A_c,q,3)
+    eps = eps @ SIG_CH.T
+
+    # ---- ajoute l’axe quantile par .unsqueeze(2) puis .expand ----------
+    p_q = p.unsqueeze(2).expand(-1, -1, q, -1)              # (B,A_c,q,3)
+    x_q = x.unsqueeze(2).expand_as(p_q)                     # idem
+
+    a_q = a.unsqueeze(2).expand_as(p_q)
+    i_q = i.unsqueeze(2).expand_as(p_q)
+    rho = rho.unsqueeze(2).expand_as(p_q)
+    phi = phi.unsqueeze(2).expand_as(p_q)
+    k   = k  .unsqueeze(2).expand_as(p_q)
+
+    # ---- dynamiques ------------------------------------------------------
+    a_n = rho * a_q + torch.sqrt(1. - rho**2) * eps
+    p_n = p_q + x_q
+    i_n = phi * (i_q + k * x_q)
+
+    return p_n, a_n, i_n           # chacun (B , A_c , q , 3)
+
+
+
+
 # ----------------- FIXED next_state ---------------------------------
 def next_state(p, a, i, x, rho, phi, k, z):      # all tensors already on GPU
     """
