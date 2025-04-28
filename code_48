@@ -1,0 +1,229 @@
+# ================================================================
+#   Bellman power-iteration, 8-GPU DDP, bfloat16, memory–efficient
+# ================================================================
+import math, time, itertools, copy, os, numpy as np, torch, torch.nn as nn
+import torch.distributed as dist
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
+from torch.distributions import Normal
+
+# -----------------------------  ⚙ CONFIG  ------------------------------
+DIM            = 3                      # number of assets
+A_1D           = 21                     # => |A| = 9261
+N_QUANT        = 10                    # quantile nodes
+BATCH          = 500
+N_DATA         = 10_000
+N_EPOCH        = 40
+N_OUTER        = 6                      # Bellman iterations
+A_CHUNK_TOTAL  = 512                    # actions streamed per GPU-step
+Q_CHUNK        = 5
+GAMMA          = 0.99
+LAMBDA         = 1.0
+LR             = 3e-3
+DTYPE          = torch.bfloat16         # H100 native
+
+SEED = 0
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+
+# -------------------------  helpers / CPU grids  ------------------------
+def truncated_bin_means(N:int, device='cpu', eps=1e-6):
+    p  = torch.linspace(0., 1., N+1, device=device)
+    lo, up = p[:-1].clamp(eps,1-eps), p[1:].clamp(eps,1-eps)
+    a, b = Normal(0.,1.).icdf(lo), Normal(0.,1.).icdf(up)
+    phi  = lambda x: torch.exp(-0.5*x*x)/math.sqrt(2*math.pi)
+    return (phi(a)-phi(b))/(up-lo)          # (N,)
+
+Z_CPU      = truncated_bin_means(N_QUANT)         # (Q,)
+ACTION_CPU = torch.tensor(list(itertools.product(
+                    torch.linspace(-1.,1.,A_1D),
+                    torch.linspace(-1.,1.,A_1D),
+                    torch.linspace(-1.,1.,A_1D))), dtype=torch.float32)  # (A,3)
+A_TOTAL    = ACTION_CPU.size(0)
+
+# ------------  dataset (all CPU, pinned for fast transfer) --------------
+RHO_MIN,RHO_MAX,C_MIN,C_MAX,T_MIN,T_MAX = 0.,1.,0.,10.,1.,1e3
+K_MIN,K_MAX,TAU_MIN,TAU_MAX = 0.,1.,1.,20.
+def build_dataset(n=N_DATA):
+    p  = torch.empty(n,DIM).uniform_(-1,1)
+    a  = torch.empty_like(p).uniform_(-1,1)
+    i  = torch.zeros_like(p)
+    c  = torch.empty_like(p).uniform_(C_MIN,C_MAX)
+    t  = torch.empty_like(p).uniform_(T_MIN,T_MAX)
+    k  = torch.empty_like(p).uniform_(K_MIN,K_MAX)
+    rho= torch.empty_like(p).uniform_(RHO_MIN,RHO_MAX)
+    tau= torch.empty_like(p).uniform_(TAU_MIN,TAU_MAX)
+    phi= torch.exp(-1./tau)
+    return [x.pin_memory() for x in (p,a,i,c,t,k,rho,phi)]
+DATA_CPU = build_dataset()
+
+class CpuTensorDataset(Dataset):
+    def __init__(self, tensors): self.tensors=tensors
+    def __len__(self): return self.tensors[0].size(0)
+    def __getitem__(self, idx):
+        return [t[idx] for t in self.tensors]
+
+# --------------------------  feature function  --------------------------
+def features(*T):
+    tgt = torch.broadcast_shapes(*[x.shape for x in T])
+    p,a,i,c,t,k,rho,phi = [x.expand(tgt) for x in T]
+    return torch.cat((p,a,i,c,t,k,rho,phi,
+                      p.abs(),a.abs(),i.abs(),
+                      p.sign(),a.sign()), -1)
+
+F_DIM = features(*[torch.zeros(1,3)]*8).size(-1)
+
+# ----------------------------  reward -----------------------------------
+def make_sigma(device):
+    Q,_ = torch.linalg.qr(torch.randn(DIM,DIM))
+    lam = torch.rand(DIM)+.5
+    S   = (Q*lam).matmul(Q.T)
+    d   = torch.sqrt(torch.diag(S))
+    C   = (S/d.outer(d)).to(device=device, dtype=DTYPE)
+    return C, torch.linalg.cholesky(C)
+
+# ----------------------------  model ------------------------------------
+class ValueMLP(nn.Module):
+    def __init__(self, zero=False):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(F_DIM,128), nn.ReLU(),
+            nn.Linear(128,128),   nn.ReLU(),
+            nn.Linear(128,128),   nn.ReLU(),
+            nn.Linear(128,1))
+        if zero:
+            for p in self.parameters(): nn.init.zeros_(p)
+    def forward(self,x): return self.net(x).squeeze(-1)
+
+# -------------------------  next-state dynamics -------------------------
+def next_state(p,a,i,x,rho,phi,k,z,SIG_CH):
+    """
+    Inputs without quantile axis: (B, A_c, 3)  + z (q,)
+    Returns  (B, A_c, q, 3)
+    """
+    q = z.numel()
+    rho = rho.unsqueeze(2)     # (B,A_c,1,3)
+    phi = phi.unsqueeze(2)
+    k   = k.unsqueeze(2)
+
+    eps = z.view(1,1,q,1).expand(*p.shape[:2],q,3)
+    eps = (eps @ SIG_CH.T).to(DTYPE)                     # correlate, (B,A_c,q,3)
+
+    a_n = rho * a.unsqueeze(2) + torch.sqrt(1.-rho**2) * eps
+    p_n = p.unsqueeze(2) + x.unsqueeze(2)
+    i_n = phi * (i.unsqueeze(2) + k * x.unsqueeze(2))
+    return p_n, a_n, i_n
+
+# ----------------------  distributed training loop ----------------------
+def bellman_iter(rank:int, world:int):
+    dist.init_process_group("nccl", rank=rank, world_size=world)
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+
+    # constant Σ on *each* GPU (identical seed ⇒ same matrix)
+    SIGMA, SIG_CH = make_sigma(device)
+
+    # 1) models
+    target = ValueMLP(zero=True).to(device, dtype=DTYPE).eval()
+    model  = ValueMLP().to(device, dtype=DTYPE)
+    model  = nn.parallel.DistributedDataParallel(model, device_ids=[rank])
+
+    # 2) dataset & loader
+    dset = CpuTensorDataset(DATA_CPU)
+    sampler = DistributedSampler(dset, num_replicas=world, rank=rank, shuffle=True)
+    loader  = DataLoader(dset, batch_size=BATCH, sampler=sampler,
+                         pin_memory=True, num_workers=2)
+
+    # 3) local slice of the action grid
+    A_per_gpu = math.ceil(A_TOTAL / world)
+    a_start   = rank * A_per_gpu
+    a_stop    = min(a_start + A_per_gpu, A_TOTAL)
+    ACTION_LOCAL_CPU = ACTION_CPU[a_start:a_stop]         # still CPU
+
+    # 4) optimiser
+    opt = torch.optim.Adam(model.parameters(), lr=LR)
+    scaler = torch.cuda.amp.GradScaler()
+
+    # ------------ inner epochs (Bellman operator on frozen target) -------
+    for epoch in range(1, N_EPOCH+1):
+        sampler.set_epoch(epoch)
+        for batch in loader:
+            # --------- CPU → GPU mini-batch (non-blocking) ---------------
+            p,a,i,c,t,k,rho,phi = [t.cuda(device,non_blocking=True, dtype=DTYPE)
+                                   for t in batch]
+
+            # --------- init value upper-bound per sample -----------------
+            v_max = torch.full((p.size(0),), -1e30, device=device, dtype=DTYPE)
+
+            for x_blk_cpu in torch.split(ACTION_LOCAL_CPU, A_CHUNK_TOTAL//world):
+                x_blk = x_blk_cpu.to(device, dtype=DTYPE)          # (A_c,3)
+                x_blk = x_blk.unsqueeze(0).expand(p.size(0),-1,-1) # (B,A_c,3)
+
+                # broadcast constants along action axis
+                expand = lambda z: z.unsqueeze(1).expand(-1, x_blk.size(1), -1)
+                p_b,a_b,i_b,c_b,t_b,k_b,rho_b,phi_b = map(expand,
+                    (p,a,i,c,t,k,rho,phi))
+
+                # --------- reward immediate -----------------------------
+                r_im = reward(a_b,p_b,i_b,x_blk,c_b,t_b,k_b,SIGMA)
+
+                # --------- stream over quantiles ------------------------
+                v_sum = torch.zeros_like(r_im, dtype=DTYPE)
+                for z_blk_cpu in torch.split(Z_CPU, Q_CHUNK):
+                    z_blk = z_blk_cpu.to(device, dtype=DTYPE)       # (q,)
+                    p_n,a_n,i_n = next_state(p_b,a_b,i_b,
+                                             x_blk,rho_b,phi_b,k_b,
+                                             z_blk,SIG_CH)
+                    φ = features(p_n,a_n,i_n,
+                                 c_b.unsqueeze(2),t_b.unsqueeze(2),
+                                 k_b.unsqueeze(2),rho_b.unsqueeze(2),
+                                 phi_b.unsqueeze(2)).to(DTYPE)
+                    φ = φ.view(-1, F_DIM)
+                    with torch.no_grad(), torch.cuda.amp.autocast(dtype=DTYPE):
+                        v_blk = target(φ).view(*p_n.shape[:3])      # (B,A_c,q)
+                    v_sum += v_blk.mean(2)
+
+                v_exp = v_sum * (Q_CHUNK / N_QUANT)
+                q_val = r_im + GAMMA * v_exp
+                v_max = torch.maximum(v_max, q_val.max(1).values)
+
+            # -------- all-reduce MAX across GPUs ------------------------
+            dist.all_reduce(v_max, op=dist.ReduceOp.MAX)
+
+            # -------- backward pass ------------------------------------
+            φ0 = features(p,a,i,c,t,k,rho,phi).to(DTYPE)
+            with torch.cuda.amp.autocast(dtype=DTYPE):
+                v_pred = model(φ0)
+                loss = nn.functional.mse_loss(v_pred, v_max)
+
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(opt); scaler.update()
+
+        if rank==0:
+            print(f"[iter ?  epoch {epoch:02d}] loss={loss.item():.5f}")
+
+    # -------- return trained model of this Bellman application ----------
+    # (rank 0 will gather the weights)
+    state = model.module.state_dict()
+    dist.barrier()
+    if rank == 0:
+        torch.save(state, f"V_tmp.pt")
+    dist.barrier()
+    dist.destroy_process_group()
+
+# -------------- reward (GPU) ----------------------------------------------
+def reward(alpha,p,impact,x,c,t,k,SIGMA):
+    p_new = p + x
+    return  (alpha*p_new).sum(-1) \
+          - (c*x.abs()).sum(-1) \
+          - 0.5*((t+k)*x**2).sum(-1) \
+          - 0.5*LAMBDA*torch.einsum('...i,ij,...j->...', p_new, SIGMA, p_new) \
+          - (impact*x).sum(-1)
+
+# ----------------------------  DRIVER  ------------------------------------
+def main():
+    world = 8
+    torch.multiprocessing.spawn(bellman_iter, args=(world,), nprocs=world)
+
+if __name__ == "__main__":
+    main()
