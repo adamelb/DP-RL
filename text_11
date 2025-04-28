@@ -1,0 +1,151 @@
+%-----------------------------------------
+% Dynamique d'impact et coût d'exécution
+%-----------------------------------------
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\odot}{\circ}
+\newcommand{\E}{\mathbb{E}}
+
+\section*{Chronologie d'un pas de temps}
+
+\begin{enumerate}
+    \item Début du pas de temps $t$ :\\
+    Le prix mid est décalé d'un montant $i_t$ à cause des impacts résiduels des trades passés.
+    
+    \item Exécution d'un ordre $x_t$ :\\
+    \begin{itemize}
+        \item L'ordre $x_t$ \textbf{pousse} instantanément le prix de $k\,x_t$.
+        \item Le trader paie un \textbf{prix moyen} le long du chemin de slippage : la moyenne de l'impact initial et final.
+    \end{itemize}
+    
+    \item Fin du pas de temps $t$ :\\
+    Le nouvel impact cumulé est 
+    \[
+    i_t + k\,x_t.
+    \]
+    
+    \item Début du pas de temps $t+1$ :\\
+    L'impact se \textbf{dissipe exponentiellement} : seule une fraction $\phi\in(0,1)$ survit :
+    \[
+    i_{t+1} = \phi(i_t + k\,x_t).
+    \]
+\end{enumerate}
+
+\bigskip
+
+\section*{Dynamique d'impact}
+\[
+\boxed{
+i_{t+1} = \phi\,i_t + k\,x_t
+}.
+\]
+
+Où :
+\begin{itemize}
+    \item $\phi \in (0,1)$ : facteur de \textbf{décroissance exponentielle} par pas de temps,
+    \item $k\in\R^3_+$ : vecteur des coefficients d'\textbf{impact linéaire}.
+\end{itemize}
+
+\bigskip
+
+\section*{Coût d'exécution instantané}
+
+Lors de l'exécution de $x_t$ :
+\begin{itemize}
+    \item Le \textbf{prix instantané} en fonction de la taille exécutée $u\in[0,x_t]$ est
+    \[
+    P(u) = P_0 + i_t + k\,u.
+    \]
+    
+    \item Le \textbf{prix moyen payé} est
+    \[
+    \frac{1}{x_t}\int_0^{x_t}(P_0 + i_t + k\,u)\,du = P_0 + i_t + \frac{1}{2}k\,x_t.
+    \]
+    
+    \item Le \textbf{slippage payé} par rapport au prix initial $P_0$ est
+    \[
+    \left(i_t + \frac{1}{2}k\,x_t\right)x_t = i_t\,x_t + \frac{1}{2}k\,x_t^2.
+    \]
+\end{itemize}
+
+Ainsi, le coût total associé au slippage est
+\[
+\boxed{
+\text{Coût d'impact} = i_t^{\top}x_t + \frac{1}{2}x_t^{\top}\diag(k)x_t.
+}
+\]
+
+\bigskip
+
+\section*{Fonction de récompense}
+
+La fonction de récompense instantanée $r(s_t,x_t)$ est alors :
+
+\[
+\boxed{
+r(s_t,x_t) =
+\underbrace{\alpha_t^{\top}(p_t+x_t)}_{\text{profit prévisible}}
+-\underbrace{c^{\top}|x_t|}_{\text{coût linéaire immédiat}}
+-\frac{1}{2}x_t^{\top}T\,x_t
+-\frac{1}{2}\lambda(p_t+x_t)^{\top}\Sigma(p_t+x_t)
+-\underbrace{i_t^{\top}x_t}_{\text{coût d'impact existant}}
+}.
+\]
+
+avec :
+\[
+T = \diag(t) + \diag(k),
+\]
+où
+\begin{itemize}
+    \item $c\in\R^3_+$ : coût linéaire d'exécution par asset,
+    \item $t\in\R^3_+$ : coût quadratique temporaire,
+    \item $\lambda>0$ : aversion au risque,
+    \item $\Sigma\in\mathbb{S}_{++}^3$ : matrice de covariance des prix.
+\end{itemize}
+
+\bigskip
+
+\section*{Pourquoi cette modélisation est-elle cohérente ?}
+
+\begin{itemize}
+    \item \textbf{Impact au moment du trade} :
+    \begin{itemize}
+        \item Le push $k\,x_t$ est ajouté immédiatement à $i_t$.
+        \item Le coût de ce push est bien intégré via $-\frac{1}{2}k\,x_t^2$.
+    \end{itemize}
+    
+    \item \textbf{Impact dans le futur} :
+    \begin{itemize}
+        \item $i_{t+1}$ contient la mémoire de $i_t$ atténuée par $\phi$, plus le nouveau push $k\,x_t$.
+        \item Cet impact résiduel affectera les coûts futurs si on continue à trader.
+    \end{itemize}
+    
+    \item \textbf{Slippage total correctement mesuré} :
+    \begin{itemize}
+        \item Le coût payé au temps $t$ est \textbf{exactement} celui correspondant au prix moyen exécuté.
+        \item Le modèle est consistant avec les théories standards d'impact de marché (ex: Gatheral, Almgren-Chriss).
+    \end{itemize}
+\end{itemize}
+
+\bigskip
+
+\section*{Résumé final}
+
+\begin{itemize}
+    \item \textbf{Dynamique d'impact :}
+    \[
+    i_{t+1} = \phi(i_t+kx_t)
+    \]
+    
+    \item \textbf{Coût d'exécution :}
+    \[
+    \text{Slippage} = i_t^{\top}x_t + \frac{1}{2}x_t^{\top}\diag(k)x_t
+    \]
+    
+    \item \textbf{Récompense :} (incluant alpha, coûts, risque et impact)
+    \[
+    r(s_t,x_t) = \alpha_t^{\top}(p_t+x_t) - c^{\top}|x_t| -\frac{1}{2}x_t^{\top}T\,x_t -\frac{1}{2}\lambda(p_t+x_t)^{\top}\Sigma(p_t+x_t) - i_t^{\top}x_t
+    \]
+\end{itemize}
