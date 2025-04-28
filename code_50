@@ -1,3 +1,76 @@
+
+import math
+from typing import Tuple
+
+def V1(alpha1: float,
+       alpha2: float,
+       p: float,
+       tl: float,
+       phi: float,
+       imbalance: float,
+       return_x: bool = False) -> Tuple[float, float]:
+    """
+    Calcule la value-function d'une itération de Bellman à V(s)=0
+    et renvoie le couple (V1, x*).
+
+    Parameters
+    ----------
+    alpha1, alpha2 : float
+        Les deux alphas du pas courant.
+    p : float
+        Prix courant.
+    tl : float
+        Coût quadratique de marché (impact).
+    phi : float
+        Mémoire de l'imbalance (0 <= phi < 1).
+    imbalance : float
+        Imbalance à t-1.
+    return_x : bool
+        Si True, renvoie aussi x*.
+
+    Returns
+    -------
+    V1 : float
+        Valeur optimale.
+    x_star : float
+        Quantité optimale.
+    """
+    A = alpha1 + alpha2
+    B = p
+    I = imbalance
+
+    # Coefficients du quadratique a x^2 + b x + c = 0
+    a = 1.5 * tl * (1 - phi)
+    b = 1 + tl * phi * I
+    c = -(A - B)
+
+    # Résolution
+    if abs(a) < 1e-12:                       # Equation linéaire
+        x_star = (A - B) / b
+    else:                                    # Quadratique
+        disc = b * b - 4 * a * c
+        disc = max(disc, 0.0)               # Sécurité numérique
+        x1 = (-b + math.sqrt(disc)) / (2 * a)
+        x2 = (-b - math.sqrt(disc)) / (2 * a)
+        # Choix de la racine qui maximise F
+        def F(x):
+            imb_t = (1 - phi) * x + phi * I
+            return A * (B + x) - 0.5 * tl * imb_t * x ** 2 - 0.5 * (B + x) ** 2
+        x_star = max((x1, x2), key=F)
+
+    # Valeur optimale
+    imb_t = (1 - phi) * x_star + phi * I
+    V_opt = A * (B + x_star) - 0.5 * tl * imb_t * x_star ** 2 - 0.5 * (B + x_star) ** 2
+
+    return (V_opt, x_star) if return_x else (V_opt, None)
+
+
+# --- Petit test rapide --------------------------------------
+if __name__ == "__main__":
+    V, x_opt = V1(0.1, 0.2, p=0.0, tl=0.05, phi=0.3, imbalance=0.0, return_x=True)
+    print(f"V1 = {V:.5f},  x* = {x_opt:.5f}")
+
+
 \[
 \begin{aligned}
 &X\sim\mathcal{N}(0, I_3),\\
