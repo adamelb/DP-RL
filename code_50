@@ -1,4 +1,32 @@
-"""
+# ----------------- FIXED next_state ---------------------------------
+def next_state(p, a, i, x, rho, phi, k, z):      # all tensors already on GPU
+    """
+    p,a,i,x : (B , A_c ,      3)
+    rho,phi,k : (B , A_c ,    3)
+    z      : (q,)  – quantile nodes
+    return p',a',i' : (B , A_c , q , 3)
+    """
+    q = z.numel()
+
+    # ---- add quantile dimension WITHOUT copying data ---------------
+    rho = rho.unsqueeze(2)       # (B , A_c , 1 , 3)
+    phi = phi.unsqueeze(2)
+    k   = k.unsqueeze(2)
+
+    # ---- correlate the standard-normal nodes -----------------------
+    eps = z.view(1, 1, q, 1)          # (1 , 1 , q , 1)
+    eps = eps.expand(*p.shape[:2], q, 3)          # (B , A_c , q , 3)
+    eps = eps @ SIG_CH.T                           # (B , A_c , q , 3)
+
+    # ---- dynamics --------------------------------------------------
+    a_n = rho * a.unsqueeze(2) + torch.sqrt(1. - rho**2) * eps
+    p_n = p.unsqueeze(2) + x.unsqueeze(2)
+    i_n = phi * (i.unsqueeze(2) + k * x.unsqueeze(2))
+
+    return p_n, a_n, i_n            # each (B , A_c , q , 3)
+
+
+´´´"""
 bellman_ddp.py – 8-GPU Bellman power iteration (bfloat16, H100-friendly)
 
 Launch from a notebook *cell* with:
