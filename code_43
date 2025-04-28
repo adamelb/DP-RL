@@ -1,0 +1,186 @@
+# ==========================================================
+#  Value-Function Learning 3-assets  –  Monte-Carlo expectation
+# ==========================================================
+import itertools, math, time, copy
+import numpy as np
+import torch, torch.nn as nn
+from torch.distributions import Normal
+
+# ---------- 0.  Config ------------------------------------------------------
+SEED = 0
+torch.manual_seed(SEED);  np.random.seed(SEED)
+DEVICE  = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DIM     = 3
+GAMMA   = 0.99
+LAMBDA_RISK = 1.0
+# data & train
+N_DATASET   = 30_000
+BATCH_SIZE  = 512
+N_EPOCHS    = 50
+LR          = 2e-3
+WEIGHT_DECAY= 1e-4
+# actions
+N_A_1D      = 41
+A_1D        = torch.linspace(-1., 1., N_A_1D, device=DEVICE)
+ACTION_GRID = torch.tensor(list(itertools.product(A_1D, A_1D, A_1D)),
+                           device=DEVICE)                 # (A,3)
+N_ACTIONS   = ACTION_GRID.size(0)
+# Monte-Carlo
+N_MC        = 8                                           # ←—— § espérance
+
+# ---------- 1.   matrice de corrélation Σ  -------------------------------
+def random_corr(dim=DIM):
+    A = torch.randn(dim, dim)
+    Q, _ = torch.linalg.qr(A)
+    lam  = torch.rand(dim) + 0.5
+    S    = (Q * lam).matmul(Q.T)
+    d    = torch.sqrt(torch.diag(S))
+    C    = (S / d.outer(d)).to(DEVICE)
+    return C
+
+SIGMA       = random_corr()
+SIGMA_CHOL  = torch.linalg.cholesky(SIGMA)     # (3,3)
+
+# ---------- 2.   bornes de sampling --------------------------------------
+RHO_MIN, RHO_MAX = 0.0, 1.0
+C_MIN , C_MAX    = 0.0, 10.0
+T_MIN , T_MAX    = 1.0, 1000.0
+K_MIN , K_MAX    = 0.0, 1.0
+TAU_MIN, TAU_MAX = 1.0, 20.0
+
+@torch.no_grad()
+def resample_dataset(n=N_DATASET):
+    p     = torch.empty((n,DIM), device=DEVICE).uniform_(-1.,1.)
+    alpha = torch.empty_like(p).uniform_(-1.,1.)
+    impact= torch.zeros_like(p)
+    c     = torch.empty_like(p).uniform_(C_MIN, C_MAX)
+    t     = torch.empty_like(p).uniform_(T_MIN, T_MAX)
+    k     = torch.empty_like(p).uniform_(K_MIN, K_MAX)
+    rho   = torch.empty_like(p).uniform_(RHO_MIN, RHO_MAX)
+    tau   = torch.empty_like(p).uniform_(TAU_MIN, TAU_MAX)
+    phi   = torch.exp(-1./tau)
+    return p, alpha, impact, c, t, k, rho, tau, phi
+
+# ---------- 3.   features --------------------------------------------------
+def features(p,a,i,c,t,k,rho,phi):
+    comps = [p,a,i,c,t,k,rho,phi,
+             torch.abs(p),torch.abs(a),torch.abs(i),
+             torch.sign(p),torch.sign(a)]
+    return torch.cat(comps,-1)
+
+_F = features(*[torch.zeros((1,DIM),device=DEVICE) for _ in range(8)]).numel()
+
+# ---------- 4.   reward ----------------------------------------------------
+def reward(alpha,p,impact,x,c,t,k):
+    p_new = p+x
+    term_profit = (alpha*p_new).sum(-1)
+    term_lin    = (c*torch.abs(x)).sum(-1)
+    term_quad   = 0.5*((t+k)*x**2).sum(-1)
+    term_risk   = 0.5*LAMBDA_RISK*torch.einsum(
+                    '...i,ij,...j->...',p_new,SIGMA,p_new)
+    term_imp    = (impact*x).sum(-1)
+    return term_profit-term_lin-term_quad-term_risk-term_imp
+
+# ---------- 5.   réseau V --------------------------------------------------
+class ValueMLP(nn.Module):
+    def __init__(self, d_in=_F):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_in,128), nn.ReLU(),
+            nn.Linear(128,128),  nn.ReLU(),
+            nn.Linear(128,128),  nn.ReLU(),
+            nn.Linear(128,1))
+    def forward(self,φ): return self.net(φ).squeeze(-1)
+
+# ---------- 6.   dynamique & MC -------------------------------------------
+def next_states_mc(p,a,i,x,rho,phi,k,n_mc=N_MC):
+    """
+    p,a,i,x,rho,phi,k : (B, A, 3)
+    renvoie p',a',i'  : (B, A, M, 3)
+    """
+    B,A,_ = x.shape
+    #   (B,A,1,3) -> (B,A,M,3)
+    p   = p.unsqueeze(2).expand(-1,-1,n_mc,-1)
+    i   = i.unsqueeze(2).expand_as(p)
+    rho = rho.unsqueeze(2).expand_as(p)
+    phi = phi.unsqueeze(2).expand_as(p)
+    k   = k.unsqueeze(2).expand_as(p)
+    a   = a.unsqueeze(2).expand_as(p)
+    x   = x.unsqueeze(2).expand_as(p)
+
+    # bruit (B,A,M,3)
+    eps = torch.randn_like(p) @ SIGMA_CHOL.T
+    a_next = rho*a + torch.sqrt(1.-rho**2)*eps
+    p_next = p + x
+    i_next = phi*(i + k*x)
+    return p_next, a_next, i_next
+
+# ---------- 7.   entraînement ---------------------------------------------
+def train():
+    p_ds,a_ds,i_ds,c_ds,t_ds,k_ds,rho_ds,tau_ds,phi_ds = resample_dataset()
+    N = p_ds.size(0)
+
+    model   = ValueMLP().to(DEVICE)
+    target  = copy.deepcopy(model).eval()
+    for p in target.parameters(): p.requires_grad_(False)
+
+    opt = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    eta = 0.99
+    sched = torch.optim.lr_scheduler.ExponentialLR(opt,gamma=eta)
+
+    for epoch in range(1,N_EPOCHS+1):
+        perm = torch.randperm(N, device=DEVICE)
+        epoch_loss=0.0
+        for b0 in range(0,N,BATCH_SIZE):
+            idx = perm[b0:b0+BATCH_SIZE]
+            p      = p_ds[idx];   a=a_ds[idx];   imp=i_ds[idx]
+            c      = c_ds[idx];   t=t_ds[idx];   k=k_ds[idx]
+            rho    = rho_ds[idx]; phi=phi_ds[idx]
+
+            φ      = features(p,a,imp,c,t,k,rho,phi)
+            V_pred = model(φ)                       # (B,)
+
+            # actions
+            x_all  = ACTION_GRID.unsqueeze(0).expand(p.size(0),-1,-1)  # (B,A,3)
+            B,A,_  = x_all.shape
+            # state broadcast (B,1,3) -> (B,A,3)
+            expand = lambda z: z.unsqueeze(1).expand(-1,A,-1)
+            p_b,a_b,imp_b,c_b,t_b,k_b,rho_b,phi_b = map(expand,
+                (p,a,imp,c,t,k,rho,phi))
+
+            r_im = reward(a_b,p_b,imp_b,x_all,c_b,t_b,k_b)             # (B,A)
+
+            # Monte-Carlo des prochains états
+            p_n,a_n,i_n = next_states_mc(p_b,a_b,imp_b,
+                                         x_all,rho_b,phi_b,k_b)        # (B,A,M,3)
+            φ_next = features(p_n,a_n,i_n,
+                              c_b.unsqueeze(2), t_b.unsqueeze(2),
+                              k_b.unsqueeze(2), rho_b.unsqueeze(2),
+                              phi_b.unsqueeze(2))                      # (B,A,M,F)
+            φ_next = φ_next.view(-1,_F)
+            with torch.no_grad():
+                v_next = target(φ_next).view(B,A,N_MC)                 # (B,A,M)
+            v_exp = v_next.mean(dim=2)                                 # (B,A)
+
+            q = r_im + GAMMA * v_exp
+            v_targ = q.max(dim=1).values                               # (B,)
+
+            loss = nn.functional.mse_loss(V_pred, v_targ)
+            opt.zero_grad(); loss.backward(); opt.step()
+            epoch_loss += loss.item()*p.size(0)
+
+        # soft update
+        with torch.no_grad():
+            tau = 0.01
+            for θt,θ in zip(target.parameters(),model.parameters()):
+                θt.data.mul_(1-tau).add_(tau*θ.data)
+        sched.step()
+        print(f"[epoch {epoch:02d}]  loss = {epoch_loss/N:.6f}")
+
+    return model
+
+if __name__ == "__main__":
+    net = train()
+    # test sur un état
+    (p,α,i,c,t,k,ρ,τ,φ) = [x[:1] for x in resample_dataset(1)]
+    print("V̂ =", net(features(p,α,i,c,t,k,ρ,φ)).item())
