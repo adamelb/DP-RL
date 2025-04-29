@@ -1,0 +1,67 @@
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.multiprocessing as mp
+from torch.cuda.amp import autocast, GradScaler
+
+def train_on_gpu(rank, world_size, model, optimizer, scaler, scheduler,
+                 inputs, targets, loss_fn):
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+
+    # Send model to device and enable gradient sharing
+    model = model.to(device)
+    model.train()
+
+    inputs = inputs.to(device, non_blocking=True)
+    targets = targets.to(device, non_blocking=True)
+
+    with autocast():
+        outputs = model(inputs)
+        loss = loss_fn(outputs, targets) / world_size  # scale loss
+    scaler.scale(loss).backward()
+    return loss.item() * world_size  # for logging
+
+def main():
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3,4,5,6,7'
+    world_size = torch.cuda.device_count()
+
+    # Dummy setup (replace with your model/data)
+    model = YourModel()
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    scaler = GradScaler()
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+    loss_fn = nn.MSELoss()
+
+    # Simulated large batch
+    big_inputs = torch.randn(1024, input_dim)
+    big_targets = torch.randn(1024, output_dim)
+
+    # Split across GPUs
+    input_shards = list(torch.chunk(big_inputs, world_size))
+    target_shards = list(torch.chunk(big_targets, world_size))
+
+    ctx = mp.get_context("spawn")
+
+    # Share model params across processes
+    model.share_memory()
+
+    # Train on each GPU in parallel
+    with ctx.Pool(world_size) as pool:
+        results = pool.starmap(
+            train_on_gpu,
+            [(rank, world_size, model, optimizer, scaler, scheduler,
+              input_shards[rank], target_shards[rank], loss_fn)
+             for rank in range(world_size)]
+        )
+
+    # One-step optimizer (must be done after all backward passes)
+    scaler.step(optimizer)
+    scaler.update()
+    scheduler.step()
+
+    print("Epoch Loss:", sum(results) / world_size)
+
+if __name__ == "__main__":
+    main()
