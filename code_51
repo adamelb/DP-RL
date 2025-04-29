@@ -1,0 +1,27 @@
+import os
+import torch
+import torch.multiprocessing as mp
+
+# Ensure only 4 GPUs are visible
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
+
+def run_on_device(rank, args):
+    device = torch.device(f"cuda:{rank}")
+    # Example: run your code here
+    print(f"Running on device {device}")
+    # Assume `args` contains input specific to this process
+    result = args ** 2 + rank  # Dummy computation
+    return result
+
+def main():
+    world_size = 4
+    input_data = [10, 20, 30, 40]  # One item per GPU
+
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(world_size) as pool:
+        results = pool.starmap(run_on_device, [(i, input_data[i]) for i in range(world_size)])
+    
+    print("Results:", results)
+
+if __name__ == "__main__":
+    main()
