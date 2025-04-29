@@ -1,0 +1,196 @@
+# train_ddp.py
+import os, time, math, random
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.cuda.amp import GradScaler, autocast
+
+# --------------------------------------------------------------------------- #
+# ---------------------------  ↓ YOUR OWN CODE  ↓  -------------------------- #
+# --------------------------------------------------------------------------- #
+from model import ValueMLP                     # your MLP definition
+from data import resample_dataset, ACTIONS     # your helpers / constants
+from utils import features, reward             # idem …
+
+LR             = 5e-4
+WEIGHT_DECAY   = 1e-5
+MAX_EPOCHS     = 20
+ACC_STEPS      = 4          # grad-accumulation
+N_OUTER_ITERS  = 5
+BATCH_SIZE     = 4096
+N_QUANTILES    = 51
+GAMMA          = 0.99
+LAMBDA_ANCHOR  = 0.01
+CONV_TOL       = 1e-4
+# --------------------------------------------------------------------------- #
+
+def setup(rank, world_size):
+    """Initialise torch.distributed on this process/GPU."""
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_PORT'] = '29500'
+    dist.init_process_group("nccl",
+                            rank=rank,
+                            world_size=world_size)
+    torch.cuda.set_device(rank)
+
+def cleanup():
+    dist.destroy_process_group()
+
+# --------------------------------------------------------------------------- #
+
+def train(rank: int, world_size: int):
+    setup(rank, world_size)
+    device = torch.device(f"cuda:{rank}")
+
+    # --------------------------------------------------------------------- #
+    # target network is kept on **one** GPU (rank 0) and broadcast initially
+    # --------------------------------------------------------------------- #
+    target_model = ValueMLP(zero=True).to(device)
+    target_model.eval()
+    for p in target_model.parameters():
+        p.requires_grad = False
+    dist.broadcast_object_list([target_model.state_dict()], src=0)
+
+    # online model (the one we optimise)
+    model = ValueMLP().to(device)
+    model = DDP(model, device_ids=[rank], output_device=rank,
+                find_unused_parameters=False)
+
+    scaler     = GradScaler()
+    opt        = torch.optim.Adam(model.parameters(), lr=LR,
+                                  weight_decay=WEIGHT_DECAY)
+    scheduler  = CosineAnnealingLR(opt, T_max=MAX_EPOCHS, eta_min=LR/500)
+
+    torch.backends.cudnn.benchmark = True
+    initial_time = time.time()
+
+    for it in range(1, N_OUTER_ITERS + 1):
+
+        # ---- dataset generator (identical on every rank) ---------------- #
+        P, a1, a2, c_, tl, r1, r2, imb, phi = resample_dataset()
+        N_DATASET = P.size(0)
+
+        # shard indices **by hand** – simplest & fastest for tensor datasets
+        local_idx  = torch.arange(rank, N_DATASET, world_size,
+                                  device=device)
+
+        prev_loss  = float("inf")
+        for epoch in range(1, MAX_EPOCHS + 1):
+            epoch_start = time.time()
+            opt.zero_grad(set_to_none=True)
+            epoch_loss  = 0.0
+
+            # ---- gradient accumulation loop ---------------------------- #
+            for step in range(ACC_STEPS):
+                idx = local_idx[torch.randint(0,
+                                              len(local_idx),
+                                              (BATCH_SIZE,),
+                                              device=device)]
+                with autocast():
+                    # current minibatch --------------------------------------------------
+                    P_b, a1_b, a2_b = P[idx], a1[idx], a2[idx]
+                    c_b, tl_b       = c_[idx], tl[idx]
+                    r1_b, r2_b      = r1[idx], r2[idx]
+                    imb_b, phi_b    = imb[idx], phi[idx]
+
+                    feat     = features(P_b, a1_b, a2_b, c_b,
+                                        r1_b, r2_b, tl_b, imb_b, phi_b)
+                    V_pred   = model(feat).view(-1)
+
+                    # -------------------------------------------------------------- #
+                    #  everything below is your original logic, unchanged except for
+                    #  tensor-device placements staying local to `device`
+                    # -------------------------------------------------------------- #
+                    mu_q  = (a1_b * r1_b).unsqueeze(1)
+                    sig_q = torch.sqrt(1.0 - r1_b**2).unsqueeze(1)
+                    a1_next = mu_q + sig_q * z_values.unsqueeze(0)   # assumes z_values on device
+
+                    mu_g  = (a2_b * r2_b).unsqueeze(1)
+                    sig_g = torch.sqrt(1.0 - r2_b**2).unsqueeze(1)
+                    a2_next = mu_g + sig_g * z_values.unsqueeze(0)
+
+                    # ...   ***   build P_next, imb_next, features_next   ***   ...
+                    # (omitted for brevity – exactly the same as your code)
+
+                    # Q-target ----------------------------------------------------- #
+                    with torch.no_grad():
+                        v_next = target_model(feat_next_flat) \
+                                     .view(BATCH_SIZE, ACTIONS.size(0), N_QUANTILES)
+                        v_avg  = v_next.mean(2)
+
+                    R   = reward(a1_b.unsqueeze(1), a2_b.unsqueeze(1),
+                                 P_b.unsqueeze(1), ACTIONS.squeeze(-1),
+                                 c_b.unsqueeze(1), tl_b.unsqueeze(1),
+                                 imb_b.unsqueeze(1), phi_b.unsqueeze(1))
+
+                    Q_target   = R + GAMMA * v_avg
+                    Q_best, _  = Q_target.max(1)
+
+                    phi0_feat  = features(torch.zeros_like(P_b),
+                                          torch.zeros_like(P_b),
+                                          torch.zeros_like(P_b),
+                                          c_b, r1_b, r2_b, tl_b, imb_b, phi_b)
+                    with torch.no_grad():
+                        anchor = model(phi0_feat).pow(2).mean()
+
+                    loss = (torch.nn.functional.mse_loss(V_pred, Q_best.detach())
+                            + LAMBDA_ANCHOR * anchor) / ACC_STEPS
+
+                scaler.scale(loss).backward()
+                epoch_loss += loss.item()
+
+            # ----------- synchronise & optimizer step -------------------- #
+            scaler.unscale_(opt)           # for gradient clipping if needed
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+            scaler.step(opt)
+            scaler.update()
+            scheduler.step()
+            opt.zero_grad(set_to_none=True)
+
+            # all_reduce so every rank sees the same number
+            epoch_loss_tensor = torch.tensor(epoch_loss,
+                                             device=device, dtype=torch.float32)
+            dist.all_reduce(epoch_loss_tensor, op=dist.ReduceOp.SUM)
+            avg_loss = (epoch_loss_tensor.item() / world_size)
+            rel_change = abs(prev_loss - avg_loss) / (prev_loss + 1e-8)
+
+            if rank == 0:
+                print(f"[It {it:02d}]  Epoch {epoch:03d}  "
+                      f"loss = {avg_loss:.6f}  "
+                      f"Δ = {rel_change:.4e}  "
+                      f"(runtime {(time.time()-epoch_start):.1f}s)")
+
+            if rel_change < CONV_TOL:
+                break
+            prev_loss = avg_loss
+
+        # -------- sync target network ----------------------------------- #
+        if rank == 0:
+            torch.save(model.module.state_dict(),
+                       f"model_it_{it}.pth")
+        # broadcast new weights to all workers
+        dist.barrier()
+        dist.broadcast_object_list([model.module.state_dict()], src=0)
+        target_model.load_state_dict(model.module.state_dict())
+        target_model.eval()
+        for p in target_model.parameters():
+            p.requires_grad = False
+
+    if rank == 0:
+        print(f"Training finished in {(time.time()-initial_time):.1f} s")
+    cleanup()
+
+# --------------------------------------------------------------------------- #
+
+def main():
+    world_size = torch.cuda.device_count()     # ← should be 8
+    mp.spawn(train,
+             args=(world_size,),
+             nprocs=world_size,
+             join=True)
+
+if __name__ == "__main__":
+    main()
