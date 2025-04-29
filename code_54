@@ -1,0 +1,199 @@
+"""
+Fast tabular RL with two AR(1) alphas, inventory imbalance, linear+quadratic+impact
+costs and discount γ.  Uses:
+  • pre-computed reward tensor  R[p,a1,a2,i,x]
+  • pre-computed index tensors  p_next_idx[p,x] , i_next_idx[i,x]
+  • Numba-njit value iteration in parallel
+  • Numba-njit greedy action evaluator
+Tested with: Python 3.10, numpy 1.26, numba 0.59.
+"""
+import numpy as np
+import numba as nb
+import matplotlib.pyplot as plt
+
+# ───────────────────────── parameters ──────────────────────────
+rho1, rho2   = 0.90, 0.70        # AR(1) coefficients
+C, tla, la   = 5.0, 60.0, 1.0
+gamma, phi   = 0.99, 0.90
+#
+N_p  = N_a = N_i  = 41           # 41 grid points each  (-1→1, imbalance -0.5→0.5)
+N_x  = 41                        # actions x  in [-0.5,0.5]
+n_vi = 120                       # value-iteration sweeps
+tol  = 1e-4
+dtype = np.float32
+# ────────────────────────────────────────────────────────────────
+
+# grids
+p_space   = np.linspace(-1, 1, N_p , dtype=dtype)
+a_space   = np.linspace(-1, 1, N_a , dtype=dtype)   # same for α1, α2
+imb_space = np.linspace(-.5, .5, N_i , dtype=dtype)
+x_space   = np.linspace(-.5, .5, N_x , dtype=dtype)
+
+# nearest-neighbour search as a ufunc
+def nn_idx(grid, x):
+    return np.abs(x[..., None] - grid).argmin(-1, keepdims=False)
+
+# ----------------------------------------------------------------
+# 1) Markov matrices for α1 and α2  (small, 2-D, float32)
+# ----------------------------------------------------------------
+def trans_matrix(grid, rho, n_mc=12_000):
+    samp = rho*grid + np.sqrt(1-rho*rho)*np.random.randn(n_mc, grid.size)
+    proj = nn_idx(grid, samp)
+    T = np.zeros((grid.size, grid.size), dtype=dtype)
+    for i,row in enumerate(proj.T):
+        idx,cnt = np.unique(row, return_counts=True)
+        T[i, idx] = cnt/cnt.sum()
+    return T
+
+T1 = trans_matrix(a_space, rho1)
+T2 = trans_matrix(a_space, rho2)
+
+# ----------------------------------------------------------------
+# 2) Pre-compute action-independent tensors
+# ----------------------------------------------------------------
+# 2.1 reward   R[s,a]  → shape (Np,Na,Na,Ni,Nx)
+#              but we broadcast & keep as float32 (fits: 11 MB for N=41)
+P   = p_space[:,None,None,None,None]      # (Np,1,1,1,1)
+A1  = a_space[None,:,None,None,None]      # (1,Na,1,1,1)
+A2  = a_space[None,None,:,None,None]      # (1,1,Na,1,1)
+I   = imb_space[None,None,None,:,None]    # (1,1,1,Ni,1)
+X   = x_space[None,None,None,None,:]      # (1,1,1,1,Nx)
+
+pnl    = (A1 + A2) * (P + X)
+cost   = 0.5 * tla * X**2 + C * np.abs(X)
+risk   = 0.5 * la  * (P + X)**2
+impact = 0.5 * I   * X**2
+R      = (pnl - cost - risk - impact).astype(dtype)    # (Np,Na,Na,Ni,Nx)
+
+# 2.2 deterministic next-indices for p and imbalance
+p_next_idx  = nn_idx(p_space,   P + X).astype(np.int16)      # (Np,1,1,1,Nx)
+i_next_idx  = nn_idx(imb_space,(1-phi)*X + phi*I).astype(np.int16)  # (1,1,1,Ni,Nx)
+
+# remove singleton dims so Numba works nicely:
+p_next_idx  = p_next_idx[:,0,0,0,:]        # (Np,Nx)
+i_next_idx  = i_next_idx[0,0,0,:,:]        # (Ni,Nx)
+
+# ----------------------------------------------------------------
+# 3) Numba-accelerated value iteration
+# ----------------------------------------------------------------
+@nb.njit(parallel=True, fastmath=True)
+def value_iteration(V, R, p_next_idx, i_next_idx,
+                    T1, T2, gamma, n_iter, tol):
+    Np, Na, _, Ni, Nx = R.shape
+    Vnew = np.empty_like(V)
+    for it in range(n_iter):
+        delta = 0.0
+        # ─ sweep over STATE space in parallel ───────────────────
+        for ip in nb.prange(Np):
+            for ia1 in range(Na):
+                T1row = T1[ia1]                   # (Na,)
+                for ia2 in range(Na):
+                    T2row = T2[ia2]               # (Na,)
+                    for ii in range(Ni):
+                        best = -1e30
+                        for ix in range(Nx):
+                            # reward
+                            r = R[ip, ia1, ia2, ii, ix]
+                            # next indices
+                            ipn = p_next_idx[ip, ix]
+                            iin = i_next_idx[ii, ix]
+                            # expectation  E[V’]
+                            EV = 0.0
+                            for ja1 in range(Na):
+                                Tv1 = T1row[ja1]
+                                for ja2 in range(Na):
+                                    EV += Tv1 * T2row[ja2] * V[ipn, ja1, ja2, iin]
+                            val = r + gamma*EV
+                            if val > best:
+                                best = val
+                        Vnew[ip, ia1, ia2, ii] = best
+        # convergence check
+        delta = np.max(np.abs(Vnew - V))
+        V[:] = Vnew
+        if delta < tol:
+            break
+    return V
+
+# initial V(s)=0
+V = np.zeros((N_p, N_a, N_a, N_i), dtype=dtype)
+V = value_iteration(V, R, p_next_idx, i_next_idx,
+                    T1.astype(dtype), T2.astype(dtype),
+                    dtype(gamma), n_vi, tol)
+
+# ----------------------------------------------------------------
+# 4) fast greedy-policy step (vectorised over all x)
+# ----------------------------------------------------------------
+@nb.njit(fastmath=True)
+def greedy_action_idx(ip, ia1, ia2, ii, V,
+                      R, p_next_idx_row, i_next_idx_row,
+                      T1row, T2row, gamma):
+    """Return best ix given the indices of the current state."""
+    best_val, best_ix = -1e30, 0
+    for ix in range(R.shape[-1]):
+        r      = R[ip, ia1, ia2, ii, ix]
+        ipn    = p_next_idx_row[ix]
+        iin    = i_next_idx_row[ix]
+        EV = 0.0
+        for ja1 in range(T1row.size):
+            Tv1 = T1row[ja1]
+            for ja2 in range(T2row.size):
+                EV += Tv1 * T2row[ja2] * V[ipn, ja1, ja2, iin]
+        val = r + gamma * EV
+        if val > best_val:
+            best_val, best_ix = val, ix
+    return best_ix
+
+# ----------------------------------------------------------------
+# 5) simulate a path under π*
+# ----------------------------------------------------------------
+@nb.njit
+def ar1_path(rho, n):
+    out = np.empty(n, dtype=dtype)
+    out[0] = np.random.randn()
+    sig = np.sqrt(1-rho*rho)
+    for t in range(1,n):
+        out[t] = rho*out[t-1] + sig*np.random.randn()
+    # clip to grid range
+    return np.minimum(1, np.maximum(-1, out))
+
+T_steps = 10_000
+np.random.seed(42)
+alpha1 = ar1_path(rho1, T_steps)
+alpha2 = ar1_path(rho2, T_steps)
+
+# start at (p=0, imb=0)
+ip  = nn_idx(p_space, 0.0).item()
+ii  = nn_idx(imb_space, 0.0).item()
+
+rewards = np.empty(T_steps, dtype=dtype)
+for t in range(T_steps):
+    ia1 = nn_idx(a_space, alpha1[t]).item()
+    ia2 = nn_idx(a_space, alpha2[t]).item()
+
+    ix  = greedy_action_idx(
+            ip, ia1, ia2, ii, V, R,
+            p_next_idx[ip], i_next_idx[ii],
+            T1[ia1], T2[ia2], dtype(gamma))
+
+    x   = x_space[ix]
+    p_now   = p_space[ip]
+    imb_now = imb_space[ii]
+
+    pnl     = (alpha1[t] + alpha2[t]) * (p_now + x)
+    cost    = 0.5*tla*x*x + C*np.abs(x)
+    risk    = 0.5*la*(p_now + x)**2
+    impact  = 0.5*imb_now*x*x
+    rewards[t] = pnl - cost - risk - impact
+
+    # update state indices
+    ip = p_next_idx[ip, ix]
+    ii = i_next_idx[ii, ix]
+
+print("mean one-step reward =", rewards.mean())
+
+# plot
+plt.figure(figsize=(6,3.5))
+plt.plot(np.cumsum(rewards))
+plt.title("Cum. reward (vectorised / Numba)")
+plt.xlabel("step"); plt.ylabel("Σ reward")
+plt.tight_layout(); plt.show()
