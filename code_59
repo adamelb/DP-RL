@@ -1,0 +1,167 @@
+#!/usr/bin/env python
+"""
+Baseline RL-style training script
+
+• big “offline” dataset is generated implicitly and lives only on-the-fly
+• every epoch draws a small random subset of that dataset
+• inside the epoch we
+      – break the subset into micro-batches
+      – compute expensive feature → reward + γ maxQ’ target
+      – accumulate gradients
+• target_model is frozen for the whole run
+• DDP  + AMP  + GradScaler  + LR scheduler
+"""
+
+import os, math, argparse, random, torch, torch.distributed as dist
+from torch import nn
+from torch.utils.data import Dataset, DataLoader, DistributedSampler, SubsetRandomSampler
+from torch.cuda.amp import autocast, GradScaler
+
+# ─────────────────────────────  DATASET  ──────────────────────────────
+class BigTransitionDataset(Dataset):
+    """
+    Each item is a tuple (state, next_state).
+    • state, next_state ∈ ℝ^{in_dim}
+    • rewards are *not* stored, they’re produced by reward_fn during training.
+    """
+    def __init__(self, N: int, in_dim: int, seed: int = 0):
+        self.N, self.in_dim = N, in_dim
+        self.g = torch.Generator().manual_seed(seed)
+
+    def __len__(self):  return self.N
+
+    def __getitem__(self, idx):
+        s  = torch.randn(self.in_dim, generator=self.g)       # state
+        ns = torch.randn(self.in_dim, generator=self.g) * 1.1 # next_state
+        return s, ns
+
+# ─────────────────────────────  MODELS  ───────────────────────────────
+class QNetwork(nn.Module):
+    def __init__(self, in_dim=128, hidden=256, actions=8):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, actions)         # Q(s,·)
+        )
+
+    def forward(self, x):                      # x: (B, in_dim)
+        return self.net(x)                     # (B, actions)
+
+# ─────────────────────────────  HELPERS  ──────────────────────────────
+def reward_fn(features: torch.Tensor) -> torch.Tensor:
+    """
+    Placeholder reward function *you* should replace.
+    For demo: r = ‖features‖₂  (shape B)
+    """
+    return features.norm(dim=1)
+
+def init_dist():
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    torch.cuda.set_device(rank % torch.cuda.device_count())
+    return rank, dist.get_world_size()
+
+def cleanup():  dist.destroy_process_group()
+
+# ─────────────────────────────  TRAIN ONE EPOCH  ──────────────────────
+def train_epoch(model, target_model, loader, optimizer, scaler, scheduler,
+                micro_bs, gamma, device, epoch, log_every=20):
+    model.train();  target_model.eval()
+    mse = nn.MSELoss()
+    for step, (state, next_state) in enumerate(loader):
+        state, next_state = state.to(device), next_state.to(device)
+        B = state.size(0)
+        accum_iters = math.ceil(B / micro_bs)
+        for i in range(accum_iters):
+            s  = state      [i*micro_bs : (i+1)*micro_bs]
+            ns = next_state [i*micro_bs : (i+1)*micro_bs]
+
+            # ─── expensive feature extraction (user-supplied) ───
+            with autocast():
+                feat      = s          # plug in your own feature function
+                next_feat = ns
+
+                reward = reward_fn(feat)                     # (b,)
+                with torch.no_grad():
+                    q_next = target_model(next_feat)         # (b, A)
+                    max_q  = q_next.max(dim=1).values        # (b,)
+
+                target = reward + gamma * max_q              # (b,)
+
+                pred = model(feat).max(dim=1).values         # (b,) pick argmax here as well
+
+                loss = mse(pred, target) / accum_iters       # average over micro-batches
+
+            scaler.scale(loss).backward()
+
+        # ─── optimizer step / scheduler / zero grad ───
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+        scheduler.step()
+
+        if step % log_every == 0 and dist.get_rank() == 0:
+            lr = scheduler.get_last_lr()[0]
+            print(f"Epoch {epoch}  Step {step}/{len(loader)}  "
+                  f"Loss {loss.item():.3e}  LR {lr:.2e}")
+
+# ───────────────────────────────  MAIN  ───────────────────────────────
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--epochs",        type=int, default=5)
+    p.add_argument("--big-size",      type=int, default=5_000_000)
+    p.add_argument("--epoch-size",    type=int, default=100_000)
+    p.add_argument("--global-batch",  type=int, default=4096)
+    p.add_argument("--micro-batch",   type=int, default=128)
+    p.add_argument("--in-dim",        type=int, default=128)
+    p.add_argument("--actions",       type=int, default=8)
+    p.add_argument("--gamma",         type=float, default=0.99)
+    args = p.parse_args()
+
+    rank, world = init_dist()
+    device = torch.device("cuda")
+
+    # ─── big dataset + “small per-epoch” sampler ───
+    big_ds = BigTransitionDataset(args.big_size, args.in_dim)
+    per_rank_epoch = args.epoch_size // world
+    # SubsetRandomSampler chooses *different* samples every epoch (seed later)
+    subset_indices = list(range(args.big_size))              # pre-compute once
+
+    # DataLoader will be rebuilt each epoch so we don’t create it yet
+
+    # ─── models ───
+    model = QNetwork(args.in_dim, hidden=256, actions=args.actions).to(device)
+    target_model = QNetwork(args.in_dim, hidden=256, actions=args.actions).to(device)
+    target_model.load_state_dict(model.state_dict())   # same weights, then freeze
+    for p_ in target_model.parameters(): p_.requires_grad = False
+
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device])
+
+    # ─── optim / sched / scaler ───
+    optim = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
+    total_steps = args.epochs * math.ceil(args.epoch_size / args.global_batch)
+    sched  = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=total_steps)
+    scaler = GradScaler()
+
+    # ─── training ───
+    for ep in range(1, args.epochs + 1):
+        # rebuild subset sampler with new random subset (same on every rank)
+        random.seed(42 + ep)
+        epoch_indices = random.sample(subset_indices, args.epoch_size)
+        sampler = SubsetRandomSampler(epoch_indices)
+        # DistributedSampler shards the subset across GPUs
+        dist_sampler = DistributedSampler(sampler, num_replicas=world, rank=rank, shuffle=False)
+        per_gpu_bs = args.global_batch // world
+        loader = DataLoader(big_ds, batch_size=per_gpu_bs, sampler=dist_sampler,
+                            num_workers=4, pin_memory=True, persistent_workers=True)
+
+        train_epoch(model, target_model, loader, optim, scaler, sched,
+                    args.micro_batch, args.gamma, device, ep)
+
+    cleanup()
+
+if __name__ == "__main__":
+    main()
