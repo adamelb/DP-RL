@@ -1,0 +1,217 @@
+#!/usr/bin/env python
+"""
+Distributed baseline that matches the user-provided inner-loop formulae.
+
+• Big synthetic dataset is regenerated once (→ tensors P_data, alpha_data, …)
+• Every epoch draws a random “small” subset
+• Inside the epoch:
+      – micro-batch fragmentation + gradient accumulation
+      – heavy feature / reward / target calculations (done on-device, parallel on 8 GPUs)
+• DDP  +  AMP  +  GradScaler  +  AdamW  +  Cosine schedule
+"""
+
+import math, time, random, argparse
+import torch
+import torch.nn.functional as F
+import torch.distributed as dist
+from torch import nn
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
+
+# ─────────────────────────  <<<  CONSTANTS  >>>  ──────────────────────────
+# >>>>>>>>>>>>>>>>>>>  replace the values to suit your project  <<<<<<<<<<<<<<<<<<
+CMIN, CMAX          = 0.0,  2.0
+T1MIN, T1MAX        = 100.0, 1500.0
+RHO_MIN, RHO_MAX    = 0.6,  0.98
+ACTIONS             = torch.tensor([-3, -1, 0, 1, 3], dtype=torch.float32)        # TODO
+N_QUANTILES         = 50                                                          # TODO
+Z_VALUES            = torch.randn(N_QUANTILES, dtype=torch.float32)               # TODO
+GAMMA               = 0.99
+# ──────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────  DATA SAMPLER  ────────────────────────────
+def resample_dataset(n: int, device: torch.device):
+    """Generate the full parameter tensors once, all on the chosen device."""
+    P     = torch.rand(n, device=device)
+    alpha = torch.rand(n, device=device)
+    c     = torch.rand(n, device=device) * (CMAX - CMIN) + CMIN
+    t1    = torch.rand(n, device=device) * (T1MAX - T1MIN) + T1MIN
+    rho   = torch.rand(n, device=device) * (RHO_MAX - RHO_MIN) + RHO_MIN
+    return P, alpha, c, t1, rho
+
+class BigTensorDataset(Dataset):
+    """Wrap precomputed tensors so DataLoader can index them."""
+    def __init__(self, *tensors):
+        self.tensors = tensors
+        self.len = tensors[0].size(0)
+    def __len__(self):  return self.len
+    def __getitem__(self, idx):
+        return tuple(t[idx] for t in self.tensors)
+
+# ─────────────────────────────  FEATURES  ────────────────────────────────
+def features(P, alpha, c, rho, t1):
+    """
+    Very simple placeholder: concatenation → (B, 5)
+    Swap in your real (possibly expensive) feature extractor.
+    """
+    return torch.stack([P, alpha, c, rho, t1], dim=-1)
+
+# ─────────────────────────────  REWARD  ──────────────────────────────────
+@torch.jit.script
+def reward(alpha: torch.Tensor, P: torch.Tensor,
+           action: torch.Tensor, c: torch.Tensor, t1: torch.Tensor):
+    """
+    r(·) = α·P  -  c·|a|  -  0.5·t1·a²  -  0.5·P²     (user-supplied formula)
+    The action tensor comes in broadcast shape.
+    """
+    return alpha * P - c * action.abs() - 0.5 * t1 * action**2 - 0.5 * P**2
+
+# ─────────────────────────────  NETWORK  ────────────────────────────────
+class ValueNN(nn.Module):
+    def __init__(self, in_dim: int = 5, hidden: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+    def forward(self, phi):           # phi: (B, F)
+        return self.net(phi).squeeze(-1)   # (B,)
+
+# ─────────────────────────────  DDP UTILS  ───────────────────────────────
+def init_dist():
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    torch.cuda.set_device(rank % torch.cuda.device_count())
+    return rank, dist.get_world_size()
+def cleanup(): dist.destroy_process_group()
+
+# ─────────────────────────  TRAIN ONE EPOCH  ─────────────────────────────
+def train_epoch(model, target_model, loader,
+                optim, scaler, sched, micro_bs,
+                device, epoch, log_every=20):
+    model.train();  target_model.eval()
+    mse = nn.MSELoss()
+    actions = ACTIONS.to(device)                       # (A,)
+    z_vals  = Z_VALUES.to(device)                      # (Q,)
+
+    for step, batch in enumerate(loader):
+        P, alpha, c, t1, rho = (x.to(device) for x in batch)
+        B = P.size(0)
+        accum_iters = math.ceil(B / micro_bs)
+
+        for i in range(accum_iters):
+            sl = slice(i*micro_bs, (i+1)*micro_bs)
+            P_b, alpha_b, c_b, t1_b, rho_b = (x[sl] for x in (P, alpha, c, t1, rho))
+
+            with torch.cuda.amp.autocast():
+                # 1) state-value prediction
+                phi      = features(P_b, alpha_b, c_b, rho_b, t1_b)
+                V_pred   = model(phi)                         # (b,)
+
+                # 2) next-state sampling (α')
+                mu_g     = (alpha_b * rho_b).unsqueeze(1)     # (b,1)
+                sigma_g  = torch.sqrt(1 - rho_b*rho_b).unsqueeze(1)
+                alpha_next = mu_g + sigma_g * z_vals.view(1, -1)   # (b,Q)
+
+                # 3) expand tensors for all actions & quantiles
+                P_exp   = P_b.unsqueeze(1)                    # (b,1)
+                c_exp   = c_b.unsqueeze(1)
+                t1_exp  = t1_b.unsqueeze(1)
+                rho_exp = rho_b.unsqueeze(1)
+
+                P_next = P_exp.unsqueeze(2) + actions.view(1, -1, 1)      # (b,A,1)
+                P_next = P_next.expand(-1, -1, N_QUANTILES)               # (b,A,Q)
+
+                # (α',c,ρ,t1) expanded to (b,A,Q)
+                alpha_next_e = alpha_next.unsqueeze(1).expand(-1, actions.size(0), -1)
+                c_e   = c_exp.unsqueeze(2).expand_as(P_next)
+                t1_e  = t1_exp.unsqueeze(2).expand_as(P_next)
+                rho_e = rho_exp.unsqueeze(2).expand_as(P_next)
+
+                # 4) next-state value with frozen target
+                phi_next = features(P_next.reshape(-1),
+                                    alpha_next_e.reshape(-1),
+                                    c_e.reshape(-1),
+                                    rho_e.reshape(-1),
+                                    t1_e.reshape(-1))
+                with torch.no_grad():
+                    v_next = target_model(phi_next).view(B, actions.size(0), N_QUANTILES)
+                    V_avg  = v_next.mean(dim=2)               # (b,A)
+
+                # 5) reward for every action
+                R = reward(alpha_b.unsqueeze(1),
+                           P_exp, actions.unsqueeze(0),
+                           c_exp,  t1_exp)                    # (b,A)
+
+                target = R + GAMMA * V_avg                    # (b,A)
+                target_best = target.max(dim=1).values        # (b,)
+
+                loss = mse(V_pred, target_best.detach()) / accum_iters
+
+            scaler.scale(loss).backward()
+
+        # ---- step ----
+        scaler.step(optim)
+        scaler.update()
+        optim.zero_grad(set_to_none=True)
+        sched.step()
+
+        if step % log_every == 0 and dist.get_rank() == 0:
+            print(f"E{epoch:02d} [{step:04d}/{len(loader)}]"
+                  f"  loss={loss.item():.4e}"
+                  f"  lr={sched.get_last_lr()[0]:.2e}")
+
+# ───────────────────────────────  MAIN  ────────────────────────────────
+def main():
+    argp = argparse.ArgumentParser()
+    argp.add_argument("--epochs",        type=int, default=5)
+    argp.add_argument("--big-size",      type=int, default=5_000_000)
+    argp.add_argument("--epoch-size",    type=int, default=200_000)
+    argp.add_argument("--global-batch",  type=int, default=8192)
+    argp.add_argument("--micro-batch",   type=int, default=256)
+    argp.add_argument("--hidden",        type=int, default=128)
+    args = argp.parse_args()
+
+    rank, world = init_dist()
+    device = torch.device("cuda")
+
+    # ─── build full tensors once (lives on each GPU, quickest to demo) ───
+    if rank == 0:
+        print("Generating full dataset …")
+    P_all, alpha_all, c_all, t1_all, rho_all = resample_dataset(args.big_size, device)
+    dataset = BigTensorDataset(P_all, alpha_all, c_all, t1_all, rho_all)
+
+    # ─── models ───
+    model        = ValueNN(in_dim=5, hidden=args.hidden).to(device)
+    target_model = ValueNN(in_dim=5, hidden=args.hidden).to(device)
+    target_model.load_state_dict(model.state_dict())
+    for p in target_model.parameters(): p.requires_grad = False
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device])
+
+    # ─── optimiser / scheduler / scaler ───
+    optim = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
+    steps_per_epoch = math.ceil(args.epoch_size / args.global_batch)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optim, T_max=args.epochs * steps_per_epoch)
+    scaler = torch.cuda.amp.GradScaler()
+
+    # ─── training epochs ───
+    full_indices = torch.arange(args.big_size, device=device)
+    for epoch in range(1, args.epochs + 1):
+        # pick a fresh random subset; shard it with DistributedSampler
+        epoch_idx = full_indices[torch.randperm(args.big_size, device=device)[:args.epoch_size]]
+        sampler = DistributedSampler(epoch_idx,
+                                     num_replicas=world, rank=rank, shuffle=False)
+        per_gpu_bs = args.global_batch // world
+        loader = DataLoader(dataset, batch_size=per_gpu_bs,
+                            sampler=sampler, num_workers=0, pin_memory=False)
+
+        train_epoch(model, target_model, loader,
+                    optim, scaler, sched,
+                    args.micro_batch, device, epoch)
+
+    cleanup()
+
+if __name__ == "__main__":
+    main()
