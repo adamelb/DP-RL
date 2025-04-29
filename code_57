@@ -1,0 +1,84 @@
+# fast_acc.py  ── launch with:  torchrun --standalone -nproc_per_node=8 fast_acc.py
+import os, torch, torch.distributed as dist, torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.cuda.amp import GradScaler, autocast
+# -------------------------------------------------------------------
+from model_def import ValueMLP, features, compute_reward, resample_dataset
+
+LR, WD, ACC_STEPS = 1e-4, 1e-4, 10
+EPOCHS, ITERS      = 4, 20
+MBATCH             = 4096                     # micro-batch per GPU
+
+# helper ─────────────────────────────────────────────────────────────
+def build_opt(model):
+    decay, no_decay = [], []
+    for n,p in model.named_parameters():
+        (no_decay if p.ndim==1 or n.endswith('.bias') else decay).append(p)
+    return torch.optim.Adam(
+        [{'params':decay,'weight_decay':WD},
+         {'params':no_decay,'weight_decay':0.0}], lr=LR)
+
+# one micro-batch, returns loss (scalar) ────────────────────────────
+def forward_loss(net, tgt, batch):
+    P, A, C, T1, RHO = batch
+    with autocast():
+        phi      = features(P, A, C, RHO, T1)
+        v_pred   = net(phi).view(-1)
+        # --- your target-value & loss math here --------------------
+        R = compute_reward(P, A, C, T1)           # plug in yours
+        with torch.no_grad():
+            v_next = tgt(phi).view_as(v_pred)
+        loss = torch.nn.functional.mse_loss(v_pred, (R+v_next).detach())
+    return loss
+
+# -------------------------------------------------------------------
+def worker(rank, world):
+    dist.init_process_group("nccl", rank=rank, world_size=world)
+    torch.cuda.set_device(rank)
+
+    base  = ValueMLP().to(rank)
+    model = DDP(base, device_ids=[rank])
+    target= ValueMLP().to(rank); target.load_state_dict(base.state_dict())
+    for p in target.parameters(): p.requires_grad_(False)
+
+    opt     = build_opt(model)
+    scaler  = GradScaler()
+
+    for it in range(ITERS):                     # ① outer iteration
+        data = resample_dataset(device=rank)    # one big dataset
+        if rank==0: print(f"\nITER {it+1}/{ITERS}")
+
+        for epoch in range(EPOCHS):             # ② epoch loop
+            N = data[0].size(0)
+            opt.zero_grad(set_to_none=True)
+
+            # ░░░░░░░░░░░░ ③ PARALLEL ACCUMULATION ░░░░░░░░░░░░
+            # Every GPU does ONE micro-batch → all 8 run together
+            # Repeat until we have done ACC_STEPS distinct mbatches
+            for step in range(ACC_STEPS):
+                idx = torch.randint(0, N, (MBATCH,), device=rank)
+                batch = tuple(t[idx] for t in data)
+
+                # no_sync() stops DDP from all-reducing until last step
+                ctx = model.no_sync() if step < ACC_STEPS-1 else \
+                      torch.contextlib.nullcontext()
+                with ctx:
+                    loss = forward_loss(model, target, batch) / ACC_STEPS
+                    scaler.scale(loss).backward()
+
+            # after 10 parallel grads are on every GPU → one optimizer step
+            scaler.step(opt); scaler.update(); opt.zero_grad(set_to_none=True)
+            if rank==0:
+                print(f"  epoch {epoch+1}/{EPOCHS}   loss={loss.item()*ACC_STEPS:.5f}")
+
+        # freeze: copy net → target on every GPU
+        target.load_state_dict(base.state_dict())
+        dist.barrier()          # keep everybody lined up
+
+    if rank==0: print("done")
+    dist.destroy_process_group()
+
+# -------------------------------------------------------------------
+if __name__ == "__main__":
+    gpus = torch.cuda.device_count()
+    mp.spawn(worker, nprocs=gpus, args=(gpus,))
