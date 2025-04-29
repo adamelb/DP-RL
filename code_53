@@ -1,0 +1,173 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ──────────────────────────────────────────────────────────────
+# 1. PARAMETERS ––––––––––––––––––––––––––––––––––––––––––––––––
+# ──────────────────────────────────────────────────────────────
+rho1, rho2   =  0.90, 0.70        # AR(1) autocorrelations
+C            =  5.0               # linear transaction cost
+tla          = 60.0               # quadratic transaction-cost weight
+la           =  1.0               # risk-aversion coefficient
+gamma        =  0.99              # discount factor
+phi          =  0.90              # imbalance persistence
+n_value_iter = 120                # value-iteration sweeps
+#
+# GRID SIZES  (feel free to change)
+N_p  = 41                         # price grid  (­1 … 1)
+N_a  = 41                         # alpha grids (­1 … 1)
+N_i  = 41                         # imbalance grid (­0.5 … 0.5)
+N_x  = 41                         # action grid  (­0.5 … 0.5)
+# ──────────────────────────────────────────────────────────────
+
+# Discrete grids
+p_space   = np.linspace(-1.0,  1.0, N_p )
+a1_space  = np.linspace(-1.0,  1.0, N_a )
+a2_space  = np.linspace(-1.0,  1.0, N_a )
+imb_space = np.linspace(-0.5,  0.5, N_i )
+x_space   = np.linspace(-0.5,  0.5, N_x )
+
+# Helper: nearest-neighbour projection
+def nearest_idx(space, x):
+    """Return index/indices of x on 'space'."""
+    return np.abs(np.asarray(x)[..., None] - space).argmin(-1)
+
+# ----------------------------------------------------------------
+# 2. MARKOV MATRICES FOR THE TWO ALPHA PROCESSES
+# ----------------------------------------------------------------
+def build_transition(space, rho, n_mc=10_000):
+    """
+    Project AR(1):  α' = ρ α + √(1-ρ²) ε,   ε~N(0,1),
+    onto the discrete grid using MC and nearest-point projection.
+    """
+    samples = rho * space + np.sqrt(1-rho**2) * np.random.randn(n_mc, len(space))
+    proj    = nearest_idx(space, samples)[..., None]          # shape (n_mc, Nα, 1)
+    T       = np.zeros((len(space), len(space)), dtype=np.float32)
+    for current, column in enumerate(proj.swapaxes(0,1)):     # loop over current α
+        idx, cnt = np.unique(column, return_counts=True)
+        T[current, idx] = cnt / cnt.sum()
+    return T
+
+T1 = build_transition(a1_space, rho1)  # shape (N_a, N_a)
+T2 = build_transition(a2_space, rho2)
+
+# ----------------------------------------------------------------
+# 3. VALUE-ITERATION
+# ----------------------------------------------------------------
+V = np.zeros((N_p, N_a, N_a, N_i), dtype=np.float32)  # initial V(s)=0
+
+for it in range(n_value_iter):
+    V_new = np.empty_like(V)
+    #
+    for ip, p in enumerate(p_space):
+        for ia1, a1 in enumerate(a1_space):
+            for ia2, a2 in enumerate(a2_space):
+                for ii, imb in enumerate(imb_space):
+
+                    best = -np.inf
+                    # loop over discrete actions x
+                    for x in x_space:
+                        # one-step reward
+                        pnl   = (a1 + a2) * (p + x)
+                        cost  = 0.5 * tla * x**2 + C * abs(x)
+                        risk  = 0.5 * la  * (p + x)**2
+                        impact = 0.5 * imb * x**2      # **penalty** (subtract)
+                        r = pnl - cost - risk - impact
+
+                        # next deterministic coordinates
+                        p_next   = np.clip(p + x,          p_space[0],   p_space[-1])
+                        imb_next = np.clip((1-phi)*x + phi*imb,
+                                           imb_space[0], imb_space[-1])
+                        ipn  = nearest_idx(p_space,   p_next)
+                        iin  = nearest_idx(imb_space, imb_next)
+
+                        # expectation over alpha1', alpha2'
+                        EV = (
+                            T1[ia1] @         # (1×N_a)
+                            (T2[ia2] @ V[ipn, :, :, iin])  # (N_a×1)
+                        )                     # scalar
+
+                        best = max(best, r + gamma * EV)
+
+                    V_new[ip, ia1, ia2, ii] = best
+    # Δ for monitoring
+    delta = np.max(np.abs(V_new - V))
+    V[:]  = V_new
+    if delta < 1e-4:                    # early stopping
+        print(f"Converged at iteration {it}")
+        break
+
+# ----------------------------------------------------------------
+# 4. EXTRACT A GREEDY POLICY (π*) AND SIMULATE A PATH
+# ----------------------------------------------------------------
+def greedy_action(p_idx, a1_idx, a2_idx, imb_idx):
+    """Return argmax_a Q(s,a) on the discrete x grid."""
+    p   = p_space[p_idx]
+    a1  = a1_space[a1_idx]
+    a2  = a2_space[a2_idx]
+    imb = imb_space[imb_idx]
+
+    best_val, best_x_idx = -np.inf, 0
+    for jx, x in enumerate(x_space):
+        pnl   = (a1 + a2) * (p + x)
+        cost  = 0.5 * tla * x**2 + C * abs(x)
+        risk  = 0.5 * la  * (p + x)**2
+        impact = 0.5 * imb * x**2
+        r = pnl - cost - risk - impact
+
+        ipn  = nearest_idx(p_space, p + x)
+        iin  = nearest_idx(imb_space, (1-phi)*x + phi*imb)
+
+        EV = (T1[a1_idx] @ (T2[a2_idx] @ V[ipn, :, :, iin]))
+        val = r + gamma * EV
+        if val > best_val:
+            best_val, best_x_idx = val, jx
+    return best_x_idx
+
+# sample α1, α2 paths
+def ar1_path(rho, n):
+    x = np.zeros(n)
+    x[0] = np.random.randn()
+    for t in range(1, n):
+        x[t] = rho * x[t-1] + np.sqrt(1-rho**2) * np.random.randn()
+    return np.clip(x, -1, 1)            # keep inside grid
+
+np.random.seed(42)
+T = 10_000                              # number of simulation steps
+alpha1_path = ar1_path(rho1, T)
+alpha2_path = ar1_path(rho2, T)
+
+p_idx   = nearest_idx(p_space,   0.0)   # start at p=0
+imb_idx = nearest_idx(imb_space, 0.0)   # start at imbalance=0
+
+cum_reward, rewards = [], []
+for t in range(T):
+    a1_idx = nearest_idx(a1_space, alpha1_path[t])
+    a2_idx = nearest_idx(a2_space, alpha2_path[t])
+
+    x_idx  = greedy_action(p_idx, a1_idx, a2_idx, imb_idx)
+    x      = x_space[x_idx]
+
+    # realised reward
+    p_now   = p_space[p_idx]
+    imb_now = imb_space[imb_idx]
+    pnl     = (alpha1_path[t] + alpha2_path[t]) * (p_now + x)
+    cost    = 0.5 * tla * x**2 + C * abs(x)
+    risk    = 0.5 * la  * (p_now + x)**2
+    impact  = 0.5 * imb_now * x**2
+    r_t     = pnl - cost - risk - impact
+    rewards.append(r_t)
+
+    # state update
+    p_idx   = nearest_idx(p_space, p_now + x)
+    imb_idx = nearest_idx(imb_space, (1-phi)*x + phi*imb_now)
+
+# cumulative-sum plot
+plt.figure(figsize=(7,4))
+plt.plot(np.cumsum(rewards))
+plt.title("Cumulative reward along greedy-policy path")
+plt.xlabel("step")
+plt.ylabel("cum. reward")
+plt.tight_layout()
+plt.show()
+
+print("Average one-step reward:", np.mean(rewards))
