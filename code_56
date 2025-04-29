@@ -1,0 +1,130 @@
+# train.py  (save as a standalone .py script)
+import os, time, math, torch, torch.nn.functional as F
+import torch.multiprocessing as mp
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.cuda.amp import GradScaler, autocast
+from model_def import ValueMLP, features, ACTIONS, resample_dataset   # keep your own definitions here
+
+# ----------------------- hyper-parameters -----------------------
+LR             = 1e-4
+WEIGHT_DECAY   = 1e-4
+ACC_STEPS      = 10          # gradient-accumulation steps
+BATCH_SIZE     = 4096        # micro-batch per GPU *before* split across ACC_STEPS
+MAX_EPOCHS     = 300
+GAMMA          = (1e-2) ** (1 / MAX_EPOCHS)   # same as your scheduler
+# ----------------------------------------------------------------
+
+def build_optimizer(model):
+    decay, no_decay = [], []
+    for n, p in model.named_parameters():
+        if p.ndim == 1 or n.endswith(".bias"):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    return torch.optim.Adam(
+        [{"params": decay,     "weight_decay": WEIGHT_DECAY},
+         {"params": no_decay,  "weight_decay": 0.0}],
+        lr=LR
+    )
+
+# ------------------ one *micro-batch* forward/backward -----------
+def micro_step(model, batch, scaler, acc_steps):
+    P, α, c, t1, ρ = batch                # unpack
+    with autocast():
+        ϕ        = features(P, α, c, ρ, t1)
+        V_pred   = model(ϕ).view(-1)
+
+        # ---- everything below is exactly your target-value code ---
+        μ_α      = (α * ρ).unsqueeze(1)
+        σ_α      = torch.sqrt(1 - ρ * ρ).unsqueeze(1)
+        α_next   = μ_α + σ_α * torch.randn_like(μ_α)
+
+        P_exp    = P.unsqueeze(1)
+        c_exp    = c.unsqueeze(1)
+        t1_exp   = t1.unsqueeze(1)
+        ρ_exp    = ρ.unsqueeze(1)
+
+        actions  = ACTIONS.view(1, -1, 1)
+        P_next   = P_exp.unsqueeze(2) + actions
+        P_next   = P_next.expand(-1, -1, α_next.size(1))
+
+        α_b = α_next.unsqueeze(1).expand_as(P_next)
+        c_b = c_exp.unsqueeze(2).expand_as(P_next)
+        t1_b = t1_exp.unsqueeze(2).expand_as(P_next)
+        ρ_b = ρ_exp.unsqueeze(2).expand_as(P_next)
+
+        B, A, Q = P_next.shape
+        ϕ_next  = features(P_next.reshape(-1),
+                           α_b.reshape(-1),
+                           c_b.reshape(-1),
+                           ρ_b.reshape(-1),
+                           t1_b.reshape(-1))
+        with torch.no_grad():
+            V_next = model.module.target_net(ϕ_next)    # see below
+            V_next = V_next.view(B, A, Q).mean(dim=2)
+
+        R         = reward(P_exp.squeeze(1), actions.squeeze(-1), c, t1)  # your reward()
+        target_V  = R + GAMMA * V_next.max(dim=1)[0]
+        loss      = F.mse_loss(V_pred, target_V.detach()) / acc_steps
+    scaler.scale(loss).backward()
+    return loss.item()
+# -----------------------------------------------------------------
+
+def train_one_epoch(model, opt, sched, scaler, data, acc_steps):
+    P_d, α_d, c_d, t1_d, ρ_d = data
+    N = P_d.size(0)
+    epoch_loss, steps = 0.0, 0
+
+    for _ in range(N // (BATCH_SIZE * acc_steps)):
+        opt.zero_grad(set_to_none=True)
+        for _ in range(acc_steps):
+            idx = torch.randint(0, N, (BATCH_SIZE,),
+                                device=P_d.device, requires_grad=False)
+            batch = (P_d[idx], α_d[idx], c_d[idx], t1_d[idx], ρ_d[idx])
+            epoch_loss += micro_step(model, batch, scaler, acc_steps)
+            steps += 1
+        scaler.step(opt)
+        scaler.update()
+        sched.step()
+    return epoch_loss / steps
+
+def setup_process(rank, world_size):
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+def cleanup():
+    dist.destroy_process_group()
+
+def main_worker(rank, world_size):
+    setup_process(rank, world_size)
+
+    # ---- create model and the "target network" used in your code --
+    net         = ValueMLP().to(rank)
+    net.target_net = ValueMLP().to(rank)          # ← keeps a frozen copy
+    net.target_net.load_state_dict(net.state_dict())
+    for p in net.target_net.parameters():
+        p.requires_grad_(False)
+    # wrap with DDP (only the **trainable** net)
+    ddp_net     = DDP(net, device_ids=[rank], find_unused_parameters=False)
+
+    opt         = build_optimizer(ddp_net)
+    sched       = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=GAMMA)
+    scaler      = GradScaler(enabled=torch.cuda.is_available())
+
+    # ------------ each rank can sample its own data ---------------
+    P, α, c, t1, ρ = resample_dataset()    # returns CUDA tensors
+    data_tensors   = (P.to(rank), α.to(rank), c.to(rank),
+                      t1.to(rank), ρ.to(rank))
+
+    for epoch in range(1, MAX_EPOCHS + 1):
+        loss = train_one_epoch(ddp_net, opt, sched,
+                               scaler, data_tensors, ACC_STEPS)
+        if rank == 0:
+            print(f"[Epoch {epoch:3d}]  loss = {loss:.6f}")
+
+    cleanup()
+
+if __name__ == "__main__":
+    world_size = torch.cuda.device_count()   # e.g. 8
+    mp.spawn(main_worker, nprocs=world_size, args=(world_size,))
