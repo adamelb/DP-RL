@@ -1,0 +1,117 @@
+#!/usr/bin/env python
+# train.py
+import os, math, argparse, torch, torch.distributed as dist
+from torch import nn
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
+from torch.cuda.amp import autocast, GradScaler
+
+# ----------  Synthetic dataset ------------------------------------------------
+class BigRandomDataset(Dataset):
+    """Huge implicit dataset: x ~ N(0,1), y = Wx + b + ε."""
+    def __init__(self, num_samples: int, in_dim: int, out_dim: int):
+        g = torch.Generator().manual_seed(42)
+        self.W = torch.randn(out_dim, in_dim, generator=g)
+        self.b = torch.randn(out_dim, generator=g)
+        self.n = num_samples
+        self.in_dim, self.out_dim = in_dim, out_dim
+
+    def __len__(self):  return self.n
+
+    def __getitem__(self, idx):
+        x = torch.randn(self.in_dim)
+        y = self.W @ x + self.b + 0.01 * torch.randn(self.out_dim)
+        return x, y
+
+# ----------  Simple MLP model -------------------------------------------------
+class MLP(nn.Module):
+    def __init__(self, in_dim=128, hidden=256, out_dim=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, out_dim),
+        )
+
+    def forward(self, x):  # (B, in_dim)
+        return self.net(x)
+
+# ----------  Setup helpers ----------------------------------------------------
+def init_dist():
+    dist.init_process_group("nccl")
+    rank = dist.get_rank()
+    torch.cuda.set_device(rank % torch.cuda.device_count())
+    return rank, dist.get_world_size()
+
+def cleanup():  dist.destroy_process_group()
+
+# ----------  Training loop ----------------------------------------------------
+def train_one_epoch(model, loader, optimizer, scaler, scheduler,
+                    micro_batch, device, epoch, log_every=20):
+    model.train()
+    loss_fn = nn.MSELoss()
+    accum_steps = micro_batch  # micro_batch holds *size*, we’ll derive steps below
+    running_loss = 0.0
+    for step, (x, y) in enumerate(loader):
+        x, y = x.to(device), y.to(device)
+        accum_iter = math.ceil(x.size(0) / micro_batch)
+        for i in range(accum_iter):
+            start, end = i * micro_batch, (i + 1) * micro_batch
+            xb, yb = x[start:end], y[start:end]
+            with autocast():
+                pred = model(xb)
+                loss = loss_fn(pred, yb) / accum_iter   # scale loss
+            scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+        scheduler.step()
+
+        # Logging (all ranks)
+        running_loss += loss.item() * accum_iter
+        if step % log_every == 0:
+            lr = scheduler.get_last_lr()[0]
+            print(f"Epoch {epoch} | Step {step}/{len(loader)} | "
+                  f"Loss {running_loss/(step+1):.4e} | LR {lr:.3e}")
+
+# ----------  Main -------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--global-batch", type=int, default=4096)
+    parser.add_argument("--micro-batch", type=int, default=128)
+    parser.add_argument("--samples", type=int, default=10_000_000)
+    parser.add_argument("--in-dim", type=int, default=128)
+    parser.add_argument("--out-dim", type=int, default=64)
+    args = parser.parse_args()
+
+    rank, world_size = init_dist()
+    device = torch.device("cuda")
+
+    # Dataset & DistributedSampler
+    ds = BigRandomDataset(args.samples, args.in_dim, args.out_dim)
+    sampler = DistributedSampler(ds, num_replicas=world_size, rank=rank, shuffle=True)
+    # Each GPU gets global_batch/world_size samples per step
+    per_gpu_batch = args.global_batch // world_size
+    loader = DataLoader(ds, batch_size=per_gpu_batch,
+                        sampler=sampler, num_workers=4, pin_memory=True, persistent_workers=True)
+
+    # Model, DDP, optimizer, scheduler, scaler
+    model = MLP(args.in_dim, hidden=256, out_dim=args.out_dim).to(device)
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
+    # Warmup 1 epoch → cosine decay
+    total_steps = args.epochs * len(loader)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+    scaler = GradScaler()
+
+    for epoch in range(1, args.epochs + 1):
+        sampler.set_epoch(epoch)   # reshuffle each epoch
+        train_one_epoch(model, loader, optimizer, scaler, scheduler,
+                        args.micro_batch, device, epoch)
+
+    cleanup()
+
+if __name__ == "__main__":
+    main()
