@@ -238,3 +238,31 @@ def value_iter(V: torch.Tensor, n_iter: int, eps: float) -> torch.Tensor:
             V_new = Q if ix == 0 else torch.maximum(V_new, Q)
 
 
+
+# ► run this immediately after value-iteration, before deleting R ◄
+pi_star = torch.empty((Np, Na, Na, Ni), dtype=torch.int16, device=device)
+
+with torch.no_grad():
+    best_val = torch.full_like(V, -1e30)          # same shape as V
+    for ix in range(Nx):
+        ipn = p_next_idx[:, ix]
+        iin = i_next_idx[:, ix]
+        Vn  = V[ipn[:, None, None, None], :, :, iin[None, None, None, :]] \
+                .squeeze(1).squeeze(1)            # (Np,Ni,Na,Na)
+        Vn  = Vn.permute(0, 2, 3, 1)              # (p,j,k,f)
+        EV  = torch.einsum('aj,bk,pjkf->pabf', T1, T2, Vn)
+
+        Q = R[..., ix] + gamma * EV               # R *used only here*
+        better = Q > best_val
+        best_val = torch.where(better, Q, best_val)
+        pi_star[better] = ix                      # store best x-index
+
+import gc, torch
+del R, best_val
+gc.collect()
+torch.cuda.empty_cache()
+
+def greedy_action_idx(ip: int, ia1: int, ia2: int, ii: int) -> int:
+    """Return ix = π*(s) from the pre-computed table (CPU-friendly)."""
+    return int(pi_star[ip, ia1, ia2, ii])
+
