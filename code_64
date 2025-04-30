@@ -125,3 +125,66 @@ def greedy_action_idx(ip: torch.Tensor, ia1: torch.Tensor,
     return best_ix     # (B,)
 
 
+# ───────── simulate a 100 000-step trajectory & plot Σ-reward ─────────
+import torch, math
+import matplotlib.pyplot as plt
+
+T_steps = 100_000
+torch.manual_seed(123)
+
+# AR(1) helper — vectorised for speed
+def ar1_path(rho: float, n: int, *, device=None, dtype=torch.float32):
+    out = torch.empty(n, device=device, dtype=dtype)
+    out[0] = torch.randn((), device=device, dtype=dtype)
+    sig = math.sqrt(1.0 - rho*rho)
+    for t in range(1, n):
+        out[t] = rho * out[t-1] + sig * torch.randn((), device=device, dtype=dtype)
+    return out.clamp_(-3.0, 3.0)      # keep inside grid
+
+alpha1 = ar1_path(rho1, T_steps, device=device, dtype=dtype)
+alpha2 = ar1_path(rho2, T_steps, device=device, dtype=dtype)
+
+# start at p = 0, imbalance = 0   → nearest grid points
+ip = (p_space.abs()).argmin().item()
+ii = (imb_space.abs()).argmin().item()
+
+rewards = torch.empty(T_steps, device=device, dtype=dtype)
+
+for t in range(T_steps):
+    ia1 = (alpha1[t] - a_space).abs().argmin().item()
+    ia2 = (alpha2[t] - a_space).abs().argmin().item()
+
+    # greedy optimal action x_t
+    ix = greedy_action_idx(
+            torch.tensor([ip],  device=device),
+            torch.tensor([ia1], device=device),
+            torch.tensor([ia2], device=device),
+            torch.tensor([ii],  device=device)
+         )[0].item()
+
+    # scalar values for the reward components
+    x       = x_space[ix].item()
+    p_now   = p_space[ip].item()
+    imb_now = imb_space[ii].item()
+
+    pnl     = (alpha1[t].item() + alpha2[t].item()) * (p_now + x)
+    cost    = 0.5 * tla * x * x + C * abs(x)
+    risk    = 0.5 * la  * (p_now + x) ** 2
+    impact  = 0.5 * imb_now * x * x
+    rewards[t] = pnl - cost - risk - impact
+
+    # move to next discrete state
+    ip = p_next_idx[ip, ix].item()
+    ii = i_next_idx[ii, ix].item()
+
+# ───────── plot cumulative reward ─────────
+cum_rewards = rewards.cumsum(0).cpu()
+
+plt.figure(figsize=(7, 3))
+plt.plot(cum_rewards.numpy())
+plt.title("Cumulative reward over 100 000 steps under π*")
+plt.xlabel("time step")
+plt.ylabel("Σ reward")
+plt.tight_layout()
+plt.show()
+
