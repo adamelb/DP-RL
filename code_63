@@ -1,0 +1,49 @@
+import numpy as np
+
+def _F(x, alpha1, alpha2, p, tl, phi, imbalance):
+    """Objective value (broadcast-compatible)."""
+    return ((alpha1 + alpha2) * (p + x)
+            - 0.5 * tl * (phi * imbalance + (1 - phi) * x) * x**2
+            - 0.5 * (p + x)**2)
+
+def solve_V(alpha1, alpha2, p, tl, phi, imbalance):
+    """
+    Vectorised solver.
+    alpha1 and p may be scalars *or* nd-arrays (they broadcast together);
+    the other arguments are scalars.
+    Returns a pair (V, x_star) with the same shape as alpha1 & p.
+    """
+    alpha1, p = np.broadcast_arrays(alpha1, p)
+    A = 1.5 * tl * (1 - phi)
+    B = 1.0 + tl * phi * imbalance
+    C = p - (alpha1 + alpha2)
+
+    disc = np.maximum(B*B - 4*A*C, 0.0)
+    sqrt_disc = np.sqrt(disc)
+    twoA = 2*A
+
+    # roots of the quadratic (or linear) F.O.C.
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r1 = (-B + sqrt_disc) / twoA
+        r2 = (-B - sqrt_disc) / twoA
+        # linear case A ≈ 0
+        mask_lin = np.isclose(A, 0.0)
+        r_lin = -C / B
+        r1 = np.where(mask_lin, r_lin, r1)
+        r2 = np.where(mask_lin, r_lin, r2)
+
+    # four candidate points: two roots + the two boundaries
+    candidates = np.stack([r1, r2,
+                           np.full_like(r1, -0.5),
+                           np.full_like(r1,  0.5)], axis=-1)
+    candidates = np.clip(candidates, -0.5, 0.5)
+
+    values = _F(candidates,
+                alpha1[..., None], alpha2,
+                p[..., None], tl, phi, imbalance)
+
+    best_idx = np.argmax(values, axis=-1)
+    x_star   = np.take_along_axis(candidates, best_idx[..., None], axis=-1)[..., 0]
+    V        = np.take_along_axis(values,     best_idx[..., None], axis=-1)[..., 0]
+
+    return V, x_star
