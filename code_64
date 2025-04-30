@@ -188,3 +188,35 @@ plt.ylabel("Σ reward")
 plt.tight_layout()
 plt.show()
 
+
+
+
+
+# ────────────────── patched value-iteration kernel ──────────────────
+@torch.compile(mode="reduce-overhead")
+def value_iter(V: torch.Tensor, n_iter: int, eps: float) -> torch.Tensor:
+    T1_, T2_, R_, p_n, i_n = T1, T2, R, p_next_idx, i_next_idx   # capture constants
+    for it in range(n_iter):
+        V_new = torch.empty_like(V)
+        for ix in range(Nx):                         # loop over the 101 actions
+            ipn = p_n[:, ix]                         # (Np,)
+            iin = i_n[:, ix]                         # (Ni,)
+
+            # gather next-state values and **permute to (p, j, k, f)**
+            V_next = V[ipn[:, None, None, None], :, :, iin[None, None, None, :]]
+            V_next = V_next.permute(0, 2, 3, 1).contiguous()     # (Np, Na, Na, Ni)
+
+            # E[V′]  =  Σ_{j,k}  T1[a,j] · T2[b,k] · V_next[p,j,k,f]
+            EV = torch.einsum('aj,bk,pjkf->pabf', T1_, T2_, V_next)
+
+            Q  = R_[..., ix] + gamma * EV
+            V_new = Q if ix == 0 else torch.maximum(V_new, Q)
+
+        delta = (V_new - V).abs().max()
+        V.copy_(V_new)
+        if float(delta) < eps:
+            print(f"✓ converged in {it+1} sweeps  (Δ={delta:.2e})")
+            break
+    return V
+
+
