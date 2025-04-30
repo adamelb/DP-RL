@@ -220,3 +220,21 @@ def value_iter(V: torch.Tensor, n_iter: int, eps: float) -> torch.Tensor:
     return V
 
 
+        for ix in range(Nx):
+            ipn = p_n[:, ix]            # (Np,)
+            iin = i_n[:, ix]            # (Ni,)
+
+            # gather next-state values → (Np,1,1,Ni,Na,Na)
+            V_next = V[ipn[:, None, None, None], :, :, iin[None, None, None, :]]
+
+            # drop the two broadcasted singleton dimensions → (Np, Ni, Na, Na)
+            V_next = V_next.squeeze(1).squeeze(1)
+
+            # reorder to (p, j, k, f) so that 'pjkf' matches the einsum
+            V_next = V_next.permute(0, 2, 3, 1).contiguous()
+
+            EV = torch.einsum('aj,bk,pjkf->pabf', T1_, T2_, V_next)
+            Q  = R_[..., ix] + gamma * EV
+            V_new = Q if ix == 0 else torch.maximum(V_new, Q)
+
+
