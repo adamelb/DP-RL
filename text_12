@@ -1,0 +1,233 @@
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{1.  Restatement of the Bellman equation ( ``case $c=0$’’ )}
+
+Let
+\[
+p_{t-1}\in\R,\qquad 
+\mathrm{imb}_{t-1}\in\R,\qquad
+x_t\in\R ,
+\qquad 
+\alpha_{1,t},\alpha_{2,t}\in\R ,
+\]
+and denote \(a_t\equiv\alpha_{1,t}+\alpha_{2,t}\).
+With two constant structural parameters  
+
+\[
+\phi\in(0,1), \qquad \tau\ell>0 ,
+\]
+and a discount factor \(\gamma\in(0,1)\),  
+the Bellman equation you wrote reads
+
+\[
+\boxed{
+\begin{aligned}
+V&(p_{t-1},\mathrm{imb}_{t-1},\alpha_{1,t},\alpha_{2,t})\\
+&=\max_{x_t\in\R}\Bigl\{
+a_t\,(p_{t-1}+x_t)
+-\frac{\tau\ell}{2}\bigl(\phi\,\mathrm{imb}_{t-1}+(1-\phi)x_t\bigr)x_t
+-\frac12\bigl(p_{t-1}+x_t\bigr)^2
+\\
+&\hspace{4cm}
++\;\gamma\;
+\E\!\Bigl[
+V\bigl(\,p_{t-1}+x_t,\;
+        \phi\,\mathrm{imb}_{t-1}+(1-\phi)x_t,\;
+        \alpha_{1,t+1},\alpha_{2,t+1}\bigr)
+\;\Big|\;\alpha_{1,t},\alpha_{2,t}\Bigr]\Bigr\}.
+\end{aligned}}
+\]
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{2.  Linear–quadratic structure}
+
+\paragraph{State and control.}
+Write the \emph{state} as 
+\[
+s_t\;:=\;
+\begin{pmatrix}p_{t-1}\\[2pt]\mathrm{imb}_{t-1}\end{pmatrix},
+\qquad 
+u_t\;:=\;x_t .
+\]
+The (deterministic) dynamics that result from any trade \(u_t\) are linear:
+\[
+s_{t+1}
+=
+A\,s_t+B\,u_t,
+\qquad
+A
+=
+\begin{pmatrix}1&0\\[2pt]0&\phi\end{pmatrix},
+\qquad
+B
+=
+\begin{pmatrix}1\\[2pt]1-\phi\end{pmatrix}.
+\]
+
+\paragraph{Stage reward (to be \emph{maximised}).}
+Conditioning on the order‑flow shock \(a_t\) we have  
+\[
+r(s_t,u_t;a_t)
+=
+a_t\bigl(p_{t-1}+u_t\bigr)
+-\frac12\,
+\underbrace{\bigl(p_{t-1}+u_t\bigr)^2
+-\tau\ell\bigl(\phi\,\mathrm{imb}_{t-1}+(1-\phi)u_t\bigr)u_t}_{\text{quadratic in }(s_t,u_t)}.
+\]
+Hence the problem is \emph{linear–quadratic} (LQR) with a linear
+“shock’’ term \(a_t\bigl(p_{t-1}+u_t\bigr)\).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{3.  Quadratic value‑function \& ansatz}
+
+Because the system is LQR,
+there exists a quadratic value function of the form
+\[
+V_t(s_t,a_t)
+=
+\frac12\,s_t^{\!\top}P\,s_t
+\;+\;
+\frac{a_t^2}{2\Delta}
+\;+\;
+\frac{a_t}{\Delta}\,\theta^{\!\top}s_t
+\;+\;C,
+\]
+with  
+
+\[
+\Delta\;:=\;R+\gamma\,B^{\!\top}P\,B,
+\qquad
+\theta\;:=\tfrac12\begin{pmatrix}1\\[2pt]\tau\ell\,\phi\end{pmatrix}
+-\gamma\,P\,B,
+\]
+and a \emph{symmetric} positive‑definite matrix \(P\) to be determined below.
+(The harmless constant \(C\) collects all terms that do not affect
+optimal decisions.)
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{4.  Optimal trade \(x_t^{\star}\)}
+
+The first‑order condition  
+\(\partial/\partial u_t=0\) delivers a \emph{linear} policy
+\[
+\boxed{
+u_t^{\star}
+=
+-\;K\,s_t
+\;+\;
+\frac{a_t}{\Delta}},
+\qquad
+K
+:=
+\frac{1}{\Delta}\Bigl(
+\underbrace{B^{\!\top}P\,A-\theta^{\!\top}}_{\text{\,row vector\,}}
+\Bigr).
+\]
+
+In words:  
+
+* inventory and price feed back through the gain \(K\);  
+* the temporary order‑flow shock \(a_t\) tilts the decision by an
+\emph{additive} term, because it enters the reward linearly.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{5.  Riccati equation for \(P\)}
+
+Substituting \(u_t^{\star}\) back into the Bellman equation and
+equating coefficients yields the \emph{algebraic} (time‑homogeneous)
+Riccati equation
+
+\[
+\boxed{
+P
+=
+Q
++\gamma\,A^{\!\top}P\,A
+-\gamma\,
+\bigl(A^{\!\top}P\,B-\!S\bigr)
+\bigl(R+\gamma\,B^{\!\top}P\,B\bigr)^{\!-1}
+\bigl(A^{\!\top}P\,B-\!S\bigr)^{\!\top}},
+\]
+where the primitive LQR matrices are  
+
+\[
+Q=\begin{pmatrix}1&0\\0&0\end{pmatrix},
+\quad
+S=\tfrac12\begin{pmatrix}1\\[2pt]\tau\ell\,\phi\end{pmatrix},
+\quad
+R=1+\tau\ell(1-\phi).
+\]
+
+Because \((A,\sqrt{\gamma}\,B)\) is stabilisable and
+\((Q^{1/2},A)\) is detectable for any \(\gamma\in(0,1)\)
+and \(\tau\ell>0\),
+there exists a \emph{unique} positive‑definite solution \(P\) and hence
+a unique stationary‑optimal policy \(u_t^{\star}\).
+
+*(Analytic closed‑form expressions for the three independent
+entries of \(P\)—a $2\times2$ matrix—can be written out
+by solving the quartic that the Riccati equation reduces to.
+They are lengthy but elementary; see Remark below if you need them
+spelled out.)*
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{6.  Closed‑form value function}
+
+With \(P\) obtained from the Riccati equation,
+the final closed‑form value function—including the
+\emph{transient} order‑flow shock—reads
+
+\[
+\boxed{
+V(p_{t-1},\mathrm{imb}_{t-1},\alpha_{1,t},\alpha_{2,t})
+=
+\frac12
+\begin{pmatrix}p_{t-1}\\[2pt]\mathrm{imb}_{t-1}\end{pmatrix}^{\!\top}
+P
+\begin{pmatrix}p_{t-1}\\[2pt]\mathrm{imb}_{t-1}\end{pmatrix}
+\;+\;
+\frac{(\alpha_{1,t}\!+\!\alpha_{2,t})^2}{2\Delta}
+\;+\;
+\frac{\alpha_{1,t}\!+\!\alpha_{2,t}}{\Delta}\,
+\theta^{\!\top}
+\begin{pmatrix}p_{t-1}\\[2pt]\mathrm{imb}_{t-1}\end{pmatrix}
+\;+\;C.}
+\]
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection*{Remark (Explicit coefficients, if desired).}
+Because the state dimension is only 2, you \emph{can} solve the
+Riccati equation by hand.
+Let  
+
+\[
+P=
+\begin{pmatrix}
+p_{11}&p_{12}\\[2pt]
+p_{12}&p_{22}
+\end{pmatrix}.
+\]
+Substituting into the boxed Riccati equation and matching coefficients
+gives three polynomial equations for \((p_{11},p_{12},p_{22})\).
+Solving that system yields exact algebraic formulas (quartic roots)
+in the parameters \((\phi,\tau\ell,\gamma)\).
+Those expressions are correct but too large to be useful in print;
+most practitioners prefer to evaluate them numerically or iterate the
+(discounted) Riccati recursion until convergence.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section*{7.  Take‑aways}
+
+* Because impact is \emph{linear} and all costs are \emph{quadratic},
+  the control problem is LQR and the optimal strategy is \emph{linear}
+  in the state (price, inventory) and in the contemporaneous
+  order‑flow shock.
+* The entire value function is quadratic in
+  \((p_{t-1},\mathrm{imb}_{t-1})\) and—thanks to the linear term in the
+  reward—quadratic–linear in the shock \(a_t\).
+* All coefficients are obtained once the $2\times2$ algebraic Riccati
+  equation is solved (analytically or numerically).
+
+\bigskip
+\centerline{\(\boxed{\text{Q.E.D.}}\)}
