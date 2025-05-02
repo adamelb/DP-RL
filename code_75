@@ -1,0 +1,94 @@
+# ------------------------------------------------------------
+#  FAST SYMPY  (derivative‑probe; no Poly, no huge expand)
+# ------------------------------------------------------------
+import sympy as sp, numpy as np, time
+t0 = time.time()
+
+# -------- 1.  PARAMETERS  -----------------------------------
+phi, ell  = sp.Rational(8,10), sp.Rational(1,2)     # 0.8, 0.5
+gamma     = sp.Rational(95,100)                     # 0.95
+rho1, rho2 = sp.Rational(9,10), sp.Rational(17,20)  # 0.9, 0.85
+sigma1, sigma2 = 1 - rho1**2, 1 - rho2**2
+
+# -------- 2.  SYMBOLS --------------------------------------
+p, b, a1, a2, x = sp.symbols('p b a1 a2 x')
+c = sp.symbols('c0:15')                 # c0 … c14
+
+# -------- 3.  QUADRATIC ANSATZ  (no linear terms) ----------
+V = ( c[0] + c[5]*p**2 + c[6]*b**2 + c[7]*a1**2 + c[8]*a2**2 +
+      c[9]*p*b + c[10]*p*a1 + c[11]*p*a2 +
+      c[12]*b*a1 + c[13]*b*a2 + c[14]*a1*a2 )
+
+# -------- 4.  BELLMAN RHS ----------------------------------
+p1, b1  = p + x,  phi*b + (1-phi)*x
+a1n, a2n = rho1*a1, rho2*a2
+
+reward = (a1+a2)*p1 - sp.Rational(1,2)*ell*(phi*b+(1-phi)*x)*x - sp.Rational(1,2)*p1**2
+EV     = ( c[0] + c[5]*p1**2 + c[6]*b1**2 +
+           c[7]*(a1n**2 + sigma1) + c[8]*(a2n**2 + sigma2) +
+           c[9]*p1*b1 + c[10]*p1*a1n + c[11]*p1*a2n +
+           c[12]*b1*a1n + c[13]*b1*a2n + c[14]*a1n*a2n )
+J      = reward + gamma*EV
+
+x_star = sp.solve(sp.diff(J,x), x, dict=True)[0][x]     # linear in state
+V_rhs  = J.subs(x, x_star)
+
+Delta  = sp.simplify(V_rhs - V)        # still small, no full expand
+
+# -------- 5.  DERIVATIVE PROBES TO BUILD 15 EQUATIONS -------
+eqs = []
+
+# constant term  (0‑th derivative)
+eqs.append(sp.Eq(Delta.subs({p:0,b:0,a1:0,a2:0}), 0))
+
+# one‑variable second derivatives  (p², b², a1², a2²)
+eqs += [
+    sp.Eq(sp.diff(Delta, p, 2).subs({p:0,b:0,a1:0,a2:0})/2, 0),
+    sp.Eq(sp.diff(Delta, b, 2).subs({p:0,b:0,a1:0,a2:0})/2, 0),
+    sp.Eq(sp.diff(Delta, a1,2).subs({p:0,b:0,a1:0,a2:0})/2, 0),
+    sp.Eq(sp.diff(Delta, a2,2).subs({p:0,b:0,a1:0,a2:0})/2, 0)
+]
+
+# mixed derivatives for the ten cross terms
+cross = [
+    (p,b,  c[9]),  (p,a1, c[10]), (p,a2, c[11]),
+    (b,a1, c[12]), (b,a2, c[13]), (a1,a2, c[14])
+]
+for u,v,_ in cross:
+    eqs.append(sp.Eq(sp.diff(Delta,u,1,v,1).subs({p:0,b:0,a1:0,a2:0}), 0))
+
+# noise‑trace constant equation
+eqs.append(sp.Eq(c[0], gamma/(1-gamma)*(c[7]*sigma1 + c[8]*sigma2)))
+
+# -------- 6.  SOLVE LINEAR 15×15 SYSTEM --------------------
+sol = sp.solve(eqs, c, dict=True)[0]
+c_vals = [float(sp.N(sol[ci])) for ci in c]
+
+print("Done in %.2f s" % (time.time()-t0))
+print("Non‑zero coefficients:")
+for i,v in enumerate(c_vals):
+    if abs(v) > 1e-12:
+        print(f"  c{i:<2}= {v:+.8f}")
+
+# -------- 7.  LAMBDIFY CONTROL  ----------------------------
+x_func = sp.lambdify((p,b,a1,a2), x_star.subs(sol), 'numpy')
+
+# -------- 8.  QUICK SIMULATION  ----------------------------
+def simulate(T=100_000, seed=0):
+    rng   = np.random.default_rng(seed)
+    z     = np.zeros(4)                      # [p,b,a1,a2]
+    disc, tot = 1.0, 0.0
+    for _ in range(T):
+        p_,b_,a1_,a2_ = z
+        x_   = x_func(p_,b_,a1_,a2_)
+        p1_  = p_ + x_
+        b1_  = float(phi)*b_ + (1-float(phi))*x_
+        r_   = (a1_+a2_)*p1_ - 0.5*float(ell)*(float(phi)*b_+(1-float(phi))*x_)*x_ - 0.5*p1_**2
+        tot += disc*r_
+        disc*= float(gamma)
+        a1_  = float(rho1)*a1_ + np.sqrt(float(sigma1))*rng.standard_normal()
+        a2_  = float(rho2)*a2_ + np.sqrt(float(sigma2))*rng.standard_normal()
+        z    = np.array([p1_, b1_, a1_, a2_])
+    return tot
+
+print("Cumulative reward (100 000 steps):", simulate())
