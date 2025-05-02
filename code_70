@@ -1,0 +1,71 @@
+import numpy as np
+
+# Define constants
+phi = 0.8
+tilde_l = 0.5
+gamma = 0.95
+rho1 = 0.9
+rho2 = 0.85
+
+# Define matrices
+A = np.array([
+    [1, 0,   0,   0],
+    [0, phi, 0,   0],
+    [0, 0,   rho1, 0],
+    [0, 0,   0,   rho2]
+])
+
+B = np.array([
+    [1],
+    [1 - phi],
+    [0],
+    [0]
+])
+
+# Shock covariance
+Sigma_w = np.diag([0, 0, 1 - rho1**2, 1 - rho2**2])
+
+# Define the H matrix
+H = np.array([
+    [1, 0, 0, 0, -1],
+    [0, 0, 0, 0, (tilde_l/2)*(1 - phi)],
+    [0, 0, 0, 0, -1],
+    [0, 0, 0, 0, -1],
+    [-1, (tilde_l/2)*(1 - phi), -1, -1, 1 + (tilde_l/2)*(1 - phi)**2]
+])
+
+# Function to compute the Riccati update
+def riccati_update(P):
+    AB = np.hstack((A @ P @ A.T, A @ P @ B))
+    BA = np.hstack((B.T @ P @ A, B.T @ P @ B))
+    top = np.hstack((A.T @ P @ A, A.T @ P @ B))
+    bottom = np.hstack((B.T @ P @ A, B.T @ P @ B))
+    APB = np.block([[A.T @ P @ A, A.T @ P @ B],
+                    [B.T @ P @ A, B.T @ P @ B]])
+    
+    Xi = H - gamma * APB
+    
+    Q = Xi[:-1, :-1]
+    N = Xi[:-1, -1:]
+    R = Xi[-1:, -1:]
+
+    R_inv = np.linalg.inv(R + gamma * B.T @ P @ B)
+    K = R_inv @ (N.T + gamma * B.T @ P @ A)
+    
+    P_next = Q + gamma * A.T @ P @ A - gamma * A.T @ P @ B @ R_inv @ B.T @ P @ A
+    return P_next, K
+
+# Iterate Riccati equation
+P = np.zeros((4, 4))
+tolerance = 1e-8
+max_iter = 500
+for i in range(max_iter):
+    P_next, K = riccati_update(P)
+    if np.linalg.norm(P_next - P) < tolerance:
+        break
+    P = P_next
+
+# Compute value function constant term
+c = (gamma / (1 - gamma)) * np.trace(P @ Sigma_w)
+
+P, K, c
