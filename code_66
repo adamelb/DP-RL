@@ -1,0 +1,140 @@
+"""
+Exact DP on GPU, then *immediately* releases all big GPU tensors.
+Greedy policy is computed on CPU without holding R.
+
+Tested with: Python 3.10, torch 2.2 (CUDA 12.1), matplotlib 3.8
+"""
+from __future__ import annotations
+import torch, math, time, gc, numpy as np
+import matplotlib.pyplot as plt
+
+# ───────────────── parameters ──────────────────
+device       = torch.device('cuda')
+dtype        = torch.float32
+N            = 101
+Nx           = 101
+rho1, rho2   = 0.90, 0.70
+C, tla, la   = 5.0, 60.0, 1.0
+gamma, phi   = 0.99, 0.90
+n_vi, tol    = 120, 1e-4
+# ───────────────────────────────────────────────
+
+# 1) grids (GPU)
+p_g   = torch.linspace(-3., 3., N,  device=device, dtype=dtype)
+a_g   = torch.linspace(-3., 3., N,  device=device, dtype=dtype)
+i_g   = torch.linspace(-.5, .5, N,  device=device, dtype=dtype)
+x_g   = torch.linspace(-.5, .5, Nx, device=device, dtype=dtype)
+
+def nn_idx(grid, x): return (x.unsqueeze(-1)-grid).abs().argmin(-1)
+
+# 2) AR(1) transition matrices (CPU → GPU)
+def ar1_T(grid, rho, n_mc=12_000):
+    g = grid.cpu().numpy()
+    samp = rho*g + math.sqrt(1-rho*rho)*np.random.randn(n_mc, g.size)
+    proj = np.abs(samp[...,None]-g).argmin(-1)
+    T = np.zeros((g.size,g.size), dtype=np.float32)
+    for i,row in enumerate(proj.T):
+        idx,cnt = np.unique(row, return_counts=True)
+        T[i, idx] = cnt / cnt.sum()
+    return torch.tensor(T, device=device)
+
+T1, T2 = ar1_T(a_g, rho1), ar1_T(a_g, rho2)
+
+# 3) reward tensor R on‑the‑fly (GPU)
+P  = p_g.view(N,1,1,1,1)
+A1 = a_g.view(1,N,1,1,1)
+A2 = a_g.view(1,1,N,1,1)
+I  = i_g.view(1,1,1,N,1)
+X  = x_g.view(1,1,1,1,Nx)
+
+pnl    = (A1+A2)*(P+X)
+impact = 0.5*tla*(phi*I + (1-phi)*X)*X**2
+cost   = C*X.abs()
+risk   = 0.5*la*(P+X)**2
+R = (pnl-impact-cost-risk).to(dtype)          # (N,N,N,N,Nx)
+
+# 4) deterministic indices
+p_next = nn_idx(p_g, P+X).squeeze()           # (N,Nx)
+i_next = nn_idx(i_g,(1-phi)*X+phi*I).squeeze()
+
+# 5) value‑iteration
+V = torch.zeros((N,N,N,N), device=device, dtype=dtype)
+@torch.compile(mode="reduce-overhead")
+def value_iter(V, n_iter, eps):
+    T1_,T2_,R_,pn,in_ = T1,T2,R,p_next,i_next
+    for it in range(n_iter):
+        Vn = torch.empty_like(V)
+        for ix in range(Nx):
+            Vnext = V[pn[:,ix,None,None,None],:,:,in_[None,None,None,:,ix]] \
+                      .squeeze(1).squeeze(1).permute(0,2,3,1)
+            EV = torch.einsum('aj,bk,pjkf->pabf', T1_,T2_,Vnext)
+            Q  = R_[...,ix] + gamma*EV
+            Vn = Q if ix==0 else torch.maximum(Vn,Q)
+        if (Vn-V).abs().max()<eps:
+            V[:] = Vn; break
+        V[:] = Vn
+    return V
+print("running VI …")
+t0=time.time(); V = value_iter(V,n_vi,tol)
+print(f"VI {time.time()-t0:.1f}s")
+
+# ───────── FREE GPU MEMORY IMMEDIATELY ─────────
+V_cpu = V.cpu()          # 0.4 GB on host
+p_next_cpu = p_next.cpu()
+i_next_cpu = i_next.cpu()
+p_space, a_space, i_space, x_space = [t.cpu().numpy() for t in (p_g,a_g,i_g,x_g)]
+del R, V, p_g, a_g, i_g, x_g, pnl, impact, cost, risk
+gc.collect(); torch.cuda.empty_cache()
+print("GPU memory after cleanup:",
+      f"{torch.cuda.memory_reserved()/1e9:.2f} GB reserved")
+
+# 6) greedy policy π* on CPU (no R)
+pi_star = np.empty((N,N,N,N), dtype=np.int16)
+for ip in range(N):
+    p_val = p_space[ip]
+    for ia1 in range(N):
+        a1_val = a_space[ia1]
+        for ia2 in range(N):
+            a2_val = a_space[ia2]
+            for ii in range(N):
+                i_val = i_space[ii]
+                best, best_ix = -1e30, 0
+                for ix in range(Nx):
+                    x = x_space[ix]
+                    ev = V_cpu[p_next_cpu[ip,ix],:, :, i_next_cpu[ii,ix]]
+                    ev = (T1[ia1].cpu().numpy()[:,None]*T2[ia2].cpu().numpy()[None,:]*ev).sum()
+                    r  = (a1_val+a2_val)*(p_val+x) \
+                         -0.5*tla*(phi*i_val + (1-phi)*x)*x*x \
+                         -C*abs(x) \
+                         -0.5*la*(p_val+x)**2
+                    q = r + gamma*ev
+                    if q>best: best,best_ix=q,ix
+                pi_star[ip,ia1,ia2,ii] = best_ix
+print("π* table built on CPU  →  size =", pi_star.nbytes/1e6,"MB")
+
+# 7) simulate trajectory (CPU)
+def ar1_path(rho,n):
+    out=np.empty(n,dtype=np.float32); out[0]=np.random.randn()
+    sig=math.sqrt(1-rho*rho)
+    for t in range(1,n): out[t]=rho*out[t-1]+sig*np.random.randn()
+    return np.clip(out,-3,3)
+T_steps=100_000
+np.random.seed(123)
+alpha1,alpha2 = ar1_path(rho1,T_steps), ar1_path(rho2,T_steps)
+ip = np.abs(p_space).argmin(); ii = np.abs(i_space).argmin()
+rewards=np.empty(T_steps,dtype=np.float32)
+for t in range(T_steps):
+    ia1 = np.abs(alpha1[t]-a_space).argmin()
+    ia2 = np.abs(alpha2[t]-a_space).argmin()
+    ix  = pi_star[ip,ia1,ia2,ii]
+    x   = x_space[ix]; p=p_space[ip]; i=i_space[ii]
+    rewards[t]=(alpha1[t]+alpha2[t])*(p+x)\
+               -0.5*tla*(phi*i+(1-phi)*x)*x*x -C*abs(x)-0.5*la*(p+x)**2
+    ip = p_next_cpu[ip,ix]; ii = i_next_cpu[ii,ix]
+
+# 8) plot
+plt.figure(figsize=(7,3))
+plt.plot(rewards.cumsum())
+plt.title("Cumulative reward (100 k steps, π*)")
+plt.xlabel("step"); plt.ylabel("Σ reward")
+plt.tight_layout(); plt.show()
