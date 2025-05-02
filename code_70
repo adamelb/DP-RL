@@ -1,4 +1,49 @@
 
+# Fix symbolic term generation — we must compare symbols by name, not relational operators
+
+# Generate quadratic basis terms manually without comparisons
+linear_terms = [p, imb, a1, a2]
+quadratic_terms = [
+    p**2, imb**2, a1**2, a2**2,
+    p*imb, p*a1, p*a2, imb*a1, imb*a2, a1*a2
+]
+terms = [1] + linear_terms + quadratic_terms  # total of 15 terms
+
+# Create lambdified version of V_opt
+V_func = sp.lambdify((p, imb, a1, a2, *c), V_opt, 'numpy')
+
+# Build linear system A x = b
+A = []
+b = []
+samples = 50
+grid = np.linspace(-1, 1, int(np.ceil(samples ** 0.25)))
+
+for p0 in grid:
+    for imb0 in grid:
+        for a10 in grid:
+            for a20 in grid:
+                row = [sp.lambdify((p, imb, a1, a2), term, 'numpy')(p0, imb0, a10, a20) for term in terms]
+                val = V_func(p0, imb0, a10, a20, *([0]*15))
+                A.append(row)
+                b.append(val)
+                if len(A) >= 100:
+                    break
+            if len(A) >= 100: break
+        if len(A) >= 100: break
+    if len(A) >= 100: break
+
+A = np.array(A)
+b = np.array(b)
+
+# Solve least squares system
+coeffs, *_ = np.linalg.lstsq(A, b, rcond=None)
+coeff_dict = dict(zip([str(term) for term in terms], coeffs))
+
+coeff_dict
+
+
+
+
 from scipy.linalg import solve_discrete_are
 
 # Define Q and R matrices explicitly for scipy's solve_discrete_are
