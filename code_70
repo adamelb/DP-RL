@@ -1,3 +1,31 @@
+
+from scipy.linalg import solve_discrete_are
+
+# Define Q and R matrices explicitly for scipy's solve_discrete_are
+# We extract these from the immediate reward function R(z, x) = -0.5 * [z; x]^T H [z; x]
+
+# Block decomposition of H:
+Q = H[:-1, :-1]
+N = H[:-1, -1:]
+R = H[-1:, -1:]
+
+# Convert into scipy format: solve P from DARE
+# SciPy solves: A^T P A - A^T P B (R + B^T P B)^-1 B^T P A + Q = P
+
+# Use solve_discrete_are
+P_scipy = solve_discrete_are(A, B, Q, R, s=N, e=None)
+
+# Compute feedback gain K
+R_eff = R + B.T @ P_scipy @ B
+K_scipy = np.linalg.inv(R_eff) @ (N.T + B.T @ P_scipy @ A)
+
+# Compute the value function constant term
+c_scipy = (gamma / (1 - gamma)) * np.trace(P_scipy @ Sigma_w)
+
+P_scipy, K_scipy, c_scipy
+
+
+
 import numpy as np
 
 # Define constants
