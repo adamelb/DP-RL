@@ -1,0 +1,92 @@
+# ╔══════════════════════════ CLEAN‑UP AFTER VI ══════════════════════════╗
+# VI is done; keep V, p_next_idx, i_next_idx, the grids … and FREE R.
+import gc, torch
+del R, P, A1, A2, I, X       # big 40 + GB reward & helpers
+gc.collect()
+torch.cuda.empty_cache()
+print(f"GPU after cleanup  : "
+      f"{torch.cuda.memory_allocated()/1e9:5.2f} GB allocated, "
+      f"{torch.cuda.memory_reserved()/1e9:5.2f} GB reserved")
+
+# ╔════════════════════ greedy action WITHOUT R ═════════════════════════╗
+@torch.no_grad()
+def greedy_action_idx_noR(ip: int, ia1: int, ia2: int, ii: int) -> int:
+    """
+    Optimal ix given discrete state indices, using *analytic* reward formula.
+    Works on GPU (fast) but needs only tiny tensors.
+    """
+    # scalar grid values (Python floats)
+    p_val  = float(p_space[ip])
+    a1_val = float(a_space[ia1])
+    a2_val = float(a_space[ia2])
+    i_val  = float(imb_space[ii])
+
+    best, best_ix = -1e30, 0
+    T1_row = T1[ia1]          # (Na,)
+    T2_row = T2[ia2]          # (Na,)
+
+    for ix in range(Nx):
+        x = float(x_space[ix])
+
+        # expected next‑state value
+        ipn = int(p_next_idx[ip, ix])
+        iin = int(i_next_idx[ii, ix])
+        Vn  = V[ipn]                           # (Na,Na,Ni)
+        EV  = torch.einsum('j,k,jk->', T1_row, T2_row, Vn[:, :, iin]).item()
+
+        # analytic reward (your corrected formula)
+        r  = (a1_val + a2_val) * (p_val + x) \
+             - 0.5 * tla * (phi * i_val + (1.-phi) * x) * x * x \
+             - C * abs(x) \
+             - 0.5 * la * (p_val + x) ** 2
+
+        q = r + gamma * EV
+        if q > best:
+            best, best_ix = q, ix
+    return best_ix
+# ╚══════════════════════════════════════════════════════════════════════╝
+
+
+# ╔═════════════════ 100 000‑step trajectory & plot ═════════════════════╗
+import math, matplotlib.pyplot as plt
+
+def ar1_path(rho: float, n: int):
+    out = torch.empty(n, device=device, dtype=dtype)
+    out[0] = torch.randn((), device=device, dtype=dtype)
+    sig = math.sqrt(1. - rho * rho)
+    for t in range(1, n):
+        out[t] = rho * out[t-1] + sig * torch.randn((), device=device, dtype=dtype)
+    return out.clamp_(-3., 3.)
+
+T_steps = 100_000
+torch.manual_seed(123)
+alpha1 = ar1_path(rho1, T_steps)
+alpha2 = ar1_path(rho2, T_steps)
+
+ip = int((p_space.abs()).argmin())
+ii = int((imb_space.abs()).argmin())
+rewards = torch.empty(T_steps, device=device, dtype=dtype)
+
+for t in range(T_steps):
+    ia1 = int((alpha1[t] - a_space).abs().argmin())
+    ia2 = int((alpha2[t] - a_space).abs().argmin())
+
+    ix  = greedy_action_idx_noR(ip, ia1, ia2, ii)
+    x   = float(x_space[ix]);      p = float(p_space[ip]);    i = float(imb_space[ii])
+
+    # same analytic reward (no R)
+    rewards[t] = (alpha1[t] + alpha2[t]) * (p + x) \
+                 - 0.5 * tla * (phi * i + (1.-phi) * x) * x * x \
+                 - C * abs(x) \
+                 - 0.5 * la * (p + x) ** 2
+
+    ip = int(p_next_idx[ip, ix])
+    ii = int(i_next_idx[ii, ix])
+
+cum = rewards.cumsum(0).cpu().numpy()
+plt.figure(figsize=(7,3))
+plt.plot(cum)
+plt.title("Cumulative reward over 100 000 steps (π*)")
+plt.xlabel("time step"); plt.ylabel("Σ reward")
+plt.tight_layout(); plt.show()
+# ╚══════════════════════════════════════════════════════════════════════╝
