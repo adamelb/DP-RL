@@ -1,0 +1,87 @@
+# ------------------------------------------------------------
+#  FAST analytic solve – full 15×15 system now consistent
+# ------------------------------------------------------------
+import sympy as sp, numpy as np, time
+t0 = time.time()
+
+# ------ 1. parameters --------------------------------------
+phi, ell  = sp.Rational(8,10), sp.Rational(1,2)
+gamma     = sp.Rational(95,100)
+rho1, rho2 = sp.Rational(9,10), sp.Rational(17,20)
+sigma1, sigma2 = 1-rho1**2, 1-rho2**2
+
+# ------ 2. symbols -----------------------------------------
+p, b, a1, a2, x = sp.symbols('p b a1 a2 x')
+c = sp.symbols('c0:15')               # 15 coeffs
+
+# ------ 3. quadratic ansatz (keep linear coefficients) -----
+V = ( c[0] + c[1]*p + c[2]*b + c[3]*a1 + c[4]*a2
+      + c[5]*p**2 + c[6]*b**2 + c[7]*a1**2 + c[8]*a2**2
+      + c[9]*p*b + c[10]*p*a1 + c[11]*p*a2
+      + c[12]*b*a1 + c[13]*b*a2 + c[14]*a1*a2 )
+
+# ------ 4. Bellman RHS -------------------------------------
+p1, b1  = p + x, phi*b + (1-phi)*x
+a1n, a2n = rho1*a1, rho2*a2
+r   = (a1+a2)*p1 - sp.Rational(1,2)*ell*(phi*b+(1-phi)*x)*x - sp.Rational(1,2)*p1**2
+EV  = ( c[0] + c[1]*p1 + c[2]*b1 + c[3]*a1n + c[4]*a2n
+        + c[5]*p1**2 + c[6]*b1**2
+        + c[7]*(a1n**2+sigma1) + c[8]*(a2n**2+sigma2)
+        + c[9]*p1*b1 + c[10]*p1*a1n + c[11]*p1*a2n
+        + c[12]*b1*a1n + c[13]*b1*a2n + c[14]*a1n*a2n )
+J   = r + gamma*EV
+xstar = sp.solve(sp.diff(J,x), x)[0]
+Delta = sp.simplify(J.subs(x,xstar) - V)
+
+# ------ 5. build linear equations via derivative probes ----
+subs0 = {p:0,b:0,a1:0,a2:0}
+eqs = []
+
+# constant
+eqs.append(sp.Eq(Delta.subs(subs0), 0))
+
+# first‑order derivatives  →   c1,c2,c3,c4
+for var in (p,b,a1,a2):
+    eqs.append(sp.Eq(sp.diff(Delta,var).subs(subs0), 0))
+
+# second‑order single
+for var,coeff in ((p,2),(b,2),(a1,2),(a2,2)):
+    eqs.append(sp.Eq(sp.diff(Delta,var,2).subs(subs0)/coeff, 0))
+
+# second‑order mixed
+for u,v in ((p,b),(p,a1),(p,a2),(b,a1),(b,a2),(a1,a2)):
+    eqs.append(sp.Eq(sp.diff(Delta,u,1,v,1).subs(subs0), 0))
+
+# noise‑trace constant
+eqs.append(sp.Eq(c[0], gamma/(1-gamma)*(c[7]*sigma1 + c[8]*sigma2)))
+
+# ------ 6. solve linear system quickly ---------------------
+A, b_vec = sp.linear_eq_to_matrix(eqs, c)
+sol_vec  = sp.Matrix(A).LUsolve(sp.Matrix(b_vec))   # exact rationals
+coeffs   = [float(sp.N(v)) for v in sol_vec]
+
+print(f"Solved in {time.time()-t0:.2f} s")
+
+# ------ 7. lambdify optimal control ------------------------
+sol_dict = {ci:sol_vec[i] for i,ci in enumerate(c)}
+x_func = sp.lambdify((p,b,a1,a2), xstar.subs(sol_dict), 'numpy')
+
+# ------ 8. quick simulation  -------------------------------
+def simulate(T=100_000, seed=0):
+    rng = np.random.default_rng(seed)
+    z   = np.zeros(4)
+    disc, tot = 1.0, 0.0
+    for _ in range(T):
+        p_,b_,a1_,a2_ = z
+        x_  = x_func(p_,b_,a1_,a2_)
+        p1_ = p_ + x_
+        b1_ = float(phi)*b_ + (1-float(phi))*x_
+        r_  = (a1_+a2_)*p1_ - 0.5*float(ell)*(float(phi)*b_+(1-float(phi))*x_)*x_ - 0.5*p1_**2
+        tot += disc*r_
+        disc*= float(gamma)
+        a1_  = float(rho1)*a1_ + np.sqrt(float(1-rho1**2))*rng.standard_normal()
+        a2_  = float(rho2)*a2_ + np.sqrt(float(1-rho2**2))*rng.standard_normal()
+        z = np.array([p1_, b1_, a1_, a2_])
+    return tot
+
+print("cum. reward (100 000 steps) =", simulate())
