@@ -1,0 +1,125 @@
+# Closed‑form optimal trade size \(x_t^\*\)
+
+For the execution model with **linear inventory impact** and **cubic trading cost**,  
+the first‑order condition reduces to a quadratic equation
+
+\[
+a_2\,x_t^{2} + a_1\,x_t + a_0 = 0,
+\]
+
+with  
+
+\[
+\begin{aligned}
+a_2 &= \tfrac32\,\tilde\ell(1-\phi), \\[6pt]
+a_1 &= \tilde\ell\phi\,\mathrm{imb}_{t-1} + 1
+      + \gamma\bigl(V_p + (1-\phi)V_i\bigr), \\[6pt]
+a_0 &= -(\alpha_{1,t}+\alpha_{2,t}) + p_{t-1}
+      - \gamma\bigl(V_p + (1-\phi)V_i\bigr),
+\end{aligned}
+\]
+
+where  
+
+\[
+\begin{aligned}
+V_p &= \frac{\partial V}{\partial p}
+     = b_p - \beta_{pp}\,p_{t-1} - \beta_{pi}\,\mathrm{imb}_{t-1},\\[6pt]
+V_i &= \frac{\partial V}{\partial i}
+     = b_i - \beta_{pi}\,p_{t-1} - \beta_{ii}\,\mathrm{imb}_{t-1}.
+\end{aligned}
+\]
+
+Because \(a_2>0\) the optimal trade is the **larger** root
+
+\[
+x_t^\* = \frac{-a_1 + \sqrt{a_1^{2}-4a_2a_0}}{2a_2},
+\]
+
+then clipped to the corridor \([-0.5,\,0.5]\):
+
+\[
+x_t^{\text{clip}}
+   = \min\!\bigl(0.5,\;\max(-0.5,\;x_t^\*)\bigr).
+\]
+
+The Python cell below turns this formula into a reusable function.
+
+import math
+
+# ---------------------------------------------------------------------------
+# Model parameters  (replace with your calibrated values)
+# ---------------------------------------------------------------------------
+params = {
+    "phi":   0.6,   # inventory decay factor  φ
+    "tl":    0.02,  # temporary‑impact coefficient  \tilde{\ell}
+    "gamma": 0.95   # discount factor  γ
+}
+
+# ---------------------------------------------------------------------------
+# Value‑function coefficients  (β's and b's)  –– insert those solved offline
+# ---------------------------------------------------------------------------
+coef = {
+    "beta_pp": 0.8,
+    "beta_pi": 0.1,
+    "beta_ii": 0.5,
+    "b_p":     0.2,
+    "b_i":    -0.1
+}
+
+def x_star(p_prev, imb_prev, alpha1, alpha2,
+           params=params, coef=coef,
+           clip=(-0.5, 0.5)):
+    """
+    Closed‑form optimal trade size for one period, then clipped.
+
+    Parameters
+    ----------
+    p_prev : float
+        Previous price deviation  p_{t-1}
+    imb_prev : float
+        Previous inventory imbalance
+    alpha1, alpha2 : float
+        Current AR(1) alpha signals
+    params : dict
+        'phi', 'tl', 'gamma'
+    coef : dict
+        'beta_pp', 'beta_pi', 'beta_ii', 'b_p', 'b_i'
+    clip : tuple
+        (lower, upper) bounds for hard clipping
+    """
+    phi, tl, gamma = params["phi"], params["tl"], params["gamma"]
+    beta_pp, beta_pi, beta_ii = coef["beta_pp"], coef["beta_pi"], coef["beta_ii"]
+    b_p, b_i = coef["b_p"], coef["b_i"]
+
+    # Gradients of V
+    V_p = b_p - beta_pp * p_prev - beta_pi * imb_prev
+    V_i = b_i - beta_pi * p_prev - beta_ii * imb_prev
+
+    # Quadratic coefficients
+    a2 = 1.5 * tl * (1 - phi)
+    a1 = tl * phi * imb_prev + 1 + gamma * (V_p + (1 - phi) * V_i)
+    a0 = -(alpha1 + alpha2) + p_prev - gamma * (V_p + (1 - phi) * V_i)
+
+    # Discriminant and root
+    disc = a1 * a1 - 4 * a2 * a0
+    if disc < 0:
+        # No real root (should not happen with sensible params) – trade nothing
+        root = 0.0
+    else:
+        root = (-a1 + math.sqrt(disc)) / (2 * a2)
+
+    # Clip to corridor
+    lower, upper = clip
+    return max(lower, min(upper, root))
+
+
+# ------------------------ quick demo -----------------------------------------
+if __name__ == "__main__":
+    p_prev  = 0.10
+    imb_prev = 0.05
+    alpha1  = 0.03
+    alpha2  = 0.02
+
+    xt = x_star(p_prev, imb_prev, alpha1, alpha2)
+    print(f"Optimal trade x_t* (clipped) = {xt:.6f}")
