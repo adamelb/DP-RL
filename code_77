@@ -1,0 +1,97 @@
+# ---------- closed_form_solution.py ----------
+import sympy as sp
+import numpy as np
+
+# ---------- 1️⃣ symbolic closed form  ----------
+τ, φ, γ, ρ1, ρ2 = sp.symbols('tau phi gamma rho1 rho2', positive=True)
+
+# unknowns --------------------------------------------------------------
+p11, p22, p33, p44 = sp.symbols('p11 p22 p33 p44')
+p12, p13, p14, p23, p24, p34 = sp.symbols('p12 p13 p14 p23 p24 p34')
+unknowns = (p11,p22,p33,p44,p12,p13,p14,p23,p24,p34)
+
+P = sp.Matrix([[p11,p12,p13,p14],
+               [p12,p22,p23,p24],
+               [p13,p23,p33,p34],
+               [p14,p24,p34,p44]])
+
+A = sp.Matrix([[1,0,0,0],
+               [0,φ,0,0],
+               [0,0,ρ1,0],
+               [0,0,0,ρ2]])
+
+B = sp.Matrix([1,1-φ,0,0])
+
+H = sp.Matrix([[-sp.Rational(1,2),0,sp.Rational(1,2),sp.Rational(1,2)],
+               [0,0,0,0],
+               [sp.Rational(1,2),0,0,0],
+               [sp.Rational(1,2),0,0,0]])
+
+M = sp.Matrix([-1, -τ*φ/2,  sp.Rational(1,2), sp.Rational(1,2)])
+L = -sp.Rational(1,2)*(τ*(1-φ)+1)
+
+S = H + γ * A.T*P*A
+T = M + γ * A.T*P*B
+U = L + γ * (B.T*P*B)[0]
+
+# Riccati fixed point ---------------------------------------------------
+eq_P = sp.Eq(P, S - (1/U) * (T*T.T))
+
+# Split into 10 scalar equations and solve ------------------------------
+system = []
+for i in range(4):
+    for j in range(i,4):
+        system.append(sp.Eq(eq_P.lhs[i,j], eq_P.rhs[i,j]))
+
+solution = sp.solve(system, unknowns, dict=True)[0]   # unique solution
+
+# Turn into callable functions (SymPy lambdas) --------------------------
+coeff_expressions = [solution[u] for u in unknowns]
+coefficients = sp.lambdify((τ,φ,γ,ρ1,ρ2), coeff_expressions, 'numpy')
+
+# ---------- 2️⃣ simulation utility  ----------
+def simulate(T, tau, phi, gamma, rho1, rho2,
+             p0=0.0, imb0=0.0, a10=0.0, a20=0.0, rng=None):
+    """simulate optimal execution for T steps (pure‑Python, vectorised)."""
+    if rng is None:
+        rng = np.random.default_rng()
+    # closed‑form matrix P and optimal gain K = -U^{-1} T.T
+    pvals = np.array(coefficients(tau,phi,gamma,rho1,rho2), dtype=float)
+    P = np.array([[pvals[0], pvals[4], pvals[5], pvals[6]],
+                  [pvals[4], pvals[1], pvals[7], pvals[8]],
+                  [pvals[5], pvals[7], pvals[2], pvals[9]],
+                  [pvals[6], pvals[8], pvals[9], pvals[3]]])
+    A = np.array([[1,0,0,0],
+                  [0,phi,0,0],
+                  [0,0,rho1,0],
+                  [0,0,0,rho2]])
+    B = np.array([1,1-phi,0,0])
+    H = np.array([[-0.5,0,0.5,0.5],
+                  [0,0,0,0],
+                  [0.5,0,0,0],
+                  [0.5,0,0,0]])
+    M = np.array([-1, -tau*phi/2, 0.5, 0.5])
+    L = -0.5*(tau*(1-phi)+1)
+    # feedback gain K = -(L+γ BᵀPB)^{-1}(M+γ AᵀPB)ᵀ
+    U = L + gamma * B.dot(P).dot(B)
+    Tvec = M + gamma * A.T.dot(P).dot(B)
+    K = -Tvec / U           # 1×4 row vector
+    # preallocate trajectory
+    s = np.zeros((T+1,4))
+    x = np.zeros(T)
+    s[0] = [p0, imb0, a10, a20]
+    for t in range(T):
+        x[t] = K.dot(s[t])
+        w = np.array([0, 0,
+                      np.sqrt(1-rho1**2)*rng.standard_normal(),
+                      np.sqrt(1-rho2**2)*rng.standard_normal()])
+        s[t+1] = A.dot(s[t]) + B*x[t] + w
+    return s, x, P, K
+# ---------- end of file ----------
+
+
+import closed_form_solution as cf
+s,x,P,K = cf.simulate(
+        T=1000, tau=0.2, phi=0.8, gamma=0.98,
+        rho1=0.9, rho2=0.7, p0=0.0, imb0=0.0, a10=0.5, a20=-0.3)
+print("first five trades:", x[:5])
