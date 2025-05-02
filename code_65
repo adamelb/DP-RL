@@ -1,0 +1,158 @@
+"""
+Exact dynamic programming on GPU, then memory‑light simulation on CPU/GPU.
+
+* Python 3.10  •  torch 2.2 (CUDA 12.1)  •  matplotlib 3.8
+* Default grid size 101 → fits easily in 80 GB H100.
+* Reward uses the **corrected** formula:
+
+      r = (α1+α2)(p+x)
+          - 0.5*tla*(phi*i + (1-phi)*x)*x^2
+          - C|x|
+          - 0.5*la*(p+x)^2
+"""
+
+from __future__ import annotations
+import torch, math, time, gc
+import matplotlib.pyplot as plt
+
+# ─────────────────────── parameters ────────────────────────────
+device       = torch.device('cuda')
+dtype        = torch.float32
+N            = 101          # grid points for p, α1, α2, i
+Nx           = 101          # number of actions
+rho1, rho2   = 0.90, 0.70
+C, tla, la   = 5.0, 60.0, 1.0
+gamma, phi   = 0.99, 0.90
+n_vi, tol    = 120, 1e-4
+torch.manual_seed(0)
+# ───────────────────────────────────────────────────────────────
+
+# 1) grids (on GPU)
+p_space   = torch.linspace(-3., 3., N,  device=device, dtype=dtype)
+a_space   = torch.linspace(-3., 3., N,  device=device, dtype=dtype)
+imb_space = torch.linspace(-.5, .5, N,  device=device, dtype=dtype)
+x_space   = torch.linspace(-.5, .5, Nx, device=device, dtype=dtype)
+
+# helper
+def nn_idx(grid: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    return (x.unsqueeze(-1) - grid).abs().argmin(-1)
+
+# 2) AR(1) transition matrices (built on CPU, moved to GPU)
+def ar1_T(grid: torch.Tensor, rho: float, n_mc=12_000) -> torch.Tensor:
+    g = grid.cpu().numpy()
+    samp = rho*g + math.sqrt(1-rho*rho)*torch.randn(n_mc, g.size).numpy()
+    proj = (torch.from_numpy(samp).unsqueeze(-1) - torch.tensor(g)).abs().argmin(-1)
+    T = torch.zeros(g.size, g.size, dtype=dtype)
+    for i,row in enumerate(proj.T):
+        idx,cnt = torch.unique(row, return_counts=True)
+        T[i, idx] = cnt.float()/cnt.sum()
+    return T.to(device)
+
+T1 = ar1_T(a_space, rho1)            # (N,N)
+T2 = ar1_T(a_space, rho2)
+
+# 3) reward tensor R  (float32, ~42 GB)
+P  = p_space.view(N,1,1,1,1)
+A1 = a_space.view(1,N,1,1,1)
+A2 = a_space.view(1,1,N,1,1)
+I  = imb_space.view(1,1,1,N,1)
+X  = x_space.view(1,1,1,1,Nx)
+
+pnl    = (A1 + A2) * (P + X)
+impact = 0.5 * tla * (phi*I + (1-phi)*X) * X**2
+cost   = C * X.abs()
+risk   = 0.5 * la * (P + X)**2
+R = (pnl - impact - cost - risk).to(dtype)      # (N,N,N,N,Nx)
+
+# 4) deterministic next‑state indices
+p_next_idx = nn_idx(p_space, P + X).squeeze()           # (N,Nx)
+i_next_idx = nn_idx(imb_space, (1-phi)*X + phi*I).squeeze()  # (N,Nx)
+
+# 5) value‑iteration (torch.compile → fused Triton)
+V = torch.zeros((N,N,N,N), device=device, dtype=dtype)
+
+@torch.compile(mode="reduce-overhead")
+def value_iter(V: torch.Tensor, n_iter: int, eps: float):
+    T1_, T2_, R_, p_n, i_n = T1, T2, R, p_next_idx, i_next_idx
+    for it in range(n_iter):
+        V_new = torch.empty_like(V)
+        for ix in range(Nx):
+            ipn = p_n[:,ix]
+            iin = i_n[:,ix]
+            Vn  = V[ipn[:,None,None,None],:,:,iin[None,None,None,:]] \
+                    .squeeze(1).squeeze(1)       # (N,N,N,N)
+            Vn  = Vn.permute(0,2,3,1).contiguous()
+            EV  = torch.einsum('aj,bk,pjkf->pabf', T1_, T2_, Vn)
+            Q   = R_[...,ix] + gamma*EV
+            V_new = Q if ix==0 else torch.maximum(V_new,Q)
+        if (V_new-V).abs().max()<eps:
+            print(f"converged after {it+1} sweeps"); V[:] = V_new; break
+        V[:] = V_new
+    return V
+
+print("running value‑iteration …")
+t0=time.time()
+V = value_iter(V, n_vi, tol)
+print(f"VI done in {(time.time()-t0)/60:.1f} min")
+
+# 6) extract greedy policy π*  (int16, ~0.1 GB)
+pi_star = torch.empty((N,N,N,N), dtype=torch.int16, device=device)
+best_val = torch.full_like(V, -1e30)
+
+for ix in range(Nx):
+    ipn = p_next_idx[:,ix]; iin = i_next_idx[:,ix]
+    Vn  = V[ipn[:,None,None,None],:,:,iin[None,None,None,:]] \
+            .squeeze(1).squeeze(1).permute(0,2,3,1)
+    EV  = torch.einsum('aj,bk,pjkf->pabf', T1, T2, Vn)
+    Q   = R[...,ix] + gamma*EV
+    mask = Q > best_val
+    best_val = torch.where(mask, Q, best_val)
+    pi_star[mask] = ix
+
+# 7) FREE GPU MEMORY — keep only small tables
+print("freeing GPU memory …")
+pi_star_cpu = pi_star.cpu()          # move or keep on GPU as you like
+del R, V, best_val, pi_star
+gc.collect(); torch.cuda.empty_cache()
+
+# 8) trajectory simulation (100 000 steps) — CPU only
+def ar1_path(rho, n):
+    out = torch.empty(n, dtype=dtype)
+    out[0] = torch.randn(())
+    sig = math.sqrt(1-rho*rho)
+    for t in range(1,n):
+        out[t] = rho*out[t-1] + sig*torch.randn(())
+    return out.clamp_(-3.,3.)
+
+T_steps = 100_000
+torch.manual_seed(123)
+alpha1 = ar1_path(rho1, T_steps)
+alpha2 = ar1_path(rho2, T_steps)
+
+ip = (p_space.cpu().abs()).argmin().item()
+ii = (imb_space.cpu().abs()).argmin().item()
+rewards = torch.empty(T_steps, dtype=dtype)
+
+for t in range(T_steps):
+    ia1 = (alpha1[t]-a_space.cpu()).abs().argmin().item()
+    ia2 = (alpha2[t]-a_space.cpu()).abs().argmin().item()
+
+    ix = int(pi_star_cpu[ip, ia1, ia2, ii])
+    x  = x_space[ix].item(); p=p_space[ip].item(); i=imb_space[ii].item()
+
+    rewards[t] = (alpha1[t]+alpha2[t])*(p+x) \
+                 - 0.5*tla*(phi*i + (1-phi)*x)*x*x \
+                 - C*abs(x) \
+                 - 0.5*la*(p+x)*(p+x)
+
+    ip = p_next_idx[ip,ix].item()
+    ii = i_next_idx[ii,ix].item()
+
+# 9) plot cumulative reward
+plt.figure(figsize=(7,3))
+plt.plot(rewards.cumsum(0).numpy())
+plt.title("Cumulative reward over 100 000 steps (π*)")
+plt.xlabel("time step"); plt.ylabel("Σ reward")
+plt.tight_layout(); plt.show()
+
+print("done.")
