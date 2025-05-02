@@ -1,0 +1,84 @@
+# ------------------------------------------------------------
+#  FAST NUMERIC VERSION  ( < 1 second for coefficients )
+# ------------------------------------------------------------
+import numpy as np
+import sympy as sp
+
+# ---------- parameters ----------
+phi, ell, gamma, rho1, rho2 = 0.8, 0.5, 0.95, 0.9, 0.85
+p, b, a1, a2, x = sp.symbols('p b a1 a2 x')
+
+# ---------- Bellman RHS (symbolic, but compact) ------------
+p1, b1 = p + x, phi*b + (1-phi)*x
+a1n, a2n = rho1*a1, rho2*a2
+sigma1, sigma2 = 1-rho1**2, 1-rho2**2
+
+# reward
+r = (a1+a2)*p1 - 0.5*ell*(phi*b+(1-phi)*x)*x - 0.5*p1**2
+
+# generic coefficients (symbolic placeholders)
+c = sp.symbols('c0:15')
+V  = ( c[0] + c[1]*p + c[2]*b + c[3]*a1 + c[4]*a2 +
+       c[5]*p**2 + c[6]*b**2 + c[7]*a1**2 + c[8]*a2**2 +
+       c[9]*p*b + c[10]*p*a1 + c[11]*p*a2 +
+       c[12]*b*a1 + c[13]*b*a2 + c[14]*a1*a2 )
+
+EV = ( c[0] + c[1]*p1 + c[2]*b1 + c[3]*a1n + c[4]*a2n +
+       c[5]*p1**2 + c[6]*b1**2 +
+       c[7]*(a1n**2 + sigma1) + c[8]*(a2n**2 + sigma2) +
+       c[9]*p1*b1 + c[10]*p1*a1n + c[11]*p1*a2n +
+       c[12]*b1*a1n + c[13]*b1*a2n + c[14]*a1n*a2n )
+
+J  = r + gamma*EV
+x_star = sp.solve(sp.diff(J,x), x, dict=True)[0][x]
+V_rhs  = sp.expand(J.subs(x, x_star))
+
+# ---------- build numerical system  -------------------------
+monoms = [1, p, b, a1, a2,
+          p**2, b**2, a1**2, a2**2,
+          p*b, p*a1, p*a2, b*a1, b*a2, a1*a2]
+
+# evaluate at 15 random points
+rng   = np.random.default_rng(123)
+states = rng.normal(size=(15,4))          # 15 points (p,b,a1,a2)
+A = np.zeros((15,15))
+y = np.zeros(15)
+for k,(pp,bb,aa1,aa2) in enumerate(states):
+    subs = {p:pp, b:bb, a1:aa1, a2:aa2,
+            sigma1:sigma1, sigma2:sigma2}
+    # numerical x* for that state:
+    xk = float(sp.lambdify((p,b,a1,a2), x_star,'numpy')(pp,bb,aa1,aa2))
+    subs[x] = xk
+    y[k] = float(sp.lambdify((p,b,a1,a2,x), V_rhs,'numpy')(pp,bb,aa1,aa2,xk))
+    A[k] = [m.subs(subs) for m in monoms]
+
+# solve for c
+coeffs = np.linalg.solve(A, y)
+# constant correction:
+coeffs[0] = gamma/(1-gamma)*(coeffs[7]*sigma1 + coeffs[8]*sigma2)
+
+# ---------- simulate with exact gain ------------------------
+def x_opt(z):
+    pp,bb,aa1,aa2 = z
+    return float(sp.lambdify((p,b,a1,a2), x_star,'numpy')(pp,bb,aa1,aa2))
+
+def simulate(T=100_000, seed=0):
+    rng = np.random.default_rng(seed)
+    z   = np.zeros(4)
+    disc, tot = 1.0, 0.0
+    for _ in range(T):
+        p_,b_,a1_,a2_ = z
+        x_ = x_opt(z)
+        p1_   = p_ + x_
+        b1_   = phi*b_ + (1-phi)*x_
+        r_    = (a1_+a2_)*p1_ - 0.5*ell*(phi*b_+(1-phi)*x_)*x_ - 0.5*p1_**2
+        tot  += disc*r_
+        disc *= gamma
+        a1_   = rho1*a1_ + np.sqrt(1-rho1**2)*rng.standard_normal()
+        a2_   = rho2*a2_ + np.sqrt(1-rho2**2)*rng.standard_normal()
+        z = np.array([p1_, b1_, a1_, a2_])
+    return tot
+
+print("c5 (p² coeff)  =", coeffs[5])
+print("c7 (a₁² coeff) =", coeffs[7])
+print("cum. reward    =", simulate())
