@@ -69,3 +69,35 @@ for i in range(max_iter):
 c = (gamma / (1 - gamma)) * np.trace(P @ Sigma_w)
 
 P, K, c
+
+# Add clipping to prevent overflow in p, imb, x, etc.
+# Also limit extreme exponential growth in discounting
+
+z = np.array([0.0, 0.0, 0.0, 0.0])
+cumulative_reward = 0.0
+log_discount = 0.0
+max_abs_val = 1e3  # limit state and action magnitudes to prevent explosion
+
+for t in range(T):
+    x = float(np.clip(-K @ z, -max_abs_val, max_abs_val))
+
+    # Clip state variables to avoid blow-up
+    alpha_sum = np.clip(z[2] + z[3], -max_abs_val, max_abs_val)
+    p_next = np.clip(z[0] + x, -max_abs_val, max_abs_val)
+    imb_next = np.clip(phi * z[1] + (1 - phi) * x, -max_abs_val, max_abs_val)
+    reward = alpha_sum * p_next - 0.5 * tilde_l * (phi * z[1] + (1 - phi) * x) * x - 0.5 * (p_next)**2
+
+    # Safely update cumulative reward
+    discount = np.exp(log_discount) if log_discount > -700 else 0.0
+    cumulative_reward += discount * reward
+
+    log_discount += np.log(gamma)
+
+    epsilon1 = np.random.randn()
+    epsilon2 = np.random.randn()
+    alpha1_next = float(np.clip(rho1 * z[2] + np.sqrt(1 - rho1**2) * epsilon1, -max_abs_val, max_abs_val))
+    alpha2_next = float(np.clip(rho2 * z[3] + np.sqrt(1 - rho2**2) * epsilon2, -max_abs_val, max_abs_val))
+
+    z = np.array([p_next, imb_next, alpha1_next, alpha2_next])
+
+cumulative_reward
