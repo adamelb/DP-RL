@@ -1,0 +1,79 @@
+import numpy as np
+
+# ------------------------------------------------------------------
+# 1.   Build the LQG matrices
+# ------------------------------------------------------------------
+def lqg_matrices(phi, tau_ell, rho1, rho2):
+    """Return (A, B, Q, R, b) for the 4‑dimensional state."""
+    A = np.array([[1.0, 0.0, 0.0, 0.0],
+                  [0.0, phi, 0.0, 0.0],
+                  [0.0, 0.0, rho1, 0.0],
+                  [0.0, 0.0, 0.0, rho2]])
+    B = np.array([[1.0],
+                  [1.0 - phi],
+                  [0.0],
+                  [0.0]])
+    Q = np.zeros((4, 4));  Q[0, 0] = 1.0          # quadratic cost in price
+    R = 1.0 + tau_ell * (1.0 - phi)               # scalar control cost
+    b = np.array([[1.0, 0.0, 1.0, 1.0]])          # row vector (1×4)
+    return A, B, Q, R, b
+
+
+# ------------------------------------------------------------------
+# 2.   Riccati solver (fixed‑point iteration)
+# ------------------------------------------------------------------
+def solve_riccati(A, B, Q, R, b, gamma=0.95, tol=1e-12, max_iter=10000):
+    """Return the 4×4 positive‑definite matrix P."""
+    P = np.zeros_like(Q)
+    for _ in range(max_iter):
+        AT_P = A.T @ P
+        S     = AT_P @ B - b.T                     # shape (4,1)
+        Delta = R + gamma * (B.T @ P @ B)          # scalar
+        P_new = Q + gamma * AT_P @ A - gamma * (S @ S.T) / Delta
+        if np.max(np.abs(P_new - P)) < tol:
+            return P_new
+        P = P_new
+    raise RuntimeError("Riccati iteration failed to converge")
+
+
+# ------------------------------------------------------------------
+# 3.   Linear feedback K
+# ------------------------------------------------------------------
+def optimal_policy(P, A, B, R, b, gamma=0.95):
+    """Return the feedback row vector K (shape 1×4)."""
+    Delta = R + gamma * (B.T @ P @ B)
+    K = (B.T @ P @ A - b) / Delta
+    return K          # x_t = -K s_t
+
+
+# ------------------------------------------------------------------
+# 4.   Convenience wrapper
+# ------------------------------------------------------------------
+def lqg_solution(phi, tau_ell, rho1, rho2, gamma=0.95):
+    A, B, Q, R, b = lqg_matrices(phi, tau_ell, rho1, rho2)
+    P = solve_riccati(A, B, Q, R, b, gamma)
+    K = optimal_policy(P, A, B, R, b, gamma)
+    return P, K
+
+
+# ------------------------------------------------------------------
+# 5.   Demo with sample parameters
+# ------------------------------------------------------------------
+if __name__ == "__main__":
+    # --- choose parameters ---------------------------------------------------
+    phi      = 0.8
+    tau_ell  = 0.10
+    rho1     = 0.7
+    rho2     = 0.6
+    gamma    = 0.95
+
+    P, K = lqg_solution(phi, tau_ell, rho1, rho2, gamma)
+
+    print("P (value‑function matrix):\n", P)
+    print("\nK (feedback row vector):\n", K)
+
+    # --- evaluate a single state --------------------------------------------
+    state = np.array([[0.01, 0.20, 0.50, -0.30]]).T   # column vector
+    x_star = -float(K @ state)
+    print("\nSample state:", state.T)
+    print("Optimal trade x* =", x_star)
