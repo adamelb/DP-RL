@@ -129,3 +129,90 @@ for t in range(T):
     z = np.array([p_next, imb_next, alpha1_next, alpha2_next])
 
 cumulative_reward
+
+
+
+
+
+
+import numpy as np
+from scipy.linalg import solve_discrete_are
+
+# === Step 1: Define constants ===
+phi = 0.8
+tilde_l = 0.5
+gamma = 0.95
+rho1 = 0.9
+rho2 = 0.85
+
+# === Step 2: Define system matrices ===
+A = np.array([
+    [1, 0,   0,   0],
+    [0, phi, 0,   0],
+    [0, 0,   rho1, 0],
+    [0, 0,   0,   rho2]
+])
+
+B = np.array([
+    [1],
+    [1 - phi],
+    [0],
+    [0]
+])
+
+Sigma_w = np.diag([0, 0, 1 - rho1**2, 1 - rho2**2])
+
+# === Step 3: Define stage cost matrix H ===
+H = np.array([
+    [1, 0, 0, 0, -1],
+    [0, 0, 0, 0, (tilde_l/2)*(1 - phi)],
+    [0, 0, 0, 0, -1],
+    [0, 0, 0, 0, -1],
+    [-1, (tilde_l/2)*(1 - phi), -1, -1, 1 + (tilde_l/2)*(1 - phi)**2]
+])
+
+Q = H[:-1, :-1]
+N = H[:-1, -1:]
+R = H[-1:, -1:]
+
+# === Step 4: Solve DARE using SciPy ===
+P = solve_discrete_are(A, B, Q, R, s=N)
+R_eff = R + B.T @ P @ B
+K = np.linalg.inv(R_eff) @ (N.T + B.T @ P @ A)
+
+# === Step 5: Value function constant term ===
+c = (gamma / (1 - gamma)) * np.trace(P @ Sigma_w)
+
+# === Step 6: Simulate trajectory and compute cumulative reward ===
+T = 100_000
+z = np.array([0.0, 0.0, 0.0, 0.0])  # initial state
+log_discount = 0.0
+cumulative_reward = 0.0
+max_abs_val = 1e3
+
+for t in range(T):
+    x = float(np.clip(-K @ z, -max_abs_val, max_abs_val))
+
+    alpha_sum = np.clip(z[2] + z[3], -max_abs_val, max_abs_val)
+    p_next = np.clip(z[0] + x, -max_abs_val, max_abs_val)
+    imb_next = np.clip(phi * z[1] + (1 - phi) * x, -max_abs_val, max_abs_val)
+    reward = alpha_sum * p_next - 0.5 * tilde_l * (phi * z[1] + (1 - phi) * x) * x - 0.5 * (p_next)**2
+
+    discount = np.exp(log_discount) if log_discount > -700 else 0.0
+    cumulative_reward += discount * reward
+    log_discount += np.log(gamma)
+
+    epsilon1 = np.random.randn()
+    epsilon2 = np.random.randn()
+    alpha1_next = float(np.clip(rho1 * z[2] + np.sqrt(1 - rho1**2) * epsilon1, -max_abs_val, max_abs_val))
+    alpha2_next = float(np.clip(rho2 * z[3] + np.sqrt(1 - rho2**2) * epsilon2, -max_abs_val, max_abs_val))
+
+    z = np.array([p_next, imb_next, alpha1_next, alpha2_next])
+
+# === Final result ===
+print("Optimal feedback gain K:", K)
+print("Quadratic value matrix P:\n", P)
+print("Value function constant term c =", c)
+print("Discounted cumulative reward over 100,000 steps =", cumulative_reward)
+
+
