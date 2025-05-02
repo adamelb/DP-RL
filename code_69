@@ -77,3 +77,118 @@ if __name__ == "__main__":
     x_star = -float(K @ state)
     print("\nSample state:", state.T)
     print("Optimal trade x* =", x_star)
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ------------------------------------------------------------------
+# 1. Parameters (fixed)
+# ------------------------------------------------------------------
+phi      = 0.8
+tau_ell  = 0.10
+rho1     = 0.7
+rho2     = 0.6
+gamma    = 0.95
+
+T        = 100_000                     # simulation length
+
+# ------------------------------------------------------------------
+# 2. Functions from previous template
+# ------------------------------------------------------------------
+def lqg_matrices(phi, tau_ell, rho1, rho2):
+    A = np.array([[1.0, 0.0, 0.0, 0.0],
+                  [0.0, phi, 0.0, 0.0],
+                  [0.0, 0.0, rho1, 0.0],
+                  [0.0, 0.0, 0.0, rho2]])
+    B = np.array([[1.0],
+                  [1.0 - phi],
+                  [0.0],
+                  [0.0]])
+    Q = np.zeros((4, 4))
+    Q[0, 0] = 1.0
+    R = 1.0 + tau_ell * (1.0 - phi)
+    b = np.array([[1.0, 0.0, 1.0, 1.0]])
+    return A, B, Q, R, b
+
+def solve_riccati(A, B, Q, R, b, gamma=0.95, tol=1e-12, max_iter=10000):
+    P = np.zeros_like(Q)
+    for _ in range(max_iter):
+        AT_P = A.T @ P
+        S     = AT_P @ B - b.T
+        Delta = R + gamma * (B.T @ P @ B)
+        P_new = Q + gamma * AT_P @ A - gamma * (S @ S.T) / Delta
+        if np.max(np.abs(P_new - P)) < tol:
+            return P_new
+        P = P_new
+    raise RuntimeError("Riccati iteration failed to converge")
+
+def optimal_policy(P, A, B, R, b, gamma=0.95):
+    Delta = R + gamma * (B.T @ P @ B)
+    K = (B.T @ P @ A - b) / Delta
+    return K
+
+# compute K
+A, B, Q, R, b = lqg_matrices(phi, tau_ell, rho1, rho2)
+P = solve_riccati(A, B, Q, R, b, gamma)
+K = optimal_policy(P, A, B, R, b, gamma).reshape(1, 4)
+
+# ------------------------------------------------------------------
+# 3. Simulation containers
+# ------------------------------------------------------------------
+states = np.zeros((T+1, 4))     # [p, imb, alpha1, alpha2]
+x      = np.zeros(T)
+rewards = np.zeros(T)
+
+# ------------------------------------------------------------------
+# 4. Main loop
+# ------------------------------------------------------------------
+rng = np.random.default_rng(seed=42)
+
+for t in range(T):
+    s_t = states[t]                       # current state row (shape (4,))
+    x_t = -float(K @ s_t)                 # optimal trade (scalar)
+    x[t] = x_t
+
+    # unpack state
+    p_tm1, imb_tm1, a1_t, a2_t = s_t
+    a_t = a1_t + a2_t
+
+    # stage reward
+    r_t = (
+        a_t * (p_tm1 + x_t)
+        - 0.5 * (p_tm1 + x_t) ** 2
+        - 0.5 * tau_ell * (phi * imb_tm1 + (1 - phi) * x_t) * x_t
+    )
+    rewards[t] = r_t
+
+    # next state
+    p_t   = p_tm1 + x_t
+    imb_t = phi * imb_tm1 + (1 - phi) * x_t
+    a1_tp1 = rho1 * a1_t + np.sqrt(1 - rho1 ** 2) * rng.standard_normal()
+    a2_tp1 = rho2 * a2_t + np.sqrt(1 - rho2 ** 2) * rng.standard_normal()
+
+    states[t+1] = [p_t, imb_t, a1_tp1, a2_tp1]
+
+# ------------------------------------------------------------------
+# 5. Cumulative reward
+# ------------------------------------------------------------------
+cum_reward = np.cumsum(rewards)
+
+# ------------------------------------------------------------------
+# 6. Plot
+# ------------------------------------------------------------------
+plt.figure(figsize=(10, 4))
+plt.plot(cum_reward)
+plt.title("Cumulative Reward over Time (100k steps)")
+plt.xlabel("Time step")
+plt.ylabel("Cumulative reward")
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------------
+# 7. Print final statistics
+# ------------------------------------------------------------------
+print("Final cumulative reward:", cum_reward[-1])
+
