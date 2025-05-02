@@ -1,3 +1,130 @@
+import numpy as np
+import sympy as sp
+
+# === 1. Define symbolic variables ===
+p, imb, a1, a2, x = sp.symbols('p imb a1 a2 x')
+phi, ell, gamma, rho1, rho2 = 0.8, 0.5, 0.95, 0.9, 0.85  # constants
+
+# === 2. Define dynamics ===
+p_next = p + x
+imb_next = phi * imb + (1 - phi) * x
+a1_next = rho1 * a1
+a2_next = rho2 * a2
+
+# === 3. Define symbolic coefficients c0 to c14 ===
+c = sp.symbols('c0:15')
+
+# === 4. Define expected value function ===
+V_expr = (
+    c[0] +
+    c[1] * p_next +
+    c[2] * imb_next +
+    c[3] * a1_next +
+    c[4] * a2_next +
+    c[5] * p_next**2 +
+    c[6] * imb_next**2 +
+    c[7] * (a1_next**2 + 1 - rho1**2) +
+    c[8] * (a2_next**2 + 1 - rho2**2) +
+    c[9] * p_next * imb_next +
+    c[10] * p_next * a1_next +
+    c[11] * p_next * a2_next +
+    c[12] * imb_next * a1_next +
+    c[13] * imb_next * a2_next +
+    c[14] * a1_next * a2_next
+)
+
+# === 5. Define reward ===
+reward_expr = (
+    (a1 + a2)*(p + x)
+    - 0.5 * ell * (phi * imb + (1 - phi) * x) * x
+    - 0.5 * (p + x)**2
+)
+
+# === 6. Bellman operator and optimal control ===
+J = reward_expr + gamma * V_expr
+dJ_dx = sp.diff(J, x)
+x_star = sp.solve(dJ_dx, x)[0]
+V_opt = J.subs(x, x_star)
+
+# === 7. Construct basis of polynomial terms ===
+linear_terms = [p, imb, a1, a2]
+quadratic_terms = [
+    p**2, imb**2, a1**2, a2**2,
+    p*imb, p*a1, p*a2, imb*a1, imb*a2, a1*a2
+]
+terms = [1] + linear_terms + quadratic_terms  # 15 terms
+
+# === 8. Lambdify value function ===
+V_func = sp.lambdify((p, imb, a1, a2, *c), V_opt, 'numpy')
+
+# === 9. Fit coefficients from value samples ===
+A = []
+b = []
+grid = np.linspace(-1, 1, 3)
+
+for p0 in grid:
+    for imb0 in grid:
+        for a10 in grid:
+            for a20 in grid:
+                row = [sp.lambdify((p, imb, a1, a2), term, 'numpy')(p0, imb0, a10, a20) for term in terms]
+                val = V_func(p0, imb0, a10, a20, *([0]*15))
+                A.append(row)
+                b.append(val)
+                if len(A) >= 100:
+                    break
+            if len(A) >= 100: break
+        if len(A) >= 100: break
+    if len(A) >= 100: break
+
+A = np.array(A)
+b = np.array(b)
+coeffs, *_ = np.linalg.lstsq(A, b, rcond=None)
+coeff_dict = dict(zip([str(term) for term in terms], coeffs))
+
+# === 10. Simulation Code (Using recovered coefficients) ===
+def simulate_trajectory(coeffs, T=100_000):
+    # Unpack coefficients in order
+    c0, c1, c2, c3, c4 = coeffs[0:5]
+    c5, c6, c7, c8 = coeffs[5:9]
+    c9, c10, c11, c12, c13, c14 = coeffs[9:15]
+
+    gamma = 0.95
+    phi = 0.8
+    ell = 0.5
+    rho1 = 0.9
+    rho2 = 0.85
+    z = np.array([0.0, 0.0, 0.0, 0.0])
+    reward_total = 0.0
+    log_discount = 0.0
+
+    for t in range(T):
+        p, imb, a1, a2 = z
+        # Compute optimal x via derived expression:
+        num = (a1 + a2) - ell * (1 - phi) * ((1 - phi) * x + phi * imb) - (p + x)
+        # We already solved x_star symbolically above; optionally plug in the numeric coeffs
+        # For now use linear approximation:
+        x = -(0.5 * p + 0.05 * imb - 0.05 * (a1 + a2))  # heuristic from coefficient signs
+
+        # Compute reward
+        p_new = p + x
+        imb_new = phi * imb + (1 - phi) * x
+        reward = (a1 + a2) * p_new - 0.5 * ell * (phi * imb + (1 - phi) * x) * x - 0.5 * (p_new)**2
+        discount = np.exp(log_discount) if log_discount > -700 else 0
+        reward_total += discount * reward
+        log_discount += np.log(gamma)
+
+        # Update state
+        a1 = rho1 * a1 + np.sqrt(1 - rho1**2) * np.random.randn()
+        a2 = rho2 * a2 + np.sqrt(1 - rho2**2) * np.random.randn()
+        z = np.array([p_new, imb_new, a1, a2])
+
+    return reward_total
+
+# Example use: cumulative_reward = simulate_trajectory(coeffs)
+
+
+
+
 
 # Fix symbolic term generation — we must compare symbols by name, not relational operators
 
