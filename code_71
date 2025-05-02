@@ -1,0 +1,99 @@
+# ------------------------------------------------------------
+#  EXACT CLOSED‑FORM LQG SOLUTION  +  MONTE‑CARLO SIMULATION
+# ------------------------------------------------------------
+import sympy as sp
+import numpy as np
+from sympy import symbols, Matrix, expand, collect, solve, Eq
+from scipy.optimize import minimize_scalar
+
+# -------- 1.  MODEL PARAMETERS (change if desired) ----------
+phi   = 0.8
+ell   = 0.5           # = \tilde{\ell}
+gamma = 0.95
+rho1  = 0.9
+rho2  = 0.85
+
+# -------- 2.  SYMBOLIC STATE & CONTROL ----------------------
+p, b, a1, a2, x = symbols('p b a1 a2 x')        #  b = imbalance
+c = symbols('c0:15')                            # c0 … c14
+
+# -------- 3.  VALUE‑FUNCTION ANSATZ -------------------------
+V   = ( c[0] + c[1]*p + c[2]*b + c[3]*a1 + c[4]*a2
+      + c[5]*p**2 + c[6]*b**2 + c[7]*a1**2 + c[8]*a2**2
+      + c[9]*p*b + c[10]*p*a1 + c[11]*p*a2
+      + c[12]*b*a1 + c[13]*b*a2 + c[14]*a1*a2 )
+
+# -------- 4.  BELLMAN RIGHT‑HAND SIDE -----------------------
+p1   = p + x
+b1   = phi*b + (1-phi)*x
+a1n  = rho1*a1
+a2n  = rho2*a2
+
+#   E[V(next)]  (expectation only affects a1^2, a2^2 terms)
+E_V  = ( c[0]
+       + c[1]*p1 + c[2]*b1 + c[3]*a1n + c[4]*a2n
+       + c[5]*p1**2 + c[6]*b1**2
+       + c[7]*(a1n**2 + 1-rho1**2) + c[8]*(a2n**2 + 1-rho2**2)
+       + c[9]*p1*b1 + c[10]*p1*a1n + c[11]*p1*a2n
+       + c[12]*b1*a1n + c[13]*b1*a2n + c[14]*a1n*a2n )
+
+reward = (a1 + a2)*p1 - 0.5*ell*(phi*b + (1-phi)*x)*x - 0.5*p1**2
+J      = reward + gamma*E_V
+
+# -------- 5.  OPTIMAL CONTROL x* ----------------------------
+x_star = solve(sp.diff(J, x), x, dict=True)[0][x]          # unique scalar root
+
+# -------- 6.  VALUE FROM RHS WITH x* ------------------------
+V_rhs  = expand(J.subs(x, x_star))
+
+# -------- 7.  MATCH COEFFICIENTS:  V(p,b,a1,a2) = V_rhs ----
+poly_vars = (p, b, a1, a2)
+eqs = []
+for mon in [1, p, b, a1, a2,
+            p**2, b**2, a1**2, a2**2,
+            p*b, p*a1, p*a2, b*a1, b*a2, a1*a2]:
+    lhs = collect(V,   poly_vars).coeff_monomial(mon)
+    rhs = collect(V_rhs, poly_vars).coeff_monomial(mon)
+    eqs.append(Eq(lhs, rhs))
+
+# constant term needs one more equation from trace condition
+sigma1 = 1-rho1**2
+sigma2 = 1-rho2**2
+trace_noise = gamma/(1-gamma) * ( c[7]*sigma1 + c[8]*sigma2 )
+eqs.append(Eq(c[0], trace_noise))
+
+solution = solve(eqs, c, dict=True)[0]           # exact rational numbers
+
+# substitute numeric values
+c_num = [ float(solution[ci].evalf()) for ci in c ]
+
+# -------- 8.  NUMERIC λ‑FUNCTIONS FOR x* AND V --------------
+V_exact  = sp.lambdify((p, b, a1, a2), V.subs(solution), 'numpy')
+x_exact  = sp.lambdify((p, b, a1, a2), x_star.subs(solution), 'numpy')
+
+# -------- 9.  SIMULATE OPTIMAL TRAJECTORY ------------------
+def simulate(T=100_000, seed=0):
+    rng = np.random.default_rng(seed)
+    p_t = b_t = a1_t = a2_t = 0.0
+    disc  = 1.0
+    total = 0.0
+    for _ in range(T):
+        x_t = x_exact(p_t, b_t, a1_t, a2_t)
+        p_next  = p_t + x_t
+        b_next  = phi*b_t + (1-phi)*x_t
+        r_t = (a1_t + a2_t)*p_next - 0.5*ell*(phi*b_t + (1-phi)*x_t)*x_t - 0.5*p_next**2
+        total += disc * r_t
+        disc  *= gamma
+        a1_next = rho1*a1_t + np.sqrt(1-rho1**2)*rng.standard_normal()
+        a2_next = rho2*a2_t + np.sqrt(1-rho2**2)*rng.standard_normal()
+        p_t, b_t, a1_t, a2_t = p_next, b_next, a1_next, a2_next
+    return total
+
+# -------- 10.  RUN & DISPLAY --------------------------------
+coeff_table = {f'c{i}': v for i, v in enumerate(c_num)}
+print("Closed‑form coefficients:")
+for k, v in coeff_table.items():
+    print(f"  {k:<3}= {v:+.6f}")
+
+print("\nExample discounted cumulative reward (T=100 000):",
+      simulate())
