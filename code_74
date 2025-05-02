@@ -1,0 +1,76 @@
+# ------------------------------------------------------------
+#  EXACT POLYNOMIAL VALUE FUNCTION  (SymPy only, no Riccati)
+# ------------------------------------------------------------
+import sympy as sp, numpy as np, time
+t0 = time.time()
+
+# ---------- 1.  PARAMETERS  (edit freely)  -------------------
+phi   = sp.Rational(8,10)          # 0.8
+ell   = sp.Rational(1,2)           # 0.5
+gamma = sp.Rational(95,100)        # 0.95
+rho1  = sp.Rational(9,10)          # 0.9
+rho2  = sp.Rational(17,20)         # 0.85
+sigma1, sigma2 = 1-rho1**2, 1-rho2**2
+
+# ---------- 2.  SYMBOLS --------------------------------------
+p, b, a1, a2, x = sp.symbols('p b a1 a2 x')
+c = sp.symbols('c0:15')            # c0 … c14
+
+# ---------- 3.  QUADRATIC ANSATZ V ---------------------------
+V = ( c[0] + c[5]*p**2 + c[6]*b**2 + c[7]*a1**2 + c[8]*a2**2 +
+      c[9]*p*b + c[10]*p*a1 + c[11]*p*a2 +
+      c[12]*b*a1 + c[13]*b*a2 + c[14]*a1*a2 )      # linear terms vanish
+
+# ---------- 4.  BELLMAN RIGHT‑HAND SIDE ----------------------
+p1, b1 = p + x, phi*b + (1-phi)*x
+a1n, a2n = rho1*a1, rho2*a2
+
+reward  = (a1+a2)*p1 - sp.Rational(1,2)*ell*(phi*b + (1-phi)*x)*x - sp.Rational(1,2)*p1**2
+EV      = ( c[0] + c[5]*p1**2 + c[6]*b1**2 +
+            c[7]*(a1n**2 + sigma1) + c[8]*(a2n**2 + sigma2) +
+            c[9]*p1*b1 + c[10]*p1*a1n + c[11]*p1*a2n +
+            c[12]*b1*a1n + c[13]*b1*a2n + c[14]*a1n*a2n )
+J       = reward + gamma*EV
+
+x_star  = sp.solve(sp.diff(J,x), x)[0]              # optimal control (linear in state)
+V_rhs   = J.subs(x, x_star)                         # Bellman RHS with x*
+
+# ---------- 5.  MATCH COEFFICIENTS ---------------------------
+poly_diff = sp.Poly(V_rhs - V, p, b, a1, a2)        # no full expand needed
+eqs = [ sp.Eq(coeff, 0) for coeff in poly_diff.coeffs() ]
+
+# constant term equation (noise trace) ------------------------
+eqs.append(sp.Eq(c[0], gamma/(1-gamma)*(c[7]*sigma1 + c[8]*sigma2)))
+
+sol = sp.solve(eqs, c, dict=True)[0]                # exact rational solution
+c_exact = [sp.nsimplify(sol[ci]) for ci in c]
+
+print("Closed‑form coefficients:")
+for i,ci in enumerate(c_exact):
+    if ci != 0:
+        print(f"  c{i:<2}= {ci}")
+
+print("\nOptimal control law:")
+print("  x* =", sp.simplify(x_star.subs(sol)))
+
+print(f"\nSolved in {time.time()-t0:.1f} seconds")
+
+# ---------- 6.  OPTIONAL: SIMULATION -------------------------
+x_func = sp.lambdify((p,b,a1,a2), x_star.subs(sol), 'numpy')
+T      = 100_000
+rng    = np.random.default_rng(1)
+state  = np.zeros(4)               # [p,b,a1,a2]
+disc   = 1.0
+total  = 0.0
+for _ in range(T):
+    p_,b_,a1_,a2_ = state
+    x_   = float(x_func(p_,b_,a1_,a2_))
+    p1_  = p_ + x_
+    b1_  = float(phi)*b_ + (1-float(phi))*x_
+    r_   = (a1_+a2_)*p1_ - 0.5*float(ell)*(float(phi)*b_+(1-float(phi))*x_)*x_ - 0.5*p1_**2
+    total += disc*r_
+    disc  *= float(gamma)
+    a1_   = float(rho1)*a1_ + np.sqrt(float(sigma1))*rng.standard_normal()
+    a2_   = float(rho2)*a2_ + np.sqrt(float(sigma2))*rng.standard_normal()
+    state = np.array([p1_, b1_, a1_, a2_])
+print("Discounted cumulative reward (100 000 steps):", total)
