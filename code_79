@@ -1,0 +1,83 @@
+# ---------- fast_coefficients.py ----------
+import numpy as np
+from scipy.optimize import root
+
+# mapping (i,j) -> index in the 10‑vector  p  (i <= j)
+_index = {(0,0):0,(1,1):1,(2,2):2,(3,3):3,
+          (0,1):4,(0,2):5,(0,3):6,(1,2):7,(1,3):8,(2,3):9}
+
+def _mat_from_vec(p):
+    """vec -> symmetric 4×4 matrix"""
+    P = np.empty((4,4))
+    for (i,j),k in _index.items():
+        P[i,j] = P[j,i] = p[k]
+    return P
+
+def _vec_from_mat(P):
+    """symmetric 4×4 matrix -> vec"""
+    p = np.empty(10)
+    for (i,j),k in _index.items():
+        p[k] = P[i,j]
+    return p
+
+def coefficients_numeric(tau, phi, gamma, rho1, rho2,
+                          atol=1e-12, rtol=1e-12):
+    """solve F(P)=0 once, return 10‑vector of coefficients"""
+    # constant matrices --------------------------------------------------
+    A = np.array([[1,0,0,0],
+                  [0,phi,0,0],
+                  [0,0,rho1,0],
+                  [0,0,0,rho2]])
+    B = np.array([1,1-phi,0,0])
+    H = np.array([[-.5,0,.5,.5],
+                  [0,0,0,0],
+                  [.5,0,0,0],
+                  [.5,0,0,0]])
+    M = np.array([-1, -tau*phi/2,  .5, .5])
+    L = -.5*(tau*(1-phi)+1)
+
+    # helper -------------------------------------------------------------
+    def F(p):
+        P = _mat_from_vec(p)
+        S = H + gamma * A.T @ P @ A
+        T = M + gamma * A.T @ P @ B
+        U = L + gamma * (B @ P @ B)
+        G = S - np.outer(T, T) / U          # right‑hand side
+        return _vec_from_mat(P - G)         # F(P)=0
+
+    # analytic Jacobian dF/dp -------------------------------------------
+    def J(p):
+        P = _mat_from_vec(p)
+        # pre‑compute frequently reused scalars
+        S = gamma * A.T
+        BtPB = B @ P @ B
+        U = L + gamma * BtPB
+        A_P = S @ A            # γ Aᵀ P A
+        A_B = S @ B            # γ Aᵀ B
+        # Jacobian is 10×10
+        Jmat = np.zeros((10,10))
+        # build derivative entry by entry -------------
+        for (i,j),k in _index.items():      # d/dp_k
+            # unit perturbation ΔP = E_{ij}+E_{ji}
+            E = np.zeros((4,4)); E[i,j]=E[j,i]=1.
+            dS = S @ E @ A                   # γ Aᵀ E A
+            dT = S @ E @ B                   # γ Aᵀ E B
+            dU = gamma * (B @ E @ B)
+            dG = dS - np.outer(dT, T) / U \
+                   - np.outer(T, dT)/U \
+                   + np.outer(T, T)*dU/U**2
+            Jmat[:,k] = _vec_from_mat(E - dG)
+        return Jmat
+
+    # Newton solve -------------------------------------------------------
+    p0 = np.zeros(10)        # good enough anywhere in the basin
+    sol = root(F, p0, jac=J, method='hybr',
+               tol=atol, options={'xtol': atol})
+    if not sol.success or np.max(np.abs(sol.fun))>rtol:
+        raise RuntimeError("Newton did not converge:", sol.message)
+    return sol.x          # length‑10 vector
+
+import time, fast_coefficients as fc
+t0=time.perf_counter()
+p = fc.coefficients_numeric(tau=.2, phi=.8, gamma=.98, rho1=.9, rho2=.7)
+print("elapsed", time.perf_counter()-t0, "sec")
