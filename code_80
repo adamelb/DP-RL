@@ -1,0 +1,186 @@
+%%bash
+cat <<'PY' > /mnt/data/value_function_lqg.py
+import numpy as np
+from math import exp, sqrt
+
+__all__ = ["compute_coefficients", "optimal_action", "simulate"]
+
+def _ensure_matrix_1x1(r):
+    """
+    Return a 1×1 ndarray given either a scalar or a 1×1 array‑like.
+    """
+    arr = np.atleast_2d(r).astype(float)
+    if arr.shape != (1, 1):
+        raise ValueError("R must be scalar or 1×1.")
+    return arr
+
+
+def _hamiltonian_eig_solution(A, B, Q, R, gamma=1.0):
+    """
+    Stabilizing solution P of the discounted DARE via the Hamiltonian
+    eigen‑vector method (Laub, 1979).  No iterations are used.
+    A, B : system matrices (n×n, n×m)
+    Q    : n×n (symmetric, positive semidef.)
+    R    : m×m (positive definite)
+    gamma: discount factor in (0,1]
+    """
+    R = _ensure_matrix_1x1(R)
+    n = A.shape[0]
+
+    # incorporate discount as in Bertsekas: A_bar = sqrt(gamma) * A, etc.
+    A_bar = sqrt(gamma) * A
+    B_bar = sqrt(gamma) * B
+
+    Rinv = np.linalg.inv(R)
+    # Symplectic (Hamiltonian) matrix for the discrete‑time ARE
+    Z = np.block([
+        [A_bar,              -B_bar @ Rinv @ B_bar.T],
+        [-Q,                 A_bar.T             ]
+    ])
+
+    vals, vecs = np.linalg.eig(Z)
+    # Select the n stable eigen‑vectors (|λ|<1)
+    select = np.abs(vals) < 1.0 - 1e-10
+    if select.sum() != n:
+        raise RuntimeError("Unexpected eigenvalue configuration while solving DARE.")
+    W = vecs[:, select]
+
+    U1 = W[:n, :]
+    U2 = W[n:, :]
+    P = np.real(U2 @ np.linalg.inv(U1))
+    P = 0.5 * (P + P.T)   # enforce symmetry
+    return P
+
+
+def compute_coefficients(gamma, tl, rho1, rho2, tau):
+    """
+    Analytic quadratic value‑function coefficients.
+
+    Returns
+    -------
+    P : 4×4 ndarray, symmetric
+    coefs : dict mapping basis monomials to scalar coefficients
+    """
+    phi = exp(-1.0 / tau)
+
+    # State dynamics ------------------------------------------------------------
+    A = np.diag([1.0, phi, rho1, rho2])
+    B = np.array([[1.0],
+                  [1.0 - phi],
+                  [0.0],
+                  [0.0]])
+
+    # Cost components (minimise −reward) ----------------------------------------
+    R_scalar = tl * (1.0 - phi) + 1.0        # positive
+    R = _ensure_matrix_1x1(R_scalar)
+
+    # cross vector  L  ( cost term L x )
+    L = np.array([1.0, 0.5 * tl * phi, -1.0, -1.0])
+    S = 0.5 * L.reshape(1, 4)                # S shape (1,4)
+
+    Q = np.zeros((4, 4))
+    Q[0, 0] = 0.5
+    Q[0, 2] = Q[2, 0] = -0.5
+    Q[0, 3] = Q[3, 0] = -0.5
+
+    # Complete the square to remove x–s cross term ------------------------------
+    Rinv = np.linalg.inv(R)
+    Q_tilde = Q - S.T @ Rinv @ S
+    A_shift = A - B @ Rinv @ S
+
+    # Solve discounted ARE analytically -----------------------------------------
+    P = _hamiltonian_eig_solution(A_shift, B, Q_tilde, R, gamma)
+
+    # Polynomial coefficients ---------------------------------------------------
+    coef = {
+        "p^2":        P[0, 0],
+        "imb^2":      P[1, 1],
+        "a1^2":       P[2, 2],
+        "a2^2":       P[3, 3],
+        "p·imb":      2.0 * P[0, 1],
+        "p·a1":       2.0 * P[0, 2],
+        "p·a2":       2.0 * P[0, 3],
+        "imb·a1":     2.0 * P[1, 2],
+        "imb·a2":     2.0 * P[1, 3],
+        "a1·a2":      2.0 * P[2, 3],
+    }
+    return P, coef
+
+
+def _gain_matrices(P, tl, tau):
+    """Helper: common scalar/ matrices used by the policy."""
+    phi = exp(-1.0 / tau)
+    R_scalar = tl * (1.0 - phi) + 1.0
+    S = np.array([[0.5, 0.25 * tl * phi, -0.5, -0.5]])
+    Rinv = 1.0 / R_scalar
+    B = np.array([[1.0],
+                  [1.0 - phi],
+                  [0.0],
+                  [0.0]])
+    A = np.diag([1.0, phi, 0.0, 0.0])  # rho's not required here
+    A_shift = A - B * Rinv * S
+    Rbar = R_scalar + float(B.T @ P @ B)
+    K = (1.0 / Rbar) * (B.T @ P @ A_shift)
+    return Rinv, S, K
+
+
+def optimal_action(state, P, tl, tau):
+    """
+    Closed‑form optimal trade x* for given state and P.
+    state : (4,) iterable   (p, imb, a1, a2)
+    """
+    s = np.asarray(state, dtype=float).reshape(4, 1)
+    Rinv, S, K = _gain_matrices(P, tl, tau)
+    x_star = float(- K @ s - Rinv * (S @ s))
+    return x_star
+
+
+def simulate(T, state0, gamma, tl, rho1, rho2, tau, seed=None):
+    """
+    Simulate the controlled process for T steps.  Returns trajectory and
+    discounted cumulative reward.
+    """
+    rng = np.random.default_rng(seed)
+    P, _ = compute_coefficients(gamma, tl, rho1, rho2, tau)
+
+    states  = np.zeros((T + 1, 4))
+    actions = np.zeros(T)
+    rewards = np.zeros(T)
+
+    states[0, :] = state0
+    phi = exp(-1.0 / tau)
+
+    for t in range(T):
+        p, imb, a1, a2 = states[t, :]
+        x = optimal_action(states[t, :], P, tl, tau)
+        actions[t] = x
+
+        rew = (a1 + a2) * (p + x) \
+              - 0.5 * tl * (phi * imb + (1 - phi) * x) * x \
+              - 0.5 * (p + x) ** 2
+        rewards[t] = (gamma ** t) * rew
+
+        # dynamics
+        p_next   = p + x
+        imb_next = phi * imb + (1 - phi) * x
+        a1_next  = rho1 * a1 + sqrt(1 - rho1 ** 2) * rng.standard_normal()
+        a2_next  = rho2 * a2 + sqrt(1 - rho2 ** 2) * rng.standard_normal()
+        states[t + 1, :] = (p_next, imb_next, a1_next, a2_next)
+
+    G = rewards.sum()
+    return states, actions, G
+
+
+# quick smoke‑test when executed directly --------------------------------------
+if __name__ == "__main__":
+    gamma = 0.95
+    tl, rho1, rho2, tau = 0.1, 0.9, 0.8, 5.0
+    P, coefs = compute_coefficients(gamma, tl, rho1, rho2, tau)
+    print("P matrix:\n", P, "\n")
+    print("Polynomial coefficients:")
+    for k, v in coefs.items():
+        print(f"{k:7s}: {v:+.6f}")
+
+    s0 = (0.0, 0.0, 0.5, -0.3)
+    _, _, G = simulate(40, s0, gamma, tl, rho1, rho2, tau, seed=123)
+    print(f"\nDiscounted return (T=40): {G:.5f}")
