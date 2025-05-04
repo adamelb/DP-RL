@@ -1,0 +1,204 @@
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║     1.  Value‑iteration  +  2. Greedy π(s)  +  3. Simulation    ║
+# ╚══════════════════════════════════════════════════════════════════╝
+import torch, pickle, math, numpy as np
+from pathlib import Path
+from math import sqrt
+from torch.cuda.amp import autocast
+
+
+# ────────────────────────────────────────────────────────────────────
+# helper: AR(1) → nearest‑neighbour transition  (GPU, vectorised)
+# ────────────────────────────────────────────────────────────────────
+def _ar1_T(grid: torch.Tensor, rho: float, n_mc: int = 12_000,
+           *, dtype=torch.float32):
+    dev, N = grid.device, grid.numel()
+    g = grid.unsqueeze(0)                                         # (1,N)
+    eps = torch.randn(n_mc, N, device=dev, dtype=dtype)
+    samp = rho * g + sqrt(1 - rho*rho) * eps
+    idx  = (samp.unsqueeze(-1) - g).abs().argmin(-1)              # (MC,N)
+    T = torch.zeros(N, N, device=dev, dtype=dtype)
+    T.scatter_add_(1, idx, torch.ones_like(idx, dtype=dtype))
+    T /= n_mc
+    return T.T.contiguous()       # we’ll want (Na,Na) in column‑major order
+
+
+# ────────────────────────────────────────────────────────────────────
+# 1   high‑perf GPU value‑iteration  (unchanged from previous answer)
+# ────────────────────────────────────────────────────────────────────
+@torch.compile(mode="reduce-overhead")
+def _sweep_kernel(V, R_sx, T1, T2, P_next_idx, I_next_idx,
+                  gamma, use_amp):
+    with autocast(enabled=use_amp):
+        Vp = V[P_next_idx, :, :, I_next_idx]                      # gather V(s′)
+        Vp = Vp.permute(1, 2, 0, 3, 4).contiguous()               # (Na,Na,B)
+
+        EV = torch.matmul(T2, Vp.view(T2.size(0), -1))
+        EV = EV.view_as(Vp)
+        EV = torch.matmul(T1, EV.permute(1, 0, 2).reshape(T1.size(0), -1))
+        EV = EV.view_as(Vp).permute(2, 0, 1, 3, 4)                # back to (B,…)
+
+        Q = R_sx + gamma * EV
+        V_new, π = torch.max(Q, dim=-1)                           # value & argmax
+    return V_new.to(V.dtype), π.to(torch.int16)                   # save RAM
+
+
+def value_iteration_gpu(P_grid, A_grid, I_grid, X_grid,
+                        *, rho1, rho2, gamma,
+                        tau_L, phi, la, C,
+                        n_sweeps=80, tol=1e-6,
+                        dtype=torch.float32,
+                        use_mixed_precision=True):
+    dev   = P_grid.device
+    cast  = lambda t: t.to(dev, dtype=dtype)
+
+    P, A, I, X = map(cast, (P_grid, A_grid, I_grid, X_grid))
+    Np, Na, Ni, Nx = len(P), len(A), len(I), len(X)
+
+    T1 = _ar1_T(A, rho1, dtype=dtype)
+    T2 = _ar1_T(A, rho2, dtype=dtype)
+
+    # 5‑D broadcast views
+    P5 = P.view(Np, 1, 1, 1, 1)
+    A1 = A.view(1, Na, 1, 1, 1)
+    A2 = A.view(1, 1, Na, 1, 1)
+    I4 = I.view(1, 1, 1, Ni, 1)
+    X5 = X.view(1, 1, 1, 1, Nx)
+
+    pnl  = (A1 + A2) * (P5 + X5)
+    cost = 0.5 * tau_L * (phi*I4 + (1-phi)*X5) * X5 + C * X5.abs()
+    risk = 0.5 * la * (P5 + X5) ** 2
+    R_sx = (pnl - cost - risk).to(dtype)
+
+    P_next_idx = (P5 + X5 - P.min()).div(P[1]-P[0]).round().clamp(0, Np-1).long()
+    I_next     = phi*I4 + (1-phi)*X5
+    I_next_idx = (I_next - I.min()).div(I[1]-I[0]).round().clamp(0, Ni-1).long()
+
+    V = torch.zeros(Np, Na, Na, Ni, device=dev, dtype=dtype)
+    π = torch.zeros_like(V, dtype=torch.int16)
+
+    for k in range(1, n_sweeps+1):
+        V_new, π = _sweep_kernel(V, R_sx, T1, T2,
+                                 P_next_idx, I_next_idx,
+                                 gamma, use_mixed_precision)
+        Δ = (V_new - V).abs().max()
+        V = V_new
+        if Δ < tol:
+            print(f"✓ converged in {k} sweeps  |Δ|={Δ:.2e}")
+            break
+    else:
+        print(f"⚠ stopped at {n_sweeps} sweeps  |Δ|={Δ:.2e}")
+
+    return V, π, (P_next_idx, I_next_idx)   # last tuple reused later
+
+
+# ────────────────────────────────────────────────────────────────────
+# 2   Trajectory simulator using the discrete greedy policy
+# ────────────────────────────────────────────────────────────────────
+@torch.no_grad()
+def simulate_tabular(alpha1, alpha2,
+                     *, p0, i0,
+                     P_grid, I_grid, X_grid,
+                     φ, tau_L, la, C,
+                     π,                       # argmax tensor from VI
+                     device='cuda',
+                     dtype=torch.float32):
+    """
+    Re‑play an exogenous (α¹,α²) path with the greedy discrete policy.
+
+    alpha1, alpha2 : 1‑D NumPy / torch arrays of same length T
+    π              : tensor (Np,Na,Na,Ni) of chosen x‑indices
+    Returns
+    -------
+    rewards, positions   (torch tensors on CPU)
+    """
+    dev = torch.device(device)
+    alpha1 = torch.as_tensor(alpha1, device=dev, dtype=dtype)
+    alpha2 = torch.as_tensor(alpha2, device=dev, dtype=dtype)
+
+    P, I, X = (t.to(dev) for t in (P_grid, I_grid, X_grid))
+    ΔP = P[1] - P[0]
+    ΔI = I[1] - I[0]
+
+    T = len(alpha1)
+    rew  = torch.empty(T, device=dev, dtype=dtype)
+    pos  = torch.empty(T, device=dev, dtype=dtype)
+
+    # start from continuous values
+    p, i = torch.tensor(float(p0), device=dev, dtype=dtype), \
+           torch.tensor(float(i0), device=dev, dtype=dtype)
+
+    for t in range(T):
+        # nearest cell indices
+        ip  = torch.clamp(((p - P[0])/ΔP).round(), 0, len(P)-1).long()
+        ia1 = torch.clamp(((alpha1[t] - A_grid[0])/(A_grid[1]-A_grid[0])).round(),
+                          0, len(A_grid)-1).long()
+        ia2 = torch.clamp(((alpha2[t] - A_grid[0])/(A_grid[1]-A_grid[0])).round(),
+                          0, len(A_grid)-1).long()
+        ii  = torch.clamp(((i - I[0])/ΔI).round(), 0, len(I)-1).long()
+
+        ix  = int(π[ip, ia1, ia2, ii])
+        x   = float(X[ix])
+
+        # reward
+        reward = (alpha1[t] + alpha2[t]) * (p + x) \
+                 - 0.5 * tau_L * (φ * i + (1-φ) * x) * x \
+                 - 0.5 * la * (p + x) ** 2 \
+                 - C * abs(x)
+        rew[t] = reward
+        pos[t] = p + x
+
+        # dynamics
+        p += x
+        i = φ * i + (1-φ) * x
+
+    return rew.cpu(), pos.cpu()
+
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║          USAGE  (run once after defining your grids)             ║
+# ╚══════════════════════════════════════════════════════════════════╝
+if __name__ == "__main__":
+    dev   = torch.device("cuda:0")
+    dtype = torch.bfloat16        # or torch.float32
+
+    # grids copied from your notebook  (already on GPU)
+    P_space  = torch.linspace(-3, 3, 131, device=dev)
+    A_space  = torch.linspace(-3, 3, 121, device=dev)
+    I_space  = torch.linspace(-5, 5,  51, device=dev)
+    X_space  = torch.linspace(-4, 4, 101, device=dev)
+
+    # model params  (match the closed‑form run)
+    rho1, rho2   = 0.9, 0.5
+    gamma, tau   = 0.99, 15.0
+    phi          = math.exp(-1/tau)
+    tau_L, la, C = 1000.0, 1.0, 0.   # C=0 here for apples‑to‑apples
+
+    # ---------- 1 VI + greedy policy -------------------------------
+    V, π, _ = value_iteration_gpu(P_space, A_space, I_space, X_space,
+                                  rho1=rho1, rho2=rho2,
+                                  gamma=gamma,
+                                  tau_L=tau_L, phi=phi,
+                                  la=la, C=C,
+                                  dtype=dtype,
+                                  n_sweeps=120, tol=1e-6)
+
+    # ---------- 2 load the alpha path you dumped --------------------
+    dump_path = Path("/path/to/closed_form_AR2_dump.pkl")  # <‑‑ change
+    alpha1_path, alpha2_path = pickle.load(open(dump_path, "rb"))[2][2:]  # same slicing as you had
+    alpha1_arr = np.array(alpha1_path, dtype=np.float32)
+    alpha2_arr = np.array(alpha2_path, dtype=np.float32)
+
+    # ---------- 3 simulate the tabular policy -----------------------
+    rewards_tab, pos_tab = simulate_tabular(alpha1_arr, alpha2_arr,
+                                            p0=0., i0=0.,
+                                            P_grid=P_space,
+                                            I_grid=I_space,
+                                            X_grid=X_space,
+                                            φ=phi, tau_L=tau_L,
+                                            la=la, C=C,
+                                            π=π,
+                                            device=dev,
+                                            dtype=dtype)
+
+    print("cum‑reward (tabular) =", rewards_tab.sum().item())
