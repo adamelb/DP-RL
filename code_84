@@ -1,0 +1,110 @@
+import math, time, torch, tqdm
+from tqdm import trange
+torch.set_default_device("cuda")          # avoids .to(device) boiler‑plate
+dtypeV       = torch.float32
+dtypeProb    = torch.float16              # transition matrices
+dtypeIdx     = torch.int16                # p/imbalance next‑state indices
+dtypePolicy  = torch.uint8                # greedy action ∈ [0,100]
+
+# ---- grids --------------------------------------------------------------
+Np, Na, Ni, Nx = 131, 121, 51, 101
+p_space   = torch.linspace(-3, 3,  Np, dtype=dtypeV)
+a_space   = torch.linspace(-3, 3,  Na, dtype=dtypeV)
+imb_space = torch.linspace(-5, 5,  Ni, dtype=dtypeV)
+x_space   = torch.linspace(-4, 4,  Nx, dtype=dtypeV)
+
+# ---- AR(1) transition matrices (α₁ and α₂) ------------------------------
+def ar1_T(grid: torch.Tensor, ρ: float, n_mc: int = 12_000) -> torch.Tensor:
+    g = grid.cpu().numpy()                       # faster MC in NumPy
+    samp = ρ * g + math.sqrt(1-ρ*ρ) * torch.randn(n_mc, g.size).numpy()
+    proj = torch.from_numpy(samp).unsqueeze(-1).sub_(torch.tensor(g)).abs().argmin(-1)
+    T = torch.zeros(g.size, g.size, dtype=dtypeProb)
+    for i, row in enumerate(proj.T):
+        idx, cnt = torch.unique(row, return_counts=True)
+        T[i, idx] = cnt.float() / cnt.sum()
+    return T.cuda()
+
+ρ1, ρ2 = 0.9, 0.5
+T1, T2 = ar1_T(a_space, ρ1), ar1_T(a_space, ρ2)     # (Na,Na) each
+
+# ---- deterministic next‑state indices for p and imbalance ---------------
+with torch.no_grad():
+    P_next_idx = torch.empty((Np, Nx), dtype=dtypeIdx)   # int16
+    I_next_idx = torch.empty((Ni, Nx), dtype=dtypeIdx)
+
+    for ix, x in enumerate(x_space):
+        P_next_idx[:, ix] = torch.bucketize(p_space + x, p_space) - 1
+        # imbalance' = (1-φ)*x + φ*i
+        # grid is linear, so we can pre‑compute for i = imb_space
+        I_next_idx[:, ix] = torch.bucketize((1-φ)*x + φ*imb_space, imb_space) - 1
+
+P_next_idx.clamp_(0, Np-1)
+I_next_idx.clamp_(0, Ni-1)
+
+# ---- value function + greedy policy tables ------------------------------
+V  = torch.zeros((Np, Na, Na, Ni), dtype=dtypeV, requires_grad=False)
+π  = torch.zeros_like(V, dtype=dtypePolicy)            # stores best action idx
+
+@torch.compile(mode="reduce-overhead")
+def value_iteration(V: torch.Tensor,
+                    π: torch.Tensor,
+                    n_sweeps: int = 100,
+                    γ: float      = 0.99,
+                    ε: float      = 1e-4):
+
+    # broadcast once – saves a bunch of unsqueezes in the loop
+    P  = p_space.view(Np, 1, 1, 1)         # (Np,1,1,1)
+    A1 = a_space.view(1, Na, 1, 1)         # (1,Na,1,1)
+    A2 = a_space.view(1, 1, Na, 1)         # (1,1,Na,1)
+    I  = imb_space.view(1, 1, 1, Ni)       # (1,1,1,Ni)
+
+    T1_ = T1.view(1, Na, Na, 1)            # (1,Na,Na,1)
+    T2_ = T2.view(1, 1, Na, Na)            # (1,1,Na,Na)
+
+    for sweep in range(n_sweeps):
+        V_new = torch.full_like(V, -torch.inf)   # use –∞ so max works
+        π_new = π                                # will be overwritten where improved
+
+        # -- loop over actions; compute reward on‑the‑fly -------------------
+        for ix, x in enumerate(x_space):
+            x_val = float(x)                     # scalar for Python math
+
+            # immediate reward
+            pnl  = (A1 + A2) * (P + x)
+            cost = 0.5 * τ_la * (φ*I + (1-φ)*x) * x + C * abs(x)
+            risk = 0.5 * λ * (P + x)**2
+            R    = pnl - cost - risk             # (Np,Na,Na,Ni)
+
+            # expected continuation value E[V′]
+            ipn = P_next_idx[:, ix]              # (Np,)
+            iin = I_next_idx[:, ix]              # (Ni,)
+
+            Vn  = V[ipn][:, :, :, iin]           # gather = (Np,Na,Na,Ni)
+            EV  = torch.einsum('aA,Bb,pABf->pabf', T1_, T2_, Vn)
+
+            Q   = R + γ * EV                    # (Np,Na,Na,Ni)
+
+            # keep the best action so far
+            better = Q > V_new
+            V_new = torch.where(better, Q, V_new)
+            π_new = torch.where(better, ix, π_new)
+
+            # free transient tensors before next action
+            del R, Vn, EV, Q, better
+            torch.cuda.empty_cache()
+
+        # convergence test
+        diff = (V_new - V).abs().max()
+        V.copy_(V_new)
+        π.copy_(π_new)
+        if diff < ε:
+            print(f"converged after sweep {sweep+1}, |Δ|∞ = {diff:.3e}")
+            break
+
+    return V, π
+
+# ------------ run ---------------------------------------------------------
+start = time.time()
+V, π = value_iteration(V, π, n_sweeps=100)
+print(f"run‑time   : {(time.time()-start)/60:4.1f} minutes")
+print(f"GPU memory : {torch.cuda.max_memory_allocated() / 2**30:5.2f} GB")
