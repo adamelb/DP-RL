@@ -1,3 +1,38 @@
+# ────────────────────────────────────────────────────────────────────
+# fast, safe AR(1) transition on a regular grid
+# ────────────────────────────────────────────────────────────────────
+def ar1_transition(grid: torch.Tensor,
+                   rho: float,
+                   n_mc: int = 12_000,
+                   *,
+                   dtype=torch.float32) -> torch.Tensor:
+    """
+    Return T  (N×N)  with  T[new_idx, old_idx] = P( α' lands in bucket new_idx
+                                                     | α   = grid[old_idx] ).
+    • Fully vectorised on the GPU.
+    • No (MC,N,N) tensor, so memory is O(N·n_mc) only.
+    """
+    dev = grid.device
+    grid = grid.to(dtype=dtype)
+
+    N     = grid.numel()
+    delta = grid[1] - grid[0]                       # uniform spacing
+    base  = grid.view(N, 1)                         # (N,1) replicate each α
+    eps   = torch.randn(N, n_mc, device=dev, dtype=dtype)
+    samp  = rho * base + torch.sqrt(torch.tensor(1. - rho*rho, dtype=dtype,
+                                                 device=dev)) * eps   # (N,MC)
+
+    # nearest‑bucket index   idx = round((samp - min) / Δ)  [0 … N-1]
+    idx = ((samp - grid[0]) / delta).round().clamp_(0, N-1).to(torch.long)  # (N,MC)
+
+    T = torch.zeros(N, N, device=dev, dtype=dtype)
+    T.scatter_add_(1, idx, torch.ones_like(idx, dtype=dtype))
+    T /= float(n_mc)                                # rows sum to 1
+    return T                                        # shape (N, N)
+
+
+
+
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║     1.  Value‑iteration  +  2. Greedy π(s)  +  3. Simulation    ║
 # ╚══════════════════════════════════════════════════════════════════╝
