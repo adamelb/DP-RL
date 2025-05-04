@@ -1,0 +1,121 @@
+# -----------------------------------------------------------------------------------
+#  Tabular DP with 2‑alpha signal + inventory impact, GPU‑optimised
+#  Hamza Majioud – May 2025
+# -----------------------------------------------------------------------------------
+import math, time, torch, numpy as np
+from tqdm import trange
+
+torch.set_default_device("cuda")                 # use default GPU without .to(...)
+dtypeV       = torch.float32
+dtypeProb    = torch.float16                     # transition matrices
+dtypeIdx     = torch.int16                       # saved next‑state indices
+dtypePolicy  = torch.uint8                       # greedy action table
+
+# ==== user parameters ===============================================================
+Np, Na, Ni, Nx = 131, 121, 51, 101               # grid sizes
+rho1, rho2     = 0.8, 0.4                        # AR(1) coefficients
+tau            = 20
+phi            = math.exp(-1 / tau)              # impact persistence
+gamma          = 0.99
+tla            = 500.                            # impact slope
+la             = 1.                              # risk‑aversion
+C              = 0.                              # linear cost (set to 0 for test)
+n_mc_T         = 12_000                          # MC samples for P(α′|α)
+n_sweeps       = 100
+tol            = 1e-4
+# ====================================================================================
+
+# ---- grids -------------------------------------------------------------------------
+p_space   = torch.linspace(-3, 3,  Np, dtype=dtypeV)
+a_space   = torch.linspace(-3, 3,  Na, dtype=dtypeV)
+imb_space = torch.linspace(-5, 5,  Ni, dtype=dtypeV)
+x_space   = torch.linspace(-4, 4,  Nx, dtype=dtypeV)
+
+# ---- helper: AR(1) transition matrix ----------------------------------------------
+def ar1_T(grid: torch.Tensor, rho: float,
+          n_mc: int = 12_000,
+          dtype_out=torch.float16) -> torch.Tensor:
+    g = grid.cpu().numpy()                                           # (Ng,)
+    samp = rho * g + math.sqrt(1 - rho * rho) * np.random.randn(n_mc, g.size)
+    proj = np.abs(samp[:, :, None] - g[None, None, :]).argmin(-1)    # (n_mc, Ng)
+    T = np.zeros((g.size, g.size), dtype=np.float32)
+    for col in range(g.size):
+        idx, cnt = np.unique(proj[:, col], return_counts=True)
+        T[col, idx] = cnt / n_mc
+    return torch.as_tensor(T, dtype=dtype_out, device=grid.device)   # (Ng,Ng)
+
+T1, T2 = ar1_T(a_space, rho1, n_mc_T), ar1_T(a_space, rho2, n_mc_T)   # (Na,Na)
+
+# ---- deterministic indices for next‑p and next‑imbalance --------------------------
+with torch.no_grad():
+    P_next_idx = torch.empty((Np, Nx), dtype=dtypeIdx, device="cuda")
+    I_next_idx = torch.empty((Ni, Nx), dtype=dtypeIdx, device="cuda")
+    for ix, x in enumerate(x_space):
+        P_next_idx[:, ix] = torch.bucketize(p_space + x,  p_space) - 1
+        I_next_idx[:, ix] = torch.bucketize((1 - phi) * x + phi * imb_space,
+                                            imb_space) - 1
+    P_next_idx.clamp_(0, Np - 1)
+    I_next_idx.clamp_(0, Ni - 1)
+
+# ---- value function + greedy policy -----------------------------------------------
+V = torch.zeros((Np, Na, Na, Ni), dtype=dtypeV)          # state‑value
+pi = torch.zeros_like(V, dtype=dtypePolicy)              # best action index
+
+@torch.compile(mode="reduce-overhead")
+def value_iteration(V: torch.Tensor,
+                    pi: torch.Tensor,
+                    n_sweeps: int,
+                    gamma: float,
+                    eps: float):
+
+    P  = p_space.view(Np, 1, 1, 1)        # broadcast helpers
+    A1 = a_space.view(1, Na, 1, 1)
+    A2 = a_space.view(1, 1, Na, 1)
+    I  = imb_space.view(1, 1, 1, Ni)
+    T1_b = T1.view(1, Na, Na, 1)          # (1,Na,Na,1)
+    T2_b = T2.view(1, 1, Na, Na)          # (1,1,Na,Na)
+
+    for sweep in range(n_sweeps):
+        V_new = torch.full_like(V, -torch.inf)
+        pi_new = pi
+
+        for ix, x in enumerate(x_space):
+            # immediate reward (computed on‑the‑fly)
+            pnl  = (A1 + A2) * (P + x)
+            cost = 0.5 * tla * (phi * I + (1 - phi) * x) * x + C * abs(x)
+            risk = 0.5 * la * (P + x) ** 2
+            R = pnl - cost - risk                                # (Np,Na,Na,Ni)
+
+            # continuation value
+            ipn = P_next_idx[:, ix].long()                       # (Np,)
+            iin = I_next_idx[:, ix].long()                       # (Ni,)
+            Vn  = V[ipn][:, :, :, iin]                           # (Np,Na,Na,Ni)
+            EV  = torch.einsum('aA,Bb,pABf->pabf', T1_b, T2_b, Vn)
+
+            Q = R + gamma * EV                                   # (Np,Na,Na,Ni)
+
+            better = Q > V_new
+            V_new = torch.where(better, Q, V_new)
+            pi_new = torch.where(better, ix, pi_new)
+
+            del R, Vn, EV, Q, better
+            torch.cuda.empty_cache()
+
+        diff = (V_new - V).abs().max()
+        V.copy_(V_new); pi.copy_(pi_new)
+        if diff < eps:
+            print(f'converged at sweep {sweep + 1}, |Δ|∞ = {diff:.3e}')
+            break
+    return V, pi
+
+# ------------------------------- run -----------------------------------------------
+t0 = time.time()
+V, pi = value_iteration(V, pi, n_sweeps, gamma, tol)
+print(f'runtime      : {(time.time() - t0)/60:4.1f} min')
+print(f'GPU peak mem : {torch.cuda.max_memory_allocated()/2**30:5.2f} GB')
+
+# ---- quick sanity check: show a few actions ---------------------------------------
+for p_idx in (0, Np//2, Np-1):
+    for i_idx in (0, Ni//2, Ni-1):
+        print(f'p={p_space[p_idx]:+.2f}  i={imb_space[i_idx]:+.2f}  '
+              f'α1=α2=0  →  x* = {x_space[pi[p_idx,Na//2,Na//2,i_idx]].item():+.2f}')
