@@ -1,0 +1,47 @@
+@torch.compile(mode="reduce-overhead")
+def value_iteration(V: torch.Tensor,
+                    pi: torch.Tensor,
+                    n_sweeps: int,
+                    gamma: float,
+                    eps: float):
+
+    P  = p_space.view(Np, 1, 1, 1)
+    A1 = a_space.view(1, Na, 1, 1)
+    A2 = a_space.view(1, 1, Na, 1)
+    I  = imb_space.view(1, 1, 1, Ni)
+
+    for sweep in range(n_sweeps):
+        V_new = torch.full_like(V, -torch.inf)
+        pi_new = pi
+
+        for ix, x in enumerate(x_space):
+            # ------- immediate reward --------------------------------------
+            pnl  = (A1 + A2) * (P + x)
+            cost = 0.5 * tla * (phi * I + (1 - phi) * x) * x + C * abs(x)
+            risk = 0.5 * la  * (P + x) ** 2
+            R = pnl - cost - risk                               # (Np,Na,Na,Ni)
+
+            # ------- continuation value ------------------------------------
+            ipn = P_next_idx[:, ix].long()                     # (Np,)
+            iin = I_next_idx[:, ix].long()                     # (Ni,)
+            Vn  = V[ipn][:, :, :, iin]                         # (Np,Na,Na,Ni)
+
+            # *** FIXED einsum (2‑D T1/T2 + 4‑D Vn) ***
+            EV  = torch.einsum('au,bv,puvf->pabf', T1, T2, Vn) # (Np,Na,Na,Ni)
+
+            Q = R + gamma * EV
+
+            better   = Q > V_new
+            V_new    = torch.where(better, Q, V_new)
+            pi_new   = torch.where(better, ix, pi_new)
+
+            del R, Vn, EV, Q, better
+            torch.cuda.empty_cache()
+
+        diff = (V_new - V).abs().max()
+        V.copy_(V_new);  pi.copy_(pi_new)
+        if diff < eps:
+            print(f'converged at sweep {sweep+1}, |Δ|∞ = {diff:.3e}')
+            break
+
+    return V, pi
