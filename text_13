@@ -1,0 +1,236 @@
+## Closed‑form Optimal Strategy & Value Function — Full Walk‑Through  
+
+Below is a **single Markdown cell** you can paste straight into your Jupyter
+notebook.  All mathematics is inside dollar signs (`$ … $`) or double‑dollar
+blocks (`$$ … $$`) so it renders nicely.  Code identifiers appear in
+<code>monospace</code> font.
+
+---
+
+### 1 Problem recap  
+
+* **State**  
+  $s_t = \bigl(p_t,\ \mathrm{imb}_t,\ \alpha^{(1)}_{t+1},\ \alpha^{(2)}_{t+1}\bigr)^{\!\top} \in \mathbb R^{4}$  
+
+* **Control** (trade size) $x_t \in \mathbb R$
+
+* **Per‑period reward**
+
+  $$
+  \begin{aligned}
+  r(s_{t-1},x_t)\;=\;
+     (\alpha^{(1)}_t+\alpha^{(2)}_t)\,(p_{t-1}+x_t)
+     -\frac{\tau_L}{2}\,\bigl(\varphi\,\mathrm{imb}_{t-1}+(1-\varphi)x_t\bigr)\,x_t
+     -\frac12\,(p_{t-1}+x_t)^2,
+  \end{aligned}
+  $$
+
+  where $\varphi = e^{-1/\tau}$.
+
+* **Dynamics**  
+
+  $$
+  \begin{aligned}
+  p_t &= p_{t-1}+x_t, \\
+  \mathrm{imb}_t &= \varphi\,\mathrm{imb}_{t-1} + (1-\varphi)x_t,\\
+  \alpha^{(j)}_{t+1} &= \rho_j\,\alpha^{(j)}_t
+       + \sqrt{1-\rho_j^{2}}\;\varepsilon^{(j)}_{t+1},
+       \qquad \varepsilon^{(j)}_{t+1}\sim\mathcal N(0,1).
+  \end{aligned}
+  $$
+
+* **Objective**  
+  $\displaystyle \max_{\{x_t\}} \;\mathbb E\!\Bigl[\,\sum_{t=0}^{\infty}\gamma^{t}\,r(s_{t-1},x_t)\Bigr]$,
+  with $0<\gamma<1$.
+
+Everything is linear or quadratic ⇒ this is a **Linear–Quadratic–Gaussian (LQG)** control problem.
+
+---
+
+### 2 Cast the reward in canonical quadratic form  
+
+Write
+
+$$
+r(s,x)\;=\;-\tfrac12\,s^{\!\top}Q\,s \;-\; x^{\!\top}R\,x \;-\; 2\,x^{\!\top}S\,s,
+$$
+
+with  
+
+* $R \;=\; \tau_L(1-\varphi)+1 \;>\;0$ (scalar)  
+
+* $S \;=\; \bigl[\frac12,\; \tfrac12\tau_L\varphi/2,\; -\tfrac12,\; -\tfrac12 \bigr]$  
+
+*  
+
+  $$
+  Q = \begin{bmatrix}
+        \tfrac12 & 0 & -\tfrac12 & -\tfrac12\\
+        0 & 0 & 0 & 0\\
+        -\tfrac12 & 0 & 0 & 0\\
+        -\tfrac12 & 0 & 0 & 0
+      \end{bmatrix}.
+  $$
+
+The minus signs convert our maximisation problem into the standard **cost
+minimisation** used in LQG theory.
+
+---
+
+### 3 Linear state dynamics  
+
+$$
+s_{t+1} \;=\; A\,s_t + B\,x_{t+1} + \xi_{t+1},
+$$
+
+where  
+
+* $A = \operatorname{diag}\bigl(1,\;\varphi,\;\rho_1,\;\rho_2\bigr)$  
+* $B = \begin{bmatrix}1\\[2pt]1-\varphi\\[2pt]0\\[2pt]0\end{bmatrix}$  
+* $\xi_{t+1}$ contains the Gaussian innovation of the two alphas.  
+
+Because the noise is zero‑mean and independent of $x_t$, the
+**certainty‑equivalence principle** says we can optimise on the deterministic
+system obtained by replacing $\xi_{t+1}$ with $\mathbf0$.
+
+---
+
+### 4 Completing the square (removing state–control cross term)  
+
+Define  
+
+$$
+R^{-1}=1/R,\qquad
+\widetilde Q = Q - S^{\!\top}R^{-1}S,\qquad
+\widetilde A = A - B R^{-1}S.
+$$
+
+Then  
+
+$$
+r(s,x)
+=\tfrac12\,s^{\!\top}\widetilde Q\,s
+  +\tfrac12\bigl(x+R^{-1}S s\bigr)^{\!\top}R\bigl(x+R^{-1}S s\bigr)
+  -\text{constant}.
+$$
+
+Minimising the second (always‑positive) term yields a **linear law**
+
+$$
+x^\star(s) \;=\; -R^{-1}S\,s \;-\; K\,s,
+$$
+
+where $K$ is still unknown.
+
+---
+
+### 5 Discounted Algebraic Riccati Equation (DARE)  
+
+Assume the value has the quadratic form $V(s)=s^{\!\top}P\,s$.  
+Optimality forces $P\succeq0$ to satisfy
+
+$$
+P
+=
+\widetilde Q
++\gamma\,\widetilde A^{\!\top}P\,\widetilde A
+-\gamma\,\widetilde A^{\!\top}P B\,
+       (R+\gamma B^{\!\top}PB)^{-1}
+       B^{\!\top}P\,\widetilde A.
+$$
+
+Stabilisability and detectability (true here) guarantee a unique positive‑semidefinite solution.
+
+---
+
+### 6 Closed‑form solution of the DARE  
+
+Two equivalent “one‑shot” techniques:
+
+| Technique | Idea | In practice |
+|-----------|------|-------------|
+| **Hamiltonian eigen‑method** | Build a $2n\times2n$ symplectic matrix, keep the $n$ eigenvectors with $|\lambda|<1$, set $P=U_2U_1^{-1}$. | Works well but needs careful eigen‑sorting. |
+| **QZ / Schur factorisation** | Treat the DARE as a matrix pencil $(A-\lambda E)$ and take the orthogonal Schur form. | `scipy.linalg.solve_discrete_are` implements this, fully robust. |
+
+Our code simply calls `solve_discrete_are`, so there is **no iteration and no numerical fragility**.
+
+---
+
+### 7 Extracting the 10 polynomial coefficients  
+
+Because $P$ is symmetric,
+
+$$
+\begin{aligned}
+V(p,i,a_1,a_2) &= P_{11}p^{2} + P_{22}i^{2} + P_{33}a_1^{2} + P_{44}a_2^{2} \\
+&\quad\; + 2P_{12}p\,i + 2P_{13}p\,a_1 + 2P_{14}p\,a_2 \\
+&\quad\; + 2P_{23}i\,a_1 + 2P_{24}i\,a_2 + 2P_{34}a_1\,a_2.
+\end{aligned}
+$$
+
+Exactly those ten numbers are returned by
+`quadratic_coefficients(P)`.
+
+---
+
+### 8 Closed‑form optimal trade  
+
+With $P$ known, the feedback gain is  
+
+$$
+K \;=\; (R+\gamma B^{\!\top}PB)^{-1}\,\gamma B^{\!\top}P\,\widetilde A,
+$$
+
+and the **greedy Bellman‑optimal action**
+
+$$
+\boxed{\;
+  x^\star(s) \;=\; -\bigl(K + R^{-1}S\bigr)\,s
+\;}
+$$
+
+is dot‑product cheap ($O(1)$).
+
+---
+
+### 9 Fast trajectory simulation  
+
+1. Compute once:  
+   $(P,\;R,\;S,\;\widetilde A,\;B)$  
+   &nbsp;→&nbsp; micro‑seconds.
+
+2. For each step $t$:  
+
+   * trade size  
+     $\displaystyle x_t = x^\star(s_{t-1})$  
+   * reward  
+     $r_{t-1}= (\alpha^{(1)}_t+\alpha^{(2)}_t)(p_{t-1}+x_t)
+               - \tfrac12\tau_L(\varphi\,\mathrm{imb}_{t-1}+(1-\varphi)x_t)x_t
+               - \tfrac12(p_{t-1}+x_t)^2$
+   * update $p_t,\mathrm{imb}_t$ deterministically  
+   * draw new $\alpha^{(j)}_t$ from their AR(1) equations  
+   * accumulate $\gamma^{t-1} r_{t-1}$.
+
+Vectorised NumPy makes 100 000 steps take only a few milliseconds.
+
+---
+
+### 10 Functions in `closed_form_value.py`
+
+| Function | Role |
+|----------|------|
+| `compute_P` | Returns $P$, $R$, $S$, $\widetilde A$, $B$ via **SciPy’s** QZ solver. |
+| `quadratic_coefficients` | Maps the $10$ monomials ($p^2$, $p\,\mathrm{imb}$, …) to their coefficients. |
+| `optimal_action` | Implements the boxed formula above. |
+| `simulate` | Runs an optimal trajectory for any horizon $T$ (e.g. 100 000) and returns the discounted reward (plus full states/actions if asked). |
+
+---
+
+### 11 Why this is genuinely “closed form”  
+
+* Zero ADP / zero Riccati sweeps – **one** QZ factorisation.  
+* Control is linear, value is quadratic – both expressed as explicit matrices.  
+* Simulation is as light as running a linear filter.
+
+Paste this cell, run it once for reference, and you have the full theory
+alongside the code that realises it.
