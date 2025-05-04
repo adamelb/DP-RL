@@ -1,53 +1,59 @@
-# ─── Cell [5]: Simulation + Plot ────────────────────────────────────────────────
-import torch
+# ─── Cell [5]: Simulation with continuous AR(1) sampling for α₁, α₂ ──────────────
+import math, torch
 import matplotlib.pyplot as plt
 
-# number of interactions
+# Simulation length
 N_sim = 100_000
 
-# helper: nearest‐neighbor index
+# Nearest‐neighbor helper
 def nn_idx(grid: torch.Tensor, x: float) -> int:
     return int((grid - x).abs().argmin().item())
 
-# initial continuous state
-p, a1, a2, i = 0.0, 0.0, 0.0, 0.0
+# Initialize continuous state
+p_cont, i_cont = 0.0, 0.0
+a1_cont, a2_cont = 0.0, 0.0
 
-# initial discrete indices
-p_idx  = nn_idx(p_space,   p)
-a1_idx = nn_idx(a_space,   a1)
-a2_idx = nn_idx(a_space,   a2)
-i_idx  = nn_idx(imb_space, i)
+# Discrete indices
+p_idx   = nn_idx(p_space, p_cont)
+i_idx   = nn_idx(imb_space, i_cont)
+a1_idx  = nn_idx(a_space, a1_cont)
+a2_idx  = nn_idx(a_space, a2_cont)
 
-# move transition mats to CPU for sampling
-T1_cpu, T2_cpu = T1.cpu(), T2.cpu()
+# Precompute AR(1) noise scales
+σ1 = math.sqrt(1 - rho1**2)
+σ2 = math.sqrt(1 - rho2**2)
 
+# Storage for cumulative reward
 cum_rewards = []
 cum_reward = 0.0
 
 for t in range(N_sim):
-    # 1) pick action x from policy
+    # 1) Sample the continuous α₁,α₂ via AR(1)
+    a1_cont = rho1 * a1_cont + σ1 * torch.randn(1).item()
+    a2_cont = rho2 * a2_cont + σ2 * torch.randn(1).item()
+    #    discretize them
+    a1_idx = nn_idx(a_space, a1_cont)
+    a2_idx = nn_idx(a_space, a2_cont)
+
+    # 2) Pick the greedy x from your policy
     x_idx = int(pi_opt[p_idx, a1_idx, a2_idx, i_idx].item())
     x     = float(x_space[x_idx].item())
-    
-    # 2) instantaneous reward
-    r = ((a_space[a1_idx] + a_space[a2_idx]) * (p + x)
-         - 0.5 * tla * (phi * i + (1 - phi) * x) * x
+
+    # 3) Instantaneous reward
+    r = ((a_space[a1_idx] + a_space[a2_idx]) * (p_cont + x)
+         - 0.5 * tla * (phi * i_cont + (1 - phi) * x) * x
          + C * abs(x)
-         - 0.5 * la * (p + x)**2)
-    cum_reward += float(r.item())
+         - 0.5 * la * (p_cont + x)**2)
+    cum_reward += float(r)
     cum_rewards.append(cum_reward)
-    
-    # 3) evolve the state
-    p = p + x
-    i = phi * i + (1 - phi) * x
-    
-    # 4) discretize back
-    p_idx  = nn_idx(p_space,   p)
-    i_idx  = nn_idx(imb_space, i)
-    
-    # 5) sample next a1, a2 from AR‐transition
-    a1_idx = int(torch.multinomial(T1_cpu[a1_idx], 1).item())
-    a2_idx = int(torch.multinomial(T2_cpu[a2_idx], 1).item())
+
+    # 4) Evolve continuous price & inventory
+    p_cont = p_cont + x
+    i_cont = phi * i_cont + (1 - phi) * x
+
+    # 5) Discretize back for next step
+    p_idx = nn_idx(p_space, p_cont)
+    i_idx = nn_idx(imb_space, i_cont)
 
 # ─── Plot ───────────────────────────────────────────────────────────────────────
 plt.figure()
