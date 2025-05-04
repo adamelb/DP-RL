@@ -1,0 +1,150 @@
+
+import numpy as np
+from math import exp, sqrt
+from scipy.linalg import solve_discrete_are     # QZ‑based closed‑form solver
+import matplotlib.pyplot as plt
+
+def _model_matrices(tl, rho1, rho2, tau):
+    """A, B, Q, R, S exactly as in the derivation."""
+    phi = exp(-1.0 / tau)
+
+    A = np.diag([1.0, phi, rho1, rho2])
+    B = np.array([[1.0],
+                  [1.0 - phi],
+                  [0.0],
+                  [0.0]])
+
+    R = tl * (1.0 - phi) + 1.0                  # scalar > 0
+
+    # quadratic & cross‑cost pieces
+    Q = np.zeros((4, 4))
+    Q[0, 0] = 0.5
+    Q[0, 2] = Q[2, 0] = -0.5
+    Q[0, 3] = Q[3, 0] = -0.5
+
+    L = np.array([1.0, 0.5 * tl * phi, -1.0, -1.0])
+    S = 0.5 * L.reshape(1, 4)                  # shape (1,4)
+
+    return A, B, Q, float(R), S, phi
+
+
+def compute_P(gamma, tl, rho1, rho2, tau):
+    """
+    Closed‑form stabilising P (4 × 4) using SciPy’s QZ implementation.
+    """
+    A, B, Q, R, S, _ = _model_matrices(tl, rho1, rho2, tau)
+
+    # complete the square to remove x–s cross term
+    Rinv = 1.0 / R
+    Q_hat = Q - S.T * Rinv @ S
+    A_hat = A - B * Rinv * S
+
+    # bring the discount into (A,B)
+    A_bar = sqrt(gamma) * A_hat
+    B_bar = sqrt(gamma) * B
+
+    # SciPy returns the stabilising solution directly
+    P = solve_discrete_are(A_bar, B_bar, Q_hat, R)
+
+    return P, R, S, A_hat, B
+
+
+def quadratic_coefficients(P):
+    """Return the 10 polynomial coefficients of V(p,i,a1,a2)."""
+    poly = {
+        "p^2":   P[0, 0],
+        "imb^2": P[1, 1],
+        "a1^2":  P[2, 2],
+        "a2^2":  P[3, 3],
+        "p·imb":  2*P[0, 1],
+        "p·a1":   2*P[0, 2],
+        "p·a2":   2*P[0, 3],
+        "imb·a1": 2*P[1, 2],
+        "imb·a2": 2*P[1, 3],
+        "a1·a2":  2*P[2, 3],
+    }
+    return poly
+
+
+def optimal_action(state, P, R, S, A_hat, B, gamma):
+    """
+    Closed‑form optimiser x*(s) = −(K + R⁻¹S)s   with
+    K = (R+γBᵀPB)⁻¹ γ Bᵀ P A_hat.
+    """
+    s = np.asarray(state, float).reshape(4, 1)
+    R_bar = R + gamma * float(B.T @ P @ B)
+    K = (gamma / R_bar) * (B.T @ P @ A_hat)
+    x_star = float(-K @ s - (1.0/R) * (S @ s))
+    return x_star
+
+
+  def simulate(T,
+             state0,
+             gamma,
+             tl,
+             rho1,
+             rho2,
+             tau,
+             seed=None,
+             return_full=False):
+    """
+    Simulate optimal trading for `T` steps.
+
+    Parameters
+    ----------
+    T        : int, horizon length (e.g. 100_000)
+    state0   : iterable of length 4   (p, imb, a1, a2)
+    gamma    : discount factor
+    tl,rho1,rho2,tau : model parameters
+    seed     : int or None, RNG seed
+    return_full : if True, return (states, actions, discounted_return)
+                  else only the scalar discounted return
+
+    Returns
+    -------
+    G        : discounted cumulative reward
+    or (states, actions, G) if return_full is True
+    """
+    P, R, S, A_hat, B = compute_P(gamma, tl, rho1, rho2, tau)
+    rng = np.random.default_rng(seed)
+    phi = exp(-1.0 / tau)
+
+    states = np.empty((T + 1, 4)) if return_full else None
+    actions = np.empty(T) if return_full else None
+    if return_full:
+        states[0] = state0
+
+    p, imb, a1, a2 = state0
+    G = 0.0
+    discount = 1.0
+    rewards = []
+    for t in range(T):
+        # optimal trade
+        x = optimal_action((p, imb, a1, a2), P, R, S, A_hat, B, gamma)
+
+        # reward
+        rew = (a1 + a2) * (p + x) - 0.5 * tl * (phi * imb + (1 - phi) * x) * x - 0.5 * (p + x) ** 2
+        rewards.append(rew)
+        #discount *= gamma
+
+        if return_full:
+            actions[t] = x
+
+        # dynamics
+        p += x
+        imb = phi * imb + (1 - phi) * x
+        a1 = rho1 * a1 + sqrt(1 - rho1 ** 2) * rng.standard_normal()
+        a2 = rho2 * a2 + sqrt(1 - rho2 ** 2) * rng.standard_normal()
+
+        if return_full:
+            states[t + 1] = (p, imb, a1, a2)
+
+    if return_full:
+        return states, actions, G
+    return rewards
+
+
+gamma, tl, rho1, rho2, tau = 0.99, 100, 0.8, 0.4, 10.0
+rewards = simulate(100_000, (0., 0., 0.3, -0.2),
+                gamma, tl, rho1, rho2, tau, seed=0)
+plt.plot(np.cumsum(rewards))
