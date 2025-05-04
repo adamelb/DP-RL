@@ -1,0 +1,132 @@
+# cell [1]: imports & device
+from __future__ import annotations
+import torch
+import math, time
+from tqdm import trange, tqdm
+torch.manual_seed(0)
+
+device = torch.device('cuda:7')
+dtype = torch.float32
+
+# problem dims
+Np, Na, Ni, Nx = 131, 121, 51, 101
+
+# parameters
+la, C, tau = 1.0, 0.0, 20.0
+tla, gamma, rho1, rho2 = 500.0, 0.99, 0.8, math.exp(-1/tau)
+phi = math.exp(-1/tau)
+tol = 1e-4
+n_vi = 120
+
+# cell [2]: grids
+p_space   = torch.linspace(-3,   3,   Np, device=device, dtype=dtype)
+a_space   = torch.linspace(-3,   3,   Na, device=device, dtype=dtype)
+imb_space = torch.linspace(-0.5, 0.5, Ni, device=device, dtype=dtype)
+x_space   = torch.linspace(-0.4, 0.4, Nx, device=device, dtype=dtype)
+
+# helper: nearest‐neighbor index
+def nn_idx(grid: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    # grid: (M,), x: (...,M)
+    return (x.unsqueeze(-1) - grid).abs().argmin(-1)
+
+# precompute AR(1) transition matrices
+def ar1_transition(grid: torch.Tensor, rho: float, n_mc: int = 12_000) -> torch.Tensor:
+    # grid: 1D Tensor of size Na
+    g = grid.cpu().numpy()
+    samp = rho*g + math.sqrt(1 - rho*rho)*torch.randn(n_mc, g.size).numpy()
+    proj = (torch.from_numpy(samp)
+            .unsqueeze(-1)
+            - torch.tensor(g)[None,None,:]).abs().argmin(-1)
+    T = torch.zeros(g.size, g.size, dtype=dtype)
+    for i, row in enumerate(proj.T):
+        idx, cnt = torch.unique(row, return_counts=True)
+        T[i,idx] = cnt.float() / cnt.sum()
+    return T.to(device)
+
+T1 = ar1_transition(a_space, rho1)
+T2 = ar1_transition(a_space, rho2)
+
+# precompute nearest‐neighbor maps for price and inventory transitions
+# price:  p' = p + x
+p_nidx = nn_idx(p_space, p_space.unsqueeze(-1) + x_space.unsqueeze(0))
+# inventory: i' = phi * i + (1 - phi) * x
+i_nidx = nn_idx(imb_space, phi*imb_space.unsqueeze(-1) 
+                             + (1.0 - phi)*x_space.unsqueeze(0))
+
+# cell [3]: memory‐efficient VI + policy extraction
+@torch.no_grad()
+@torch.compile(mode="reduce-overhead")
+def value_iter_and_policy(
+    T1: torch.Tensor, T2: torch.Tensor,
+    p_nidx: torch.Tensor, i_nidx: torch.Tensor,
+    p_sp: torch.Tensor, a_sp: torch.Tensor,
+    i_sp: torch.Tensor, x_sp: torch.Tensor,
+    tla: float, gamma: float, phi: float,
+    C: float, la: float,
+    tol: float, max_iter: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    Np, Na, Ni, Nx = len(p_sp), len(a_sp), len(i_sp), len(x_sp)
+
+    # pre‐broadcasted A1+A2 term (shape 1×Na×Na×1)
+    A_sum = (a_sp.view(1,Na,1,1) 
+           + a_sp.view(1,1,Na,1))
+
+    # initialize value & policy
+    V     = torch.zeros((Np,Na,Na,Ni), device=device, dtype=dtype)
+    pi_ix = torch.zeros((Np,Na,Na,Ni), device=device, dtype=torch.int8)
+
+    for it in range(max_iter):
+        V_new = torch.full_like(V, -1e30)
+        best_a = torch.zeros_like(pi_ix)
+
+        # loop over continuous action x
+        for ix in range(Nx):
+            x = x_sp[ix]
+
+            # reward slice r(p,a1,a2,i ; x)
+            #   r = (a1+a2)*(p+x)
+            #       - 0.5*tla*(phi*i + (1-phi)*x)*x
+            #       + C*|x|
+            #       - 0.5*la*(p+x)^2
+            p_plus_x = (p_sp + x).view(Np,1,1,1)       # (Np,1,1,1)
+            i_part   = (phi*i_sp + (1-phi)*x).view(1,1,1,Ni)  # (1,1,1,Ni)
+            r = ( A_sum * p_plus_x
+                - 0.5*tla * i_part * x
+                + C * torch.abs(x)
+                - 0.5*la * p_plus_x**2
+                )
+            # next‐state EV
+            # first gather along price → shape (Np,Na,Na,Ni)
+            V_p = V[p_nidx[:,ix],:,:,:]             
+            # then along inventory:
+            V_pi = V_p[:,:,:, i_nidx[:,ix]]       # still (Np,Na,Na,Ni)
+            # integrate out a1',a2'
+            EV = torch.einsum('aj,bk,pjkf->pabf', T1, T2, V_pi)
+
+            Q = r + gamma * EV
+
+            # update max over actions & record argmax
+            mask   = Q > V_new
+            V_new  = torch.where(mask,     Q,    V_new)
+            best_a = torch.where(mask, ix, best_a)
+
+        # convergence check
+        if (V_new - V).abs().max() < tol:
+            V = V_new
+            break
+
+        V = V_new
+
+    return V, best_a
+
+# cell [4]: run and timing
+start = time.time()
+V_opt, pi_opt = value_iter_and_policy(
+    T1, T2,
+    p_nidx, i_nidx,
+    p_space, a_space, imb_space, x_space,
+    tla, gamma, phi, C, la,
+    tol, n_vi
+)
+print(f"Converged in {time.time()-start:.1f}s")
+print("V_opt shape:", V_opt.shape, "policy shape:", pi_opt.shape)
