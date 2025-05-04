@@ -1,0 +1,59 @@
+# ─── Cell [5]: Simulation + Plot ────────────────────────────────────────────────
+import torch
+import matplotlib.pyplot as plt
+
+# number of interactions
+N_sim = 100_000
+
+# helper: nearest‐neighbor index
+def nn_idx(grid: torch.Tensor, x: float) -> int:
+    return int((grid - x).abs().argmin().item())
+
+# initial continuous state
+p, a1, a2, i = 0.0, 0.0, 0.0, 0.0
+
+# initial discrete indices
+p_idx  = nn_idx(p_space,   p)
+a1_idx = nn_idx(a_space,   a1)
+a2_idx = nn_idx(a_space,   a2)
+i_idx  = nn_idx(imb_space, i)
+
+# move transition mats to CPU for sampling
+T1_cpu, T2_cpu = T1.cpu(), T2.cpu()
+
+cum_rewards = []
+cum_reward = 0.0
+
+for t in range(N_sim):
+    # 1) pick action x from policy
+    x_idx = int(pi_opt[p_idx, a1_idx, a2_idx, i_idx].item())
+    x     = float(x_space[x_idx].item())
+    
+    # 2) instantaneous reward
+    r = ((a_space[a1_idx] + a_space[a2_idx]) * (p + x)
+         - 0.5 * tla * (phi * i + (1 - phi) * x) * x
+         + C * abs(x)
+         - 0.5 * la * (p + x)**2)
+    cum_reward += float(r.item())
+    cum_rewards.append(cum_reward)
+    
+    # 3) evolve the state
+    p = p + x
+    i = phi * i + (1 - phi) * x
+    
+    # 4) discretize back
+    p_idx  = nn_idx(p_space,   p)
+    i_idx  = nn_idx(imb_space, i)
+    
+    # 5) sample next a1, a2 from AR‐transition
+    a1_idx = int(torch.multinomial(T1_cpu[a1_idx], 1).item())
+    a2_idx = int(torch.multinomial(T2_cpu[a2_idx], 1).item())
+
+# ─── Plot ───────────────────────────────────────────────────────────────────────
+plt.figure()
+plt.plot(cum_rewards)
+plt.xlabel("Time step")
+plt.ylabel("Cumulative reward")
+plt.title(f"Cumulative reward over {N_sim:,} steps")
+plt.tight_layout()
+plt.show()
