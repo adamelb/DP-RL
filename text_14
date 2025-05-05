@@ -1,0 +1,127 @@
+## Why introduce the “tilde” matrices \(\widetilde Q\) and \(\widetilde A\)?
+
+You’ll recall that our one-step cost (negative reward) in canonical form is
+
+\[
+J(s,x)
+=\tfrac12\,s^\top Q\,s \;+\; x^\top R\,x \;+\; 2\,x^\top S\,s.
+\]
+
+Because of the **cross term** \(2\,x^\top S\,s\), this is *not* yet in the standard LQR form
+\(\tfrac12\,s^\top Q_{\rm new}\,s + x^\top R\,x\).  We **complete the square** in \(x\) so that the cost splits into
+
+1. a **purely quadratic-in-state** term, and  
+2. a **purely quadratic-in-control** term (around a shifted control variable).
+
+---
+
+### 1.  The “shifted” control
+
+Define
+\[
+x_{\rm shift}
+\;=\;
+x \;+\; R^{-1}\,S\,s.
+\]
+Then
+\[
+x^\top R\,x \;+\; 2\,x^\top S\,s
+=
+\bigl(x + R^{-1}S\,s\bigr)^\top
+\,R\,
+\bigl(x + R^{-1}S\,s\bigr)
+\;-\;
+s^\top S^\top R^{-1}S\,s.
+\]
+You can verify this by expanding the right-hand side.
+
+---
+
+### 2.  New quadratic state cost
+
+Substitute back into \(J(s,x)\):
+\[
+\begin{aligned}
+J(s,x)
+&=
+\tfrac12\,s^\top Q\,s
+\;+\;
+\Bigl[x^\top R\,x + 2\,x^\top S\,s\Bigr] \\[6pt]
+&=
+\tfrac12\,s^\top Q\,s
+\;+\;
+\tfrac12\,\bigl(x + R^{-1}S\,s\bigr)^\top R \bigl(x + R^{-1}S\,s\bigr)
+\;-\;
+\tfrac12\,s^\top \bigl(S^\top R^{-1}S\bigr)\,s \\[6pt]
+&=
+\tfrac12\,s^\top
+\underbrace{\bigl(Q \;-\; S^\top R^{-1}S\bigr)}_{\displaystyle \widetilde Q}
+\,s
+\;+\;
+\tfrac12\,x_{\rm shift}^\top\,R\,x_{\rm shift}.
+\end{aligned}
+\]
+Thus we **define**
+\[
+\boxed{\,\widetilde Q \;=\; Q \;-\; S^\top R^{-1}S\,}
+\]
+so that the cost neatly splits into a pure “state only” quadratic plus a pure “control only” quadratic in the shifted variable.
+
+---
+
+### 3.  The “tilde” dynamics
+
+But note: we have replaced \(x\) by \(x_{\rm shift} - R^{-1}S\,s\).  
+In the original state‐update
+\[
+s_{t+1}=A\,s_t + B\,x_t + \xi_{t+1},
+\]
+this becomes
+\[
+s_{t+1}
+= A\,s_t
+\;+\;
+B\bigl(x_{\rm shift}-R^{-1}S\,s_t\bigr)
+\;+\;\xi_{t+1}
+=
+\underbrace{\bigl(A - B\,R^{-1}S\bigr)}_{\displaystyle \widetilde A}\,s_t
+\;+\;
+B\,x_{\rm shift}
+\;+\;
+\xi_{t+1}.
+\]
+Hence we **define**
+\[
+\boxed{\,\widetilde A \;=\; A \;-\; B\,R^{-1}S\,}
+\]
+so that in the new variables \((s,x_{\rm shift})\) the system is exactly
+in the **standard LQR form**:
+\[
+\text{cost:}\quad
+\tfrac12\,s^\top\widetilde Q\,s \;+\; x_{\rm shift}^\top R\,x_{\rm shift},
+\qquad
+\text{dynamics:}\quad
+s_{t+1}=\widetilde A\,s_t + B\,x_{\rm shift} + \xi_{t+1}.
+\]
+
+---
+
+### 4.  Why this matters
+
+1. **Decoupling**: by absorbing the cross term into a shift, the cost separates neatly into state-only and control-only quadratics.  
+2. **Standard form**: \((\widetilde Q,\;R,\; \widetilde A,\;B)\) is exactly the textbook setup for the discrete-time Algebraic Riccati Equation.  
+3. **One-shot solution**: once in that form, you can apply the Hamiltonian/QZ (or `solve_discrete_are`) to find the unique \(P\) without any extra complications.  
+4. **Backwards compatibility**: after solving for the optimal \(x_{\rm shift}^*\), you simply undo the shift to recover the original trade \(x^*(s)\).
+
+---
+
+#### TL;DR
+
+> Defining  
+> \(\widetilde Q = Q - S^\top R^{-1}S\)  
+> and  
+> \(\widetilde A = A - B R^{-1}S\)  
+>
+> is *exactly* the “complete the square” step in LQR.  
+> It removes the \(2\,x^\top S\,s\) cross term and puts the problem
+> into the standard form where the Algebraic Riccati Equation applies.
