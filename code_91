@@ -1,0 +1,161 @@
+# closed_form_demo.py
+# ===============================================================
+# 100 % analytic optimal policy for the 4‑dimensional LQG trader
+# + simulation utilities.
+#
+# Requires numpy >=1.20 and scipy >=1.10
+# ===============================================================
+import numpy as np
+from math import exp, sqrt
+from scipy.linalg import solve_discrete_are
+
+
+# -----------------------------------------------------------------
+# 0.  Model primitives  A, B, Q, R, S   (fixed for given constants)
+# -----------------------------------------------------------------
+def _model_matrices(tau_L, rho1, rho2, tau):
+    phi = exp(-1.0 / tau)
+
+    A = np.diag([1.0, phi, rho1, rho2])
+    B = np.array([[1.0],
+                  [1.0 - phi],
+                  [0.0],
+                  [0.0]])
+
+    R = tau_L * (1.0 - phi) + 1.0           # scalar > 0
+
+    # Q and S from derivation
+    Q = np.zeros((4, 4))
+    Q[0, 0] = 0.5
+    Q[0, 2] = Q[2, 0] = -0.5
+    Q[0, 3] = Q[3, 0] = -0.5
+
+    L = np.array([1.0, 0.5 * tau_L * phi, -1.0, -1.0])
+    S = 0.5 * L.reshape(1, 4)               # (1,4)
+
+    return A, B, Q, float(R), S, phi
+
+
+# -----------------------------------------------------------------
+# 1.  Closed‑form solution of the discounted DARE
+# -----------------------------------------------------------------
+def compute_P(gamma, tau_L, rho1, rho2, tau):
+    """
+    Return   P (4×4),   plus auxiliaries (R, S, A_hat, B).
+    """
+    A, B, Q, R, S, _ = _model_matrices(tau_L, rho1, rho2, tau)
+
+    Rinv  = 1.0 / R
+    Qhat  = Q - S.T * Rinv @ S
+    Ahat  = A - B * Rinv * S
+
+    P = solve_discrete_are(sqrt(gamma) * Ahat,
+                           sqrt(gamma) * B,
+                           Qhat,
+                           R)
+    return P, R, S, Ahat, B
+
+
+# -----------------------------------------------------------------
+# 2.  Greedy closed‑form action  x*(s)
+# -----------------------------------------------------------------
+def optimal_action(state, *, P, R, S, Ahat, B, gamma):
+    """
+    x* = -(K + R^{-1}S) s     with
+    K  = (R + γ Bᵀ P B)^{-1} γ Bᵀ P Ahat
+    """
+    s = np.asarray(state, float).reshape(4, 1)
+    Rbar = R + gamma * float(B.T @ P @ B)
+    K = (gamma / Rbar) * (B.T @ P @ Ahat)
+    return float(-K @ s - (1.0/R) * (S @ s))
+
+
+# -----------------------------------------------------------------
+# 3.  Simulator
+# -----------------------------------------------------------------
+def simulate(policy_fn,
+             T,
+             state0,
+             *,
+             tau_L, rho1, rho2, tau,
+             gamma=0.99,
+             add_terminal_value=True,
+             rng=None):
+    """
+    Roll a trajectory of length T.
+
+    policy_fn(s) -> x
+    Returns cumulative reward    G = Σ γᵗ r_t   (+ tail value if asked)
+    and arrays of rewards & positions.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    phi = exp(-1.0 / tau)
+
+    p, imb, a1, a2 = map(float, state0)
+    rewards, positions = np.empty(T), np.empty(T)
+    G, disc = 0.0, 1.0
+
+    for t in range(T):
+        s = (p, imb, a1, a2)
+        x = policy_fn(s)
+
+        # reward
+        r = (a1 + a2) * (p + x) \
+            - 0.5 * tau_L * (phi * imb + (1-phi) * x) * x \
+            - 0.5 * (p + x)**2
+        rewards[t], positions[t] = r, p + x
+        G += disc * r
+
+        # dynamics
+        p   += x
+        imb  = phi*imb + (1-phi)*x
+        a1   = rho1*a1 + sqrt(1-rho1*rho1) * rng.standard_normal()
+        a2   = rho2*a2 + sqrt(1-rho2*rho2) * rng.standard_normal()
+        disc *= gamma
+
+    if add_terminal_value and gamma < 1.0:
+        P, *_ = compute_P(gamma, tau_L, rho1, rho2, tau)
+        sT = np.array((p, imb, a1, a2)).reshape(1, 4)
+        G += disc * float(sT @ P @ sT.T)
+
+    return G, rewards, positions
+
+
+# -----------------------------------------------------------------
+# 4.  Demo / smoke‑test
+# -----------------------------------------------------------------
+def _demo():
+    # ----- constants  (edit these to your real numbers) -----------------------
+    gamma = 0.99          # < 1  ➜ discounted objective
+    tau_L = 1_000.0
+    rho1, rho2 = 0.9, 0.5
+    tau   = 15.0
+    T     = 100_000
+    state0 = (0., 0., 0.3, -0.2)
+
+    # ----- closed‑form policy -------------------------------------------------
+    P, R, S, Ahat, B = compute_P(gamma, tau_L, rho1, rho2, tau)
+    closed_policy = lambda s: optimal_action(s, P=P, R=R, S=S,
+                                             Ahat=Ahat, B=B, gamma=gamma)
+
+    # ----- baseline policy (random x)  just for illustration ------------------
+    rng = np.random.default_rng(0)
+    random_policy = lambda s: rng.uniform(-0.5, 0.5)
+
+    # ----- simulate both ------------------------------------------------------
+    G_opt, *_ = simulate(closed_policy,  T, state0,
+                         tau_L=tau_L, rho1=rho1, rho2=rho2, tau=tau,
+                         gamma=gamma, rng=np.random.default_rng(1))
+
+    G_rand, *_ = simulate(random_policy, T, state0,
+                          tau_L=tau_L, rho1=rho1, rho2=rho2, tau=tau,
+                          gamma=gamma, rng=np.random.default_rng(1))
+
+    print(f"closed‑form G  : {G_opt: .4f}")
+    print(f"random policy G: {G_rand: .4f}")
+
+
+if __name__ == "__main__":
+    _demo()
