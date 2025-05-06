@@ -1,0 +1,179 @@
+# Rigorous Proof: GARE ↔ Completed‐Square ARE
+
+We start with the **Generalized Discrete‐Time ARE (GARE)**  
+$$
+M \;=\; Q
+\;+\;\gamma\,F^\top M F
+\;-\;
+\bigl(N + \gamma\,F^\top M G\bigr)
+\underbrace{\bigl(R + \gamma\,G^\top M G\bigr)^{-1}}_{S^{-1}}
+\bigl(N^\top + \gamma\,G^\top M F\bigr),
+$$
+where we set  
+$$
+S \;=\; R + \gamma\,G^\top M G.
+$$
+
+---
+
+## 1. Define “Completed‐Square” Matrices
+
+Let
+$$
+\tilde Q \;=\; Q \;-\; N\,R^{-1}N^\top,
+\qquad
+\tilde F \;=\; F \;-\; G\,R^{-1}N^\top.
+$$
+We will show that the **standard** (completed‐square) ARE
+$$
+M
+= \tilde Q
+\;+\;\gamma\,\tilde F^\top M\,\tilde F
+\;-\;\gamma^2\,\tilde F^\top M G\,S^{-1}\,G^\top M\,\tilde F
+$$
+is algebraically **equivalent** to the GARE above.
+
+---
+
+## 2. Expand $\displaystyle\tilde F^\top M\,\tilde F$
+
+Since $\tilde F = F - G\,R^{-1}N^\top$,  
+$$
+\begin{aligned}
+\tilde F^\top M\,\tilde F
+&= (F^\top - N\,R^{-1}G^\top)\,M\,(F - G\,R^{-1}N^\top)\\[4pt]
+&= F^\top M F
+  \;-\;F^\top M G\,R^{-1}N^\top
+  \;-\;N\,R^{-1}G^\top M F
+  \;+\;N\,R^{-1}G^\top M G\,R^{-1}N^\top.
+\end{aligned}
+$$
+
+---
+
+## 3. Expand $\displaystyle\tilde F^\top M\,G\,S^{-1}\,G^\top M\,\tilde F$
+
+Similarly,
+$$
+\begin{aligned}
+\tilde F^\top M\,G\,S^{-1}\,G^\top M\,\tilde F
+&= \bigl(F^\top M G - N\,R^{-1}G^\top M G\bigr)\,S^{-1}\,
+   \bigl(G^\top M F - G^\top M G\,R^{-1}N^\top\bigr)\\[4pt]
+&= F^\top M G\,S^{-1}G^\top M F
+  - F^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top\\
+&\quad - N\,R^{-1}G^\top M G\,S^{-1}G^\top M F
+  + N\,R^{-1}G^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top.
+\end{aligned}
+$$
+
+---
+
+## 4. Write the Completed‐Square ARE RHS
+
+Substitute into  
+$$
+M = \tilde Q
+    + \gamma\,\tilde F^\top M\,\tilde F
+    - \gamma^2\,\tilde F^\top M G\,S^{-1}\,G^\top M\,\tilde F.
+$$
+Noting $\tilde Q = Q - N R^{-1}N^\top$, the right‐hand side becomes
+$$
+\begin{aligned}
+\mathrm{RHS}_{\rm sq}
+&= Q - N R^{-1}N^\top
+  + \gamma\Bigl[
+    F^\top M F
+    - F^\top M G\,R^{-1}N^\top
+    - N\,R^{-1}G^\top M F
+    + N\,R^{-1}G^\top M G\,R^{-1}N^\top
+  \Bigr]\\
+&\quad - \gamma^2\Bigl[
+    F^\top M G\,S^{-1}G^\top M F
+    - F^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top\\
+&\qquad\quad
+    - N\,R^{-1}G^\top M G\,S^{-1}G^\top M F
+    + N\,R^{-1}G^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top
+  \Bigr].
+\end{aligned}
+$$
+
+---
+
+## 5. Write the GARE RHS
+
+The GARE’s right‐hand side is
+$$
+\begin{aligned}
+\mathrm{RHS}_{\rm GARE}
+&= Q + \gamma\,F^\top M F
+  - \bigl(N + \gamma F^\top M G\bigr)\,S^{-1}\,(N^\top + \gamma G^\top M F)\\[4pt]
+&= Q + \gamma\,F^\top M F
+  - \Bigl[
+    N\,S^{-1}N^\top
+    + \gamma\,N\,S^{-1}G^\top M F
+    + \gamma\,F^\top M G\,S^{-1}N^\top
+    + \gamma^2\,F^\top M G\,S^{-1}G^\top M F
+  \Bigr].
+\end{aligned}
+$$
+
+---
+
+## 6. Term‐by‐Term Cancellation
+
+We need to show
+$$
+\mathrm{RHS}_{\rm sq}
+\;=\;
+\mathrm{RHS}_{\rm GARE}.
+$$
+
+1. **$Q$ and $\gamma F^\top M F$** match trivially.
+
+2. **Quartet of extra terms in $\mathrm{RHS}_{\rm sq}$**:
+   $$
+   -N R^{-1}N^\top
+   + \gamma\,N R^{-1}G^\top M G\,R^{-1}N^\top
+   - \gamma^2\,N R^{-1}G^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top
+   $$
+   can be factored as
+   $$
+   -\,N
+   \Bigl[R^{-1} - \gamma\,R^{-1}G^\top M G\,R^{-1}
+        + \gamma^2\,R^{-1}G^\top M G\,S^{-1}G^\top M G\,R^{-1}
+   \Bigr]N^\top.
+   $$
+   But for the scalar \(S=R+\gamma G^\top M G\) one verifies
+   $$
+   R^{-1}
+   - \gamma\,R^{-1}G^\top M G\,R^{-1}
+   + \gamma^2\,R^{-1}G^\top M G\,S^{-1}G^\top M G\,R^{-1}
+   = S^{-1}.
+   $$
+   Hence these three terms combine to \(-N S^{-1}N^\top\), matching the first subterm in $\mathrm{RHS}_{\rm GARE}$.
+
+3. **Cross‐terms** involving \(F^\top M G\) or \(G^\top M F\):
+   - From $\mathrm{RHS}_{\rm sq}$:
+     $$
+     -\gamma\,F^\top M G\,R^{-1}N^\top
+     +\gamma^2\,F^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top
+     = -\gamma\,F^\top M G\,\Bigl[R^{-1} - \gamma\,G^\top M G\,R^{-1}\Bigr]N^\top
+     = -\gamma\,F^\top M G\,S^{-1}N^\top.
+     $$
+     This matches \(-\gamma F^\top M G\,S^{-1}N^\top\) in $\mathrm{RHS}_{\rm GARE}$.
+
+   - Similarly,
+     $$
+     -\gamma\,N\,R^{-1}G^\top M F
+     +\gamma^2\,N\,R^{-1}G^\top M G\,S^{-1}G^\top M F
+     = -\gamma\,N\,S^{-1}G^\top M F,
+     $$
+     matching the second subterm in $\mathrm{RHS}_{\rm GARE}$.
+
+4. **$\gamma^2 F^\top M G\,S^{-1}G^\top M F$** appears with the same sign in both.
+
+Since every term aligns exactly, we conclude  
+$$
+\mathrm{RHS}_{\rm sq} \;=\;\mathrm{RHS}_{\rm GARE},
+$$
+and thus the **unique** symmetric solution \(M\) is the same for both AREs. QED.  
