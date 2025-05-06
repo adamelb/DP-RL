@@ -1,0 +1,73 @@
+import numpy as np
+from scipy.linalg import solve_discrete_are, null_space
+import matplotlib.pyplot as plt
+
+# 1) Parameters
+phi1, phi2 = 0.8, 0.5
+tl = 2.0
+rho1, rho2 = 0.9, 0.7
+gamma = 0.95
+
+# 2) System matrices
+F = np.diag([1.0, phi1, phi2, rho1, rho2])
+G = np.array([1.0, 1-phi1, 1-phi2, 0, 0])[:, None]
+
+# 3) Cost matrices
+Q = np.zeros((5,5))
+Q[0,0] = 1.0
+Q[0,3] = Q[3,0] = -1.0
+Q[0,4] = Q[4,0] = -1.0
+
+N = np.zeros((5,1))
+N[0,0] = 1.0
+N[1,0] = 0.5*tl*phi1
+N[2,0] = 0.5*tl*phi2
+N[3,0] = -1.0
+N[4,0] = -1.0
+
+R = 1.0 + tl*(2 - phi1 - phi2)
+
+# 4) Complete‐the‐square
+F_tilde = F - G @ (N.T / R)
+Q_tilde = Q - (N @ N.T) / R
+
+# 5) Scale for discount
+A_bar = np.sqrt(gamma) * F_tilde
+B_bar = np.sqrt(gamma) * G
+
+# 6) Solve ARE
+M = solve_discrete_are(A_bar, B_bar, Q_tilde, R)
+
+# 7) Compute m via full A_lin
+den = R + gamma * float(G.T @ M @ G)
+A_lin = gamma*F.T - (gamma/den)*(N + gamma*F.T@M@G)@G.T
+ns = null_space(np.eye(5) - A_lin)
+m = ns[:, [0]] if ns.size else np.zeros((5,1))
+
+# 8) Compute K,k
+K = (N.T + gamma*(G.T@M@F)) / den
+k = (gamma*(G.T@m)) / den
+
+# 9) Simulation
+T = 100_000
+s = np.zeros((5, T+1))
+rewards = np.zeros(T)
+for t in range(T):
+    x = float(-K @ s[:,t] + k)
+    p, i1, i2, a1, a2 = s[:,t]
+    im1 = phi1*i1 + (1-phi1)*x
+    im2 = phi2*i2 + (1-phi2)*x
+    rewards[t] = (a1+a2)*(p+x) - (tl/2)*(im1+im2)*x - 0.5*(p+x)**2
+    eps = np.zeros(5)
+    eps[3] = np.random.randn()*np.sqrt(1-rho1**2)
+    eps[4] = np.random.randn()*np.sqrt(1-rho2**2)
+    s[:,t+1] = F@s[:,t] + G.flatten()*x + eps
+
+# 10) Plot
+cum_reward = rewards.cumsum()
+plt.plot(cum_reward)
+plt.title("Cumulative Reward over 100k Steps")
+plt.xlabel("Time")
+plt.ylabel("Cumulative Reward")
+plt.grid(True)
+plt.show()
