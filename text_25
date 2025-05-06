@@ -1,0 +1,169 @@
+# Deriving the Matrix Equation for \(M\) (Generalized Discrete‑Time Riccati)
+
+We keep the **full cross‑term** \(N\) and set no a‑priori restrictions on
+\(m\) or \(c\) until the very last step.
+
+---
+
+## 1.  Ingredients
+
+* **Stage payoff**
+  $$
+    u(s,x)
+    \;=\;
+    -\tfrac12\,s^\top Q\,s
+    \;-\;s^\top N\,x
+    \;-\;\tfrac12\,R\,x^{2}.
+  $$
+* **Dynamics**
+  $$
+    s' = F\,s + G\,x + \Sigma^{1/2}\varepsilon,
+    \qquad
+    \varepsilon\sim\mathcal N(0,I).
+  $$
+* **Value‑function ansatz**
+  $$
+    V(s)= -\tfrac12\,s^\top M\,s + m^\top s + c .
+  $$
+
+---
+
+## 2.  Expectation of the value function
+
+Because $\mathbb E[\varepsilon]=0$ and
+$\mathbb E[\varepsilon\varepsilon^\top] = I$,
+\[
+\begin{aligned}
+\mathbb E[V(s')\,]
+&= -\tfrac12\,(F s + G x)^\top M\,(F s + G x)
+   -\tfrac12\,\operatorname{tr}\!\bigl(\Sigma^{1/2}M\Sigma^{1/2}\bigr)\\
+&\quad +\,m^\top(F s + G x) + c .
+\end{aligned}
+\]
+
+---
+
+## 3.  Bellman integrand  
+
+Insert $u(s,x)$ and $\gamma\mathbb E[V(s')\,]$:
+
+\[
+\begin{aligned}
+\mathcal J(s,x)
+&= -\tfrac12\,s^\top Q\,s
+   - s^\top N\,x
+   - \tfrac12\,R\,x^{2}\\
+&\quad -\gamma\,\tfrac12\,(F s + G x)^\top M\,(F s + G x)
+     +\gamma\,m^\top(F s + G x)
+     +\gamma c
+     -\gamma\,\tfrac12\,\operatorname{tr}(\Sigma^{1/2}M\Sigma^{1/2}).
+\end{aligned}
+\]
+
+---
+
+## 4.  First‑order condition in \(x\)
+
+Differentiate $\mathcal J$ w.r.t.\ \(x\) and set to zero:
+
+\[
+\begin{aligned}
+0
+&= -\,s^\top N - R x
+    -\gamma\,s^\top F^\top M G
+    -\gamma\,x\,G^\top M G
+    +\gamma\,m^\top G .
+\end{aligned}
+\]
+
+Solve for \(x^* = -K\,s + k\) with
+
+$$
+K = D^{-1}\bigl(N^\top + \gamma\,G^\top M F\bigr),
+\qquad
+k = D^{-1}\,\gamma\,G^\top m,
+\qquad
+D = R + \gamma\,G^\top M G.
+$$
+
+---
+
+## 5.  Plug \(x^*\) back and keep only **quadratic** terms in \(s\)
+
+Write
+\[
+x^* = -K s + k,
+\quad
+Fs + Gx^* = (F - G K)s + G k .
+\]
+
+Collect the coefficient of $s^\top(\cdot)s$ in $\mathcal J(s,x^*)$:
+
+1.  From $-\tfrac12\,s^\top Q\,s$ → $-\tfrac12\,Q$.
+
+2.  From $-\,s^\top N\,x^*$ with $x^*=-Ks+k$  
+    ⇒ quadratic part $+\tfrac12\bigl(K^\top N + N^\top K\bigr)$  
+    (but $N^\top K$ is a scalar, so we can keep $K^\top N$).
+
+3.  From $-\tfrac12\,R\,(x^*)^2$  
+    ⇒ $-\tfrac12\,R\,K^\top K$.
+
+4.  From $-\tfrac{\gamma}{2}(F s + G x^*)^\top M(F s + G x^*)$  
+    ⇒ $-\tfrac{\gamma}{2}\,(F - G K)^\top M (F - G K)$.
+
+5.  The remaining pieces are linear or constant and do **not** affect the
+    quadratic coefficient of $s$.
+
+Equating the quadratic coefficient to
+the ansatz coefficient $-\tfrac12 M$
+yields
+
+$$
+-\tfrac12\,M
+=
+-\tfrac12\,Q
+\;+\;
+\tfrac12\Bigl(K^\top N + N^\top K\Bigr)
+\;-\;\tfrac12\,R\,K^\top K
+\;-\;\tfrac{\gamma}{2}\,(F - G K)^\top M (F - G K).
+$$
+
+Multiply by \(-2\) and use symmetry:
+
+$$
+M
+= Q
+\;-\;
+K^\top N - N^\top K
+\;+\; R\,K^\top K
+\;+\;\gamma\,(F-GK)^\top M\,(F-GK).
+$$
+
+---
+
+## 6.  Insert \(K\)
+
+Because $K = D^{-1}(N^\top + \gamma G^\top M F)$
+and $D = R + \gamma G^\top M G$,  
+the three middle terms combine into
+
+$$
+-\bigl(N + \gamma F^\top M G\bigr) D^{-1}\bigl(N^\top + \gamma G^\top M F\bigr).
+$$
+
+Expanding $(F-GK)^\top M(F-GK)$ and simplifications give the compact
+matrix equation
+
+$$
+\boxed{%
+M
+= Q
+\;+\;\gamma F^\top M F
+\;-\;\bigl(N + \gamma F^\top M G\bigr)\,
+    \bigl(R + \gamma G^\top M G\bigr)^{-1}
+    \bigl(N^\top + \gamma G^\top M F\bigr).
+}
+$$
+
+This is exactly the **generalized discrete‑time Riccati equation** that
+\(M\) must satisfy.
