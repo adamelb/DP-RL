@@ -1,0 +1,73 @@
+# Derivation of the Linear‐Term \(m\) and Proof that \(m=0\)
+
+We use the value‐function ansatz
+$$
+V(s)\;=\;-\tfrac12\,s^\top M\,s \;+\;m^\top s \;+\;c.
+$$
+
+The optimal policy is
+$$
+x^* \;=\; -K\,s + k,
+\quad
+K = \bigl(R + \gamma\,G^\top M G\bigr)^{-1}\,(N^\top + \gamma\,G^\top M F),
+\quad
+k = \bigl(R + \gamma\,G^\top M G\bigr)^{-1}\,\gamma\,G^\top m.
+$$
+
+Substitute \(x^*\) into the Bellman integrand and collect terms **linear** in \(s\).  One finds
+\[
+\begin{aligned}
+m^\top s
+&=\;-\,s^\top N\,k
+  \;-\;\gamma\,s^\top F^\top M G\,k
+  \;+\;\gamma\,s^\top F^\top m
+  \;-\;\gamma\,s^\top K^\top G^\top m.
+\end{aligned}
+\]
+Since this must hold for all \(s\), the coefficient vectors satisfy
+$$
+m^\top
+=\;\gamma\,m^\top F
+\;-\;m^\top G\,K
+\;-\;(N + \gamma\,F^\top M G)\,k.
+$$
+Writing this in matrix form gives
+$$
+\bigl[I - \gamma\,F^\top + K^\top G^\top\bigr]\,m
+\;=\;-\,\bigl(N + \gamma\,F^\top M G\bigr)\,k.
+$$
+But by the definitions of \(K\) and \(k\),
+\[
+\bigl(N + \gamma F^\top M G\bigr)\,k
+=\bigl(N + \gamma F^\top M G\bigr)
+\bigl(R + \gamma G^\top M G\bigr)^{-1}\,\gamma\,G^\top m
+=\gamma\,K^\top G^\top m.
+\]
+Hence
+$$
+\bigl[I - \gamma\,F^\top + K^\top G^\top\bigr]\,m
+=-\,\gamma\,K^\top G^\top m
+\quad\Longrightarrow\quad
+\bigl[I - \gamma\,F^\top\bigr]\,m = 0.
+$$
+Under the usual assumption that \(\rho(\gamma F^\top)<1\) (so \(I-\gamma F^\top\) is invertible), the **only** solution is
+$$
+\boxed{m = 0.}
+$$
+
+---
+
+## Python Code for \(A_{\rm lin}\)
+
+Once \(m=0\), the linear‐term update matrix is
+$$
+A_{\rm lin}
+=\;\gamma\,F^\top
+\;-\;\frac{\gamma}{R + \gamma\,G^\top M G}\,
+       \bigl(N + \gamma\,F^\top M G\bigr)\,G^\top.
+$$
+
+```python
+# assuming F, G, M, N, R, gamma are already defined and den = R + gamma*(G.T @ M @ G)
+A_lin = gamma * F.T \
+        - (gamma / den) * (N + gamma * F.T @ M @ G) @ G.T
