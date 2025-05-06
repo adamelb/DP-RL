@@ -1,0 +1,89 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import solve_discrete_are, null_space
+
+# === 1) Model parameters ===
+phi1, phi2 = 0.8, 0.5    # φ₁, φ₂
+tl = 2.0                 # "tl"
+rho1, rho2 = 0.9, 0.7    # ρ₁, ρ₂
+gamma = 0.95             # discount factor
+
+# === 2) Build original system matrices ===
+F = np.diag([1.0, phi1, phi2, rho1, rho2])             # 5×5
+G = np.array([1.0, 1-phi1, 1-phi2, 0.0, 0.0])[:, None] # 5×1
+
+# === 3) Build cost matrices Q, N, R ===
+Q = np.zeros((5,5))
+Q[0,0] = 1.0
+Q[0,3] = Q[3,0] = -1.0
+Q[0,4] = Q[4,0] = -1.0
+
+N = np.zeros((5,1))
+N[0,0] = 1.0
+N[1,0] = 0.5 * tl * phi1
+N[2,0] = 0.5 * tl * phi2
+N[3,0] = -1.0
+N[4,0] = -1.0
+
+R = 1.0 + tl * (2 - phi1 - phi2)
+
+# === 4) Complete‐the‐square transformation ===
+R_inv = 1.0 / R
+F_tilde = F - G @ (N.T * R_inv)
+Q_tilde = Q - (N @ N.T) * R_inv
+
+# === 5) Scale for discounting ===
+A_bar = np.sqrt(gamma) * F_tilde
+B_bar = np.sqrt(gamma) * G
+
+# === 6) Solve discrete‐time ARE ===
+M = solve_discrete_are(A_bar, B_bar, Q_tilde, R)
+
+# === 7) Compute linear term m via null‐space ===
+den = R + gamma * float(G.T @ M @ G)
+n = F.shape[0]
+A_lin = gamma * F.T @ (np.eye(n) - (gamma * M @ G @ G.T) / den)
+ns = null_space(np.eye(n) - A_lin)
+m = ns[:, [0]] if ns.size else np.zeros((n,1))
+
+# === 8) Compute feedback gain K and offset k ===
+K = (N.T + gamma * (G.T @ M @ F)) / den  # shape (1×5)
+k = (gamma * (G.T @ m)) / den            # scalar
+
+# === 9) Display (M, m, K, k) ===
+print("M =\n", M)
+print("\nm =\n", m.flatten())
+print("\nK =\n", K)
+print("\nk =\n", float(k))
+
+# === 10) Simulation for 100k steps ===
+T = 100_000
+s = np.zeros((5, T+1))
+rewards = np.zeros(T)
+
+for t in range(T):
+    # action
+    x = float(-K @ s[:, t] + k)
+    # components
+    p, imb1, imb2, a1, a2 = s[:, t]
+    # update imbalances
+    imb1_new = phi1 * imb1 + (1-phi1) * x
+    imb2_new = phi2 * imb2 + (1-phi2) * x
+    # instantaneous reward
+    rewards[t] = (a1 + a2)*(p + x) - (tl/2)*(imb1_new + imb2_new)*x - 0.5*(p + x)**2
+    # noise
+    eps = np.zeros(5)
+    eps[3] = np.random.randn() * np.sqrt(1 - rho1**2)
+    eps[4] = np.random.randn() * np.sqrt(1 - rho2**2)
+    # state update
+    s[:, t+1] = F @ s[:, t] + (G.flatten() * x) + eps
+
+# === 11) Plot cumulative reward ===
+cum_reward = np.cumsum(rewards)
+plt.figure(figsize=(8,4))
+plt.plot(cum_reward)
+plt.title('Cumulative Reward over 100k Steps')
+plt.xlabel('Time Step')
+plt.ylabel('Cumulative Reward')
+plt.grid(True)
+plt.show()
