@@ -1,0 +1,96 @@
+# Rigorous Verification of the Key Scalar Identity
+
+In the cancellation step we used the fact that for the scalar 
+$$X \;=\; G^\top M G,\quad R>0,\quad \gamma\ge0,$$ 
+and 
+$$S \;=\; R + \gamma\,X,$$ 
+the following holds:
+$$
+R^{-1}
+\;-\;\gamma\,R^{-1}X\,R^{-1}
+\;+\;\gamma^2\,R^{-1}X\,S^{-1}X\,R^{-1}
+\;=\;S^{-1}.
+$$
+
+We prove this by rewriting everything over the common denominator $R^2 S$.
+
+---
+
+1. **Express each term with denominator $R^2S$:**
+
+   - Since $R^{-1} = \tfrac1R$, write
+     $$
+     R^{-1}
+     = \frac{1}{R}
+     = \frac{R\,S}{R^2\,S}.
+     $$
+
+   - For the second term,
+     $$
+     -\,\gamma\,R^{-1}X\,R^{-1}
+     = -\,\gamma\,\frac{X}{R^2}
+     = -\,\frac{\gamma\,X\,S}{R^2\,S}.
+     $$
+
+   - For the third term,
+     $$
+     \gamma^2\,R^{-1}X\,S^{-1}X\,R^{-1}
+     = \gamma^2\,\frac{X^2}{R^2}\,\frac{1}{S}
+     = \frac{\gamma^2\,X^2}{R^2\,S}.
+     $$
+
+2. **Combine them:**
+
+   $$ 
+   \begin{aligned}
+   LHS 
+   &= R^{-1}
+      \;-\;\gamma\,R^{-1}X\,R^{-1}
+      \;+\;\gamma^2\,R^{-1}X\,S^{-1}X\,R^{-1}
+   \\[4pt]
+   &= \frac{R\,S}{R^2\,S}
+      \;-\;\frac{\gamma\,X\,S}{R^2\,S}
+      \;+\;\frac{\gamma^2\,X^2}{R^2\,S}
+   \\[6pt]
+   &= \frac{\,R\,S \;-\;\gamma\,X\,S \;+\;\gamma^2\,X^2\,}{R^2\,S}.
+   \end{aligned}
+   $$
+
+3. **Simplify the numerator:**
+
+   $$ 
+   \begin{aligned}
+   R\,S &= R\,(R + \gamma\,X)
+         = R^2 + \gamma\,R\,X, 
+   \\[3pt]
+   \Rightarrow\quad
+   R\,S - \gamma\,X\,S + \gamma^2\,X^2
+   &= \bigl(R^2 + \gamma R X\bigr)
+      - \gamma X\,(R + \gamma X)
+      + \gamma^2 X^2
+   \\[3pt]
+   &= R^2 + \gamma R X
+      - \bigl(\gamma R X + \gamma^2 X^2\bigr)
+      + \gamma^2 X^2
+   \\[3pt]
+   &= R^2.
+   \end{aligned}
+   $$
+
+4. **Conclude:**
+
+   $$
+   LHS
+   = \frac{R^2}{R^2\,S}
+   = \frac1S
+   = S^{-1}.
+   $$
+
+This completes a fully rigorous, term‐by‐term proof that  
+$$
+R^{-1}
+- \gamma\,R^{-1}X\,R^{-1}
++ \gamma^2\,R^{-1}X\,S^{-1}X\,R^{-1}
+= S^{-1},
+$$
+which justifies the cancellation in the GARE ↔ completed‐square ARE equivalence.  
