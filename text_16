@@ -1,0 +1,149 @@
+# Equivalence Between the Generalized ARE and a “Completed‐Square” ARE
+
+We begin with the **Generalized Discrete‐Time ARE (GARE)** for the quadratic‐plus‐cross‐term formulation:
+$$
+\boxed{%
+M \;=\; Q
+\;+\;\gamma\,F^\top M F
+\;-\;
+\bigl(N \;+\;\gamma\,F^\top M G\bigr)
+\bigl(R + \gamma\,G^\top M G\bigr)^{-1}
+\bigl(N^\top + \gamma\,G^\top M F\bigr).
+}
+$$
+
+---
+
+## 1. “Complete the square” in the stage payoff
+
+The one‐period payoff is
+$$
+u(s,x)
+=-\tfrac12\,s^\top Q\,s
+ \;-\;s^\top N\,x
+ \;-\;\tfrac12\,R\,x^2.
+$$
+Rewrite the bracketed expression as
+\[
+\begin{aligned}
+s^\top Q\,s + 2\,s^\top N\,x + x^2 R
+&= (s^\top Q\,s - s^\top N\,R^{-1}N^\top s)
+  + 2\,s^\top N\,x + x^2 R
+  + s^\top N\,R^{-1}N^\top s\\[6pt]
+&= s^\top \bigl(Q - N R^{-1} N^\top\bigr) s
+  \;+\;
+  \bigl(x + R^{-1}N^\top s\bigr)^\top R\,
+  \bigl(x + R^{-1}N^\top s\bigr).
+\end{aligned}
+\]
+Hence
+$$
+u(s,x)
+=-\tfrac12\,s^\top\underbrace{\bigl(Q - N R^{-1}N^\top\bigr)}_{Q_{\rm\tiny tilde}}\,s
+\;-\;\tfrac12\,
+   \bigl(x + R^{-1}N^\top s\bigr)^\top
+   R\,
+   \bigl(x + R^{-1}N^\top s\bigr).
+$$
+
+Define the **shifted control**
+$$
+\nu \;=\; x \;+\; R^{-1}N^\top s,
+$$
+so that
+$$
+u(s,\nu)
+=-\tfrac12\,s^\top Q_{\rm\tiny tilde}\,s
+\;-\;\tfrac12\,\nu^\top R\,\nu,
+\qquad
+Q_{\rm\tiny tilde}=Q - N R^{-1}N^\top.
+$$
+
+---
+
+## 2. New state‐dynamics under \(\nu\)
+
+Original dynamics:
+$$
+s_{t+1} = F\,s + G\,x + \Sigma^{1/2}\,\varepsilon.
+$$
+Since \(x=\nu - R^{-1}N^\top s\),
+\[
+\begin{aligned}
+s_{t+1}
+&= F\,s + G\bigl(\nu - R^{-1}N^\top s\bigr) + \Sigma^{1/2}\varepsilon\\
+&= \underbrace{\bigl(F - G\,R^{-1}N^\top\bigr)}_{F_{\rm\tiny tilde}}\;s
+  \;+\;G\,\nu
+  \;+\;\Sigma^{1/2}\varepsilon,
+\end{aligned}
+\]
+where we set
+$$
+F_{\rm\tiny tilde} = F - G\,R^{-1}N^\top.
+$$
+
+Hence the Bellman equation in \((s,\nu)\) is
+$$
+V(s)
+=\max_{\nu}\Bigl\{
+ -\tfrac12\,s^\top Q_{\rm\tiny tilde}s
+ -\tfrac12\,\nu^\top R\,\nu
+ +\gamma\,\mathbb E\bigl[V(s_{t+1})\mid s_t=s,\nu_t=\nu\bigr]
+\Bigr\}.
+$$
+
+---
+
+## 3. Standard Discounted ARE
+
+Conjecture
+$$
+V(s)=-\tfrac12\,s^\top M s \quad(\text{no linear term in }s).
+$$
+One shows by following the same FOC steps that \(M\) must satisfy the **standard** discounted Riccati equation
+$$
+\boxed{%
+M
+= Q_{\rm\tiny tilde}
+\;+\;\gamma\,F_{\rm\tiny tilde}^\top M\,F_{\rm\tiny tilde}
+\;-\;\gamma^2\,F_{\rm\tiny tilde}^\top M\,G\,
+\bigl(R + \gamma\,G^\top M G\bigr)^{-1}\,
+G^\top M\,F_{\rm\tiny tilde}.
+}
+$$
+
+Finally, defining
+$$
+\bar A = \sqrt{\gamma}\;F_{\rm\tiny tilde},
+\qquad
+\bar B = \sqrt{\gamma}\;G,
+$$
+we see this is exactly the **undiscounted** discrete‐time ARE
+$$
+M
+= Q_{\rm\tiny tilde}
+\;+\;\bar A^\top M\,\bar A
+\;-\;\bar A^\top M\,\bar B\,(R + \bar B^\top M\,\bar B)^{-1}\,\bar B^\top M\,\bar A.
+$$
+
+Thus solving the standard DARE on \((\bar A,\bar B,Q_{\rm\tiny tilde},R)\) recovers the same \(M\) as the original GARE.
+
+---
+
+## 4. Feedback law in original variables
+
+Undo the change of variable:
+\[
+\begin{aligned}
+\nu^*&=-\bigl(R+\gamma G^\top M G\bigr)^{-1}\,\gamma\,G^\top M\,F_{\rm\tiny tilde}\,s,\\
+x^*&=\nu^* - R^{-1}N^\top\,s
+=-\underbrace{\bigl(R+\gamma G^\top M G\bigr)^{-1}
+  \bigl(N^\top+\gamma\,G^\top M F\bigr)}_{\,K\,}\,s
+\;+\;
+\underbrace{\bigl(R+\gamma G^\top M G\bigr)^{-1}\,\gamma\,G^\top m}_{\,k\,},
+\end{aligned}
+\]
+recovering the original policy
+$$
+x^*=-K\,s + k.
+$$
