@@ -1,0 +1,141 @@
+# Deriving the *exact* linear‐term condition for \(m\)
+
+We keep the quadratic \(M\) **and** the linear vector \(m\).  
+No “short‑cuts’’—we simply match coefficients.
+
+---
+
+## 1.  Setup
+
+Value–function ansatz
+$$
+V(s)= -\tfrac12\,s^{\!\top} M\,s + m^{\!\top}s + c .
+$$
+
+Stage payoff and dynamics
+$$
+u(s,x)= -\tfrac12\,s^{\!\top}Q\,s - s^{\!\top}N\,x - \tfrac12\,R\,x^{2},
+\qquad
+s' = F\,s + G\,x + \Sigma^{1/2}\varepsilon,\;\;\varepsilon\sim N(0,I).
+$$
+
+Define the scalar
+$$
+D \;=\; R + \gamma\,G^{\!\top} M G .
+$$
+
+---
+
+## 2.  First–order condition
+
+Differentiating the Bellman integrand and setting to zero:
+$$
+0 = -\,N^{\!\top}s 
+     - \gamma\,G^{\!\top} M F\,s
+     - (R + \gamma\,G^{\!\top} M G)\,x^*
+     + \gamma\,G^{\!\top} m .
+$$
+Hence
+$$
+x^* \;=\; -K\,s + k,
+\quad
+K = D^{-1}\bigl(N^{\!\top} + \gamma\,G^{\!\top} M F\bigr), 
+\quad
+k = D^{-1}\,\gamma\,G^{\!\top} m .
+$$
+
+---
+
+## 3.  Plug \(x^*\) back and collect **linear** terms
+
+1.  **Cross payoff** \(-\,s^{\!\top}N\,x^*\)  
+    contributes \(-\,s^{\!\top}N\,k\).
+
+2.  **Quadratic payoff** \(-\tfrac12 R (x^*)^2\)  
+    contributes \(+ R\,k\,K\,s\).
+
+3.  **Expectation term**  
+    \(-\tfrac{\gamma}{2}(Fs+Gx^*)^{\!\top}M(Fs+Gx^*)\)  
+    contributes two linear pieces:
+    \(-\,\gamma\,s^{\!\top}F^{\!\top} M G\,k\)  
+    and \(+\gamma\,k\,(G^{\!\top} M G)\,K\,s\).
+
+4.  **Linear part of \(V(s')\)**, i.e.\ \(\gamma\,m^{\!\top}(Fs+Gx^*)\),  
+    contributes \(+\gamma\,s^{\!\top}F^{\!\top} m\)  
+    and \(-\,\gamma\,(m^{\!\top}G)\,K\,s\).
+
+Setting “coeff.\ of \(s\)” on the Bellman LHS (\(m^{\!\top}s\)) equal to the sum of all linear contributions gives
+
+\[
+\boxed{%
+m^{\!\top}
+= -\,N^{\!\top}k
+  + R\,k\,K
+  - \gamma\,k\,G^{\!\top} M F
+  + \gamma\,k\,G^{\!\top} M G\,K
+  + \gamma\,F^{\!\top} m
+  - \gamma\,K^{\!\top}G^{\!\top} m .
+}\tag{★}
+\]
+
+---
+
+## 4.  Substitute \(K,k\)
+
+Because \(K = D^{-1}(N^{\!\top}+\gamma G^{\!\top}MF)\) and \(k = D^{-1}\gamma G^{\!\top}m\),
+
+- \(R\,k\,K + \gamma\,k\,G^{\!\top} M G\,K = D\,k\,K = \gamma\,(G^{\!\top}m)\,K\);
+
+- \(-\,N^{\!\top}k - \gamma\,k\,G^{\!\top} M F = -\,\gamma\,(G^{\!\top}m)\).
+
+Insert these in (★):
+
+\[
+m^{\!\top}
+\;=\;
+-\gamma\,(G^{\!\top}m)
++\gamma\,(G^{\!\top}m)\,K
++ \gamma\,F^{\!\top} m
+- \gamma\,K^{\!\top}G^{\!\top} m .
+\]
+
+Since \((G^{\!\top}m)\,K = K^{\!\top}G^{\!\top}m\) (both scalars), the two middle terms cancel, leaving
+
+$$
+m^{\!\top} 
+= \gamma\,F^{\!\top} m .
+$$
+
+Transpose once more:
+
+$$
+\boxed{%
+\bigl(I - \gamma\,F^{\!\top}\bigr)\,m \;=\; 0 .
+}
+$$
+
+Thus **any** solution \(m\) must lie in the 1‑eigenspace of \(\gamma\,F^{\!\top}\).
+
+If \(\rho(\gamma F^{\!\top})<1\) (stabilizability/observability),  
+\(I-\gamma F^{\!\top}\) is full‑rank and the *only* solution is \(m=0\).  
+Otherwise, \(m\) is an arbitrary eigenvector of \(F^{\!\top}\) with eigenvalue \(1/\gamma\).
+
+---
+
+## 5.  Linear‑update matrix
+
+Define  
+$$
+A_{\text{lin}} = \gamma\,F^{\!\top},
+$$
+so the linear condition is simply  
+$$
+(I - A_{\text{lin}})\,m = 0.
+$$
+
+---
+
+## Python one‑liner for \(A_{\text{lin}}\)
+
+```python
+A_lin = gamma * F.T          # (I - A_lin) @ m = 0
