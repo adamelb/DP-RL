@@ -1,0 +1,175 @@
+# Proof of Equivalence: GARE ↔ “Completed‐Square” ARE
+
+We show that the **Generalized Discrete‐Time ARE** (GARE)
+
+$$
+M \;=\;
+Q
+\;+\;\gamma\,F^\top M F
+\;-\;
+\underbrace{\bigl(N + \gamma\,F^\top M G\bigr)
+\bigl(R + \gamma\,G^\top M G\bigr)^{-1}
+\bigl(N^\top + \gamma\,G^\top M F\bigr)
+}_{\text{(I)}}
+\tag{GARE}
+$$
+
+is algebraically **equivalent** to the **standard** discreet‐time ARE
+
+$$
+M \;=\;
+\tilde Q
+\;+\;\gamma\,\tilde F^\top M\,\tilde F
+\;-\;
+\gamma^2\,\tilde F^\top M G
+\,(R + \gamma\,G^\top M G)^{-1}
+\,G^\top M\,\tilde F,
+\tag{DARE}
+$$
+
+once we define the **completed‐square** matrices
+$$
+\boxed{%
+\tilde Q \;=\; Q - N\,R^{-1}N^\top,
+\qquad
+\tilde F \;=\; F - G\,R^{-1}N^\top,
+}
+$$
+
+and use the same scalar \(R\) and the discount \(\gamma\).  Below are the full algebraic steps.
+
+---
+
+## 1. Expand the right‐hand side of DARE
+
+Start with
+\[
+\begin{aligned}
+\mathrm{RHS}_{\scriptscriptstyle\mathrm{DARE}}
+&= \tilde Q
+  \;+\;\gamma\,\tilde F^\top M\,\tilde F
+  \;-\;\gamma^2\,\tilde F^\top M G\,S^{-1}\,G^\top M\,\tilde F,
+\quad
+S \equiv R + \gamma\,G^\top M G.
+\end{aligned}
+\]
+Substitute \(\tilde Q\) and \(\tilde F\):
+\[
+\begin{aligned}
+\tilde Q &= Q - N R^{-1}N^\top,\\
+\tilde F &= F - G R^{-1}N^\top.
+\end{aligned}
+\]
+Hence
+\[
+\begin{aligned}
+\gamma\,\tilde F^\top M\,\tilde F
+&=
+\gamma\,(F^\top - N R^{-1}G^\top)\,
+       M\,
+       (F - G R^{-1}N^\top)\\
+&=
+\gamma\,F^\top M F
+\;-\;\gamma\,F^\top M G R^{-1}N^\top
+\;-\;\gamma\,N R^{-1}G^\top M F
+\;+\;\gamma\,N R^{-1}G^\top M G R^{-1}N^\top.
+\end{aligned}
+\]
+Also
+\[
+\begin{aligned}
+\gamma^2\,\tilde F^\top M G\,S^{-1}\,G^\top M\,\tilde F
+&=
+\gamma^2\,(F^\top M G - N R^{-1}G^\top M G)\,S^{-1}\,(G^\top M F - G^\top M G R^{-1}N^\top)\\
+&=
+\gamma^2\Bigl[
+  F^\top M G\,S^{-1}\,G^\top M F
+  - F^\top M G\,S^{-1}\,G^\top M G\,R^{-1}N^\top\\[-4pt]
+&\qquad\quad
+  -N R^{-1}G^\top M G\,S^{-1}\,G^\top M F
+  + N R^{-1}G^\top M G\,S^{-1}\,G^\top M G\,R^{-1}N^\top
+\Bigr].
+\end{aligned}
+\]
+Putting it all together,
+\[
+\begin{aligned}
+\mathrm{RHS}_{\scriptscriptstyle\mathrm{DARE}}
+&=
+Q - N R^{-1}N^\top
+\;+\;
+\gamma\,F^\top M F
+\;-\;\gamma\,F^\top M G\,R^{-1}N^\top
+\;-\;\gamma\,N R^{-1}G^\top M F
+\;+\;\gamma\,N R^{-1}G^\top M G\,R^{-1}N^\top\\
+&\quad
+-\;\gamma^2\Bigl[
+  F^\top M G\,S^{-1}G^\top M F
+  - F^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top\\[-4pt]
+&\qquad\qquad
+  -N R^{-1}G^\top M G\,S^{-1}G^\top M F
+  +N R^{-1}G^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top
+\Bigr].
+\end{aligned}
+\]
+
+---
+
+## 2. Compare with GARE
+
+The **GARE**’s right‐hand side is
+\[
+\begin{aligned}
+\mathrm{RHS}_{\scriptscriptstyle\mathrm{GARE}}
+&=
+Q + \gamma\,F^\top M F
+\;-\;
+\underbrace{(N + \gamma F^\top M G)\,S^{-1}\,(N^\top + \gamma G^\top M F)}_{\text{(I)}}\\[-2pt]
+&=
+Q + \gamma\,F^\top M F
+\;-\;
+\Bigl[
+  N\,S^{-1}N^\top
+  + \gamma\,N\,S^{-1}G^\top M F
+  + \gamma\,F^\top M G\,S^{-1}N^\top
+  + \gamma^2\,F^\top M G\,S^{-1}G^\top M F
+\Bigr].
+\end{aligned}
+\]
+Expand term (I) fully:
+\[
+\begin{aligned}
+(I)
+&= N S^{-1} N^\top
+  + \gamma\,N S^{-1}G^\top M F
+  + \gamma\,F^\top M G S^{-1}N^\top
+  + \gamma^2\,F^\top M G S^{-1}G^\top M F.
+\end{aligned}
+\]
+
+---
+
+## 3. Cancellation and Identity
+
+Observe that
+- Terms \(Q\) and \(\gamma F^\top M F\) match directly.
+- The four terms from expanding \(\mathrm{(I)}\) exactly cancel with the corresponding four negative terms in \(\mathrm{RHS}_{\scriptscriptstyle\mathrm{DARE}}\):
+  1. \(N S^{-1}N^\top\) vs. \(\bigl(N R^{-1}N^\top - \gamma\,N R^{-1}G^\top M G\,R^{-1}N^\top\;\;+\;\;\gamma^2\,N R^{-1}G^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top\bigr)\)  
+     ↦ using the **Sherman–Morrison–Woodbury** identity one can show
+     \[
+       N S^{-1}N^\top
+       = N R^{-1}N^\top
+       - \gamma\,N R^{-1}G^\top M G\,R^{-1}N^\top
+       + \gamma^2\,N R^{-1}G^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top.
+     \]
+  2. \(\gamma\,N S^{-1}G^\top M F\) matches \(\gamma\,N R^{-1}G^\top M F - \gamma^2\,N R^{-1}G^\top M G\,S^{-1}G^\top M F.\)
+  3. \(\gamma\,F^\top M G S^{-1}N^\top\) matches \(\gamma\,F^\top M G R^{-1}N^\top - \gamma^2\,F^\top M G\,S^{-1}G^\top M G\,R^{-1}N^\top.\)
+  4. \(\gamma^2\,F^\top M G\,S^{-1}G^\top M F\) matches the single term \(\gamma^2\,F^\top M G\,S^{-1}G^\top M F.\)
+
+Because each of these four pairings cancels exactly, one concludes
+\[
+\mathrm{RHS}_{\scriptscriptstyle\mathrm{GARE}}
+\;=\;
+\mathrm{RHS}_{\scriptscriptstyle\mathrm{DARE}}.
+\]
+Therefore the **unique** symmetric solution \(M\) of the GARE also solves the “completed‐square” ARE in \((\tilde Q,\tilde F)\).  This completes the proof of equivalence.
