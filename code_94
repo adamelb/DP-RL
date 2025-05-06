@@ -1,0 +1,39 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import cm
+
+# ---------- prerequisites ----------
+# Make sure you have already computed:
+#   M  (5×5 Riccati solution)
+#   c  (constant term)
+# before running this cell.
+
+# ---------- choose fixed values ----------
+imb1_fixed   = 0.0      # fixed imbalance_1
+imb2_fixed   = 0.0      # fixed imbalance_2
+alpha2_fixed = 0.0      # fixed alpha_2
+
+# ---------- grid for p and alpha1 ----------
+p_vals      = np.linspace(-2, 2, 100)
+alpha1_vals = np.linspace(-2, 2, 100)
+P, A1 = np.meshgrid(p_vals, alpha1_vals)
+
+# ---------- compute V(p, alpha1) ----------
+V = np.empty_like(P)
+for i in range(P.shape[0]):
+    for j in range(P.shape[1]):
+        s = np.array([P[i, j], imb1_fixed, imb2_fixed, A1[i, j], alpha2_fixed])
+        V[i, j] = -0.5 * s @ M @ s + c
+
+# ---------- 3D plot ----------
+fig = plt.figure(figsize=(9, 6))
+ax = fig.add_subplot(111, projection='3d')
+surf = ax.plot_surface(P, A1, V, cmap=cm.viridis, linewidth=0, antialiased=True)
+
+ax.set_xlabel('Price $p$')
+ax.set_ylabel('Alpha$_1$')
+ax.set_zlabel('Value $V$')
+ax.set_title('Value Function $V(p,\\alpha_1)$\n(imbalance$_1$, imbalance$_2$, alpha$_2$ fixed)')
+
+fig.colorbar(surf, shrink=0.6, aspect=12, label='$V$')
+plt.show()
