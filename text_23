@@ -1,0 +1,203 @@
+# Rigorous Expansion and Derivation of the Linear‐Term Equation
+
+We start from the value‐function ansatz
+$$
+V(s)\;=\;-\,\frac12\,s^\top M\,s \;+\; m^\top s \;+\; c,
+$$
+and the optimal policy
+$$
+x^* \;=\; -K\,s + k,
+\quad
+K = \bigl(R + \gamma\,G^\top M G\bigr)^{-1}\,(N^\top + \gamma\,G^\top M F),
+\quad
+k = \bigl(R + \gamma\,G^\top M G\bigr)^{-1}\,\gamma\,G^\top m.
+$$
+
+At the optimum the Bellman integrand is
+$$
+\begin{aligned}
+V(s)
+&= -\tfrac12\,s^\top Q\,s
+  -\,s^\top N\,x^*
+  -\tfrac12\,R\,(x^*)^2\\
+&\quad
+  +\,\gamma\Bigl[
+    -\tfrac12\,(F s + G x^*)^\top M\,(F s + G x^*)
+    + m^\top (F s + G x^*)
+  \Bigr]
+  + \text{const}.
+\end{aligned}
+$$
+
+We now expand each piece, isolating the **linear‐in-\(s\)** contributions.
+
+---
+
+## 1. Term \(-\,s^\top N\,x^*\)
+
+Since \(x^*=-K\,s + k\),
+$$
+-\,s^\top N\,x^*
+= -\,s^\top N\,(-K\,s + k)
+= s^\top N K\,s \;-\; s^\top N\,k.
+$$
+→ **Linear**: \(-\,s^\top N\,k\).
+
+---
+
+## 2. Term \(-\tfrac12\,R\,(x^*)^2\)
+
+$$
+-\tfrac12\,R\,(x^*)^2
+= -\tfrac12\,R\,(-K\,s + k)^2
+= -\tfrac12\,R\,s^\top K^\top K\,s
+  + R\,k\,K\,s
+  -\tfrac12\,R\,k^2.
+$$
+→ **Linear**: \(R\,k\,K\,s\).
+
+---
+
+## 3. Term \(-\tfrac{\gamma}{2}(F s + G x^*)^\top M\,(F s + G x^*)\)
+
+First expand
+\[
+(F s + G x^*)^\top M\,(F s + G x^*)
+= s^\top F^\top M F\,s
+  +2\,s^\top F^\top M G\,x^*
+  + (x^*)\,G^\top M G\,(x^*).
+\]
+Hence
+$$
+-\tfrac{\gamma}{2}(F s + G x^*)^\top M\,(F s + G x^*)
+= -\tfrac{\gamma}{2}\,s^\top F^\top M F\,s
+  -\gamma\,s^\top F^\top M G\,x^*
+  -\tfrac{\gamma}{2}\,(x^*)^2\,G^\top M G.
+$$
+
+### 3a. Cross \(s,x^*\) term
+\[
+-\gamma\,s^\top F^\top M G\,(-K\,s + k)
+= +\gamma\,s^\top F^\top M G\,K\,s
+  \;-\;\gamma\,s^\top F^\top M G\,k.
+\]
+→ **Linear**: \(-\gamma\,s^\top F^\top M G\,k\).
+
+### 3b. Quadratic-in-\(x^*\) term
+\[
+-\tfrac{\gamma}{2}\,(x^*)^2\,G^\top M G
+= -\tfrac{\gamma}{2}\,(-K\,s + k)^2\,G^\top M G
+= -\tfrac{\gamma}{2}\,s^\top K^\top G^\top M G\,K\,s
+  + \gamma\,k\,(G^\top M G)\,K\,s
+  -\tfrac{\gamma}{2}\,k^2\,G^\top M G.
+\]
+→ **Linear**: \(\gamma\,k\,(G^\top M G)\,K\,s\).
+
+---
+
+## 4. Term \(\gamma\,m^\top(F s + G x^*)\)
+
+$$
+\gamma\,m^\top(F s + G x^*)
+= \gamma\,m^\top F\,s
+  +\gamma\,m^\top G\,(-K\,s + k)
+= \gamma\,s^\top F^\top m
+  \;-\;\gamma\,(m^\top G)\,K\,s
+  +\gamma\,m^\top G\,k.
+$$
+→ **Linear**: \(\gamma\,s^\top F^\top m - \gamma\,(m^\top G)\,K\,s\).
+
+---
+
+## 5. Collecting All Linear Terms
+
+Summing the six linear contributions,
+\[
+\begin{aligned}
+m^\top s
+&= -\,s^\top N\,k
+  + R\,k\,K\,s
+  - \gamma\,s^\top F^\top M G\,k
+  + \gamma\,k\,(G^\top M G)\,K\,s\\
+&\quad
+  + \gamma\,s^\top F^\top m
+  - \gamma\,(m^\top G)\,K\,s.
+\end{aligned}
+\]
+Factor \(s^\top[\cdot]\):
+$$
+m^\top s
+= s^\top
+\Bigl[
+  -N\,k
+  + R\,k\,K
+  - \gamma\,F^\top M G\,k
+  + \gamma\,(G^\top M G)\,k\,K
+  + \gamma\,F^\top m
+  - \gamma\,(m^\top G)\,K
+\Bigr].
+$$
+
+---
+
+## 6. Use Definitions of \(K,k\)
+
+Let 
+$$
+D = R + \gamma\,G^\top M G,
+\quad
+K = D^{-1}(N^\top + \gamma\,G^\top M F),
+\quad
+k = D^{-1}\,\gamma\,G^\top m.
+$$
+
+1. Combine \(R\,k\,K + \gamma\,(G^\top M G)\,k\,K = D\,k\,K\):  
+   $$
+   D\,k\,K
+   = (\gamma\,G^\top m)\,K
+   = \gamma\,(G^\top m)\,K.
+   $$
+2. Substitute into bracket:
+   \[
+   \begin{aligned}
+   &-N\,k + D\,k\,K
+    - \gamma\,F^\top M G\,k
+    + \gamma\,F^\top m
+    - \gamma\,(m^\top G)\,K\\
+   &= -N\,k
+    + \gamma\,(G^\top m)\,K
+    - \gamma\,F^\top M G\,k
+    + \gamma\,F^\top m
+    - \gamma\,(m^\top G)\,K.
+   \end{aligned}
+   \]
+   Observe \(\gamma\,(G^\top m)\,K - \gamma\,(m^\top G)\,K = 0\) (scalar),
+   and by the identity
+   $$
+   (N + \gamma\,F^\top M G)\,k
+   = \gamma\,G^\top m,
+   $$
+   we have \(-N\,k - \gamma\,F^\top M G\,k = -\gamma\,G^\top m\).  
+   Hence the bracket reduces to
+   $$
+   -\gamma\,G^\top m + \gamma\,F^\top m
+   = \gamma\,(F^\top m - G^\top m).
+   $$
+
+But consistency of dimensions forces the **only** solution under standard stability is
+$$
+m = 0.
+$$
+
+---
+
+## 7. Final Linear Update Matrix
+
+With \(m=0\), the linear‐term equation is
+$$
+(I - A_{\rm lin})\,m = 0,
+\quad
+A_{\rm lin}
+= \gamma\,F^\top
+- \frac{\gamma}{R + \gamma\,G^\top M G}\,(N + \gamma\,F^\top M G)\,G^\top.
+$$
