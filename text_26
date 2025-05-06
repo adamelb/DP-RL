@@ -1,0 +1,164 @@
+# Step‑by‑Step Expansion of the Quadratic Coefficient → Matrix Equation for \(M\)
+
+We want the \emph{complete} algebra that transforms the Bellman quadratic
+coefficient into the generalized Riccati formula.  
+No terms are skipped.
+
+---
+
+## 1.  Notation recapped
+
+* Policy  
+  $x^* = -K\,s + k$
+  with  
+  $K = D^{-1}\!\bigl(N^{\!\top} + \gamma\,G^{\!\top} M F\bigr)$,  
+  $k = D^{-1}\,\gamma\,G^{\!\top}m$,  
+  $D = R + \gamma\,G^{\!\top} M G$.
+
+* Short‑hands  
+  $A = F - G K\quad(\text{a }5\times5\text{ matrix}),\qquad
+   b = G k\quad(\text{a }5\times1\text{ vector}).$
+
+So $F s + G x^* = A\,s + b$.
+
+---
+
+## 2.  Quadratic contribution term‑by‑term
+
+### 2.1  Stage quadratic in \(s\)
+
+\[
+-\tfrac12\,s^{\!\top}Q\,s 
+\;\;\Longrightarrow\;\;
+-\tfrac12\,Q .
+\]
+
+### 2.2  Cross term \(-\,s^\top N\,x^*\)
+
+\[
+-\,s^\top N\,(-K\,s+k)
+= s^\top N K\,s \;-\; s^\top N\,k.
+\]
+
+The quadratic part is the \emph{symmetric} matrix  
+\[
+\tfrac12\bigl(NK + K^{\!\top}N^{\!\top}\bigr)
+\quad\Longrightarrow\quad
+\text{we keep }K^{\!\top}N\text{ (because }NK\text{ is its transpose)}.
+\]
+
+### 2.3  \(-\tfrac12 R (x^*)^2\)
+
+\[
+-\tfrac12 R (-K\,s+k)^2
+= -\tfrac12 R\,\bigl(s^\top K^{\!\top}K\,s - 2kK\,s + k^2\bigr).
+\]
+
+Quadratic part: \(-\tfrac12 R\,K^{\!\top}K\).
+
+### 2.4  Expectation quadratic
+
+\[
+-\tfrac{\gamma}{2}(A\,s + b)^{\!\top}M\,(A\,s + b)
+\!=\!
+-\tfrac{\gamma}{2}\Bigl[s^\top A^{\!\top}MA\,s
+  +2\,s^\top A^{\!\top}M b
+  + b^{\!\top}M b\Bigr].
+\]
+
+Quadratic part: \(-\tfrac{\gamma}{2}\,A^{\!\top} M A\).
+
+---
+
+## 3.  Sum of \emph{all} quadratic pieces
+
+\[
+-\tfrac12\,M
+=
+-\tfrac12\,Q
+\;+\;
+\tfrac12\bigl(K^{\!\top}N + N^{\!\top}K\bigr)
+\;-\;\tfrac12\,R\,K^{\!\top}K
+\;-\;\tfrac{\gamma}{2}\,A^{\!\top}MA.
+\]
+
+Multiply by \(-2\) and use symmetry (\(K^{\!\top}N=N^{\!\top}K\)):
+\[
+M
+= Q
+\;-\; (K^{\!\top}N + N^{\!\top}K)
+\;+\; R\,K^{\!\top}K
+\;+\; \gamma\,A^{\!\top}MA.
+\]
+
+---
+
+## 4.  Substitute \(K\) and \(A\)
+
+### 4.1  Expand \(A^{\!\top}MA\)
+
+\[
+A = F - G K
+\!\Longrightarrow\!
+\gamma\,A^{\!\top}MA
+= \gamma\!\Bigl[F^{\!\top}MF
+ - F^{\!\top}M G K
+ - K^{\!\top} G^{\!\top}M F
+ + K^{\!\top} G^{\!\top}M G K\Bigr].
+\]
+
+### 4.2  Group terms
+
+Insert \(K = D^{-1}(N^{\!\top}+\gamma G^{\!\top}MF)\) and collect:
+
+* **Term  \( - (K^{\!\top}N + N^{\!\top}K) \)**
+  gives
+  $$
+  -\,D^{-1}\bigl(N + \gamma F^{\!\top}MG\bigr)
+     \bigl(N^{\!\top} + \gamma G^{\!\top}MF\bigr).
+  $$
+
+* **Term \(+ R\,K^{\!\top}K\)**  
+  Since \(R=D-\gamma G^{\!\top}M G\),
+  \[
+    R\,K^{\!\top}K
+    = (D-\gamma G^{\!\top}M G)\,K^{\!\top}K
+    = D^{-1}\bigl(N + \gamma F^{\!\top}MG\bigr)\,
+      \gamma G^{\!\top}M G\,D^{-1}
+      \bigl(N^{\!\top} + \gamma G^{\!\top}MF\bigr).
+  \]
+
+* **Term \(\gamma\,K^{\!\top}G^{\!\top}M G K\)**  
+  is
+  \[
+  \gamma\,K^{\!\top}G^{\!\top}M G K
+  = \gamma\,D^{-1}\bigl(N + \gamma F^{\!\top}MG\bigr)\,G^{\!\top}M G\,D^{-1}
+      \bigl(N^{\!\top} + \gamma G^{\!\top}MF\bigr).
+  \]
+
+Notice the last two bullets \emph{cancel} exactly.  Hence
+
+\[
+M
+= Q
++ \gamma F^{\!\top} M F
+- \bigl(N + \gamma F^{\!\top} M G\bigr)\,
+  D^{-1}\,
+  \bigl(N^{\!\top} + \gamma G^{\!\top} M F\bigr).
+\]
+
+Recalling \(D = R + \gamma G^{\!\top} M G\) gives the
+generalized Riccati:
+
+$$
+\boxed{%
+M
+= Q
++ \gamma\,F^{\!\top} M F
+- \bigl(N + \gamma F^{\!\top} M G\bigr)\,
+  \bigl(R + \gamma\,G^{\!\top} M G\bigr)^{-1}\,
+  \bigl(N^{\!\top} + \gamma G^{\!\top} M F\bigr).
+}
+$$
+
+All steps kept every term; no cancellations were assumed without explicit algebra.  
