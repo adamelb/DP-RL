@@ -1,0 +1,81 @@
+# Derivation of the Linear‐Term Equation for \(m\)
+
+We use the ansatz
+$$
+V(s) \;=\; -\frac12\,s^\top M\,s \;+\; m^\top s \;+\; c.
+$$
+
+The Bellman equation is
+$$
+V(s)
+= \max_{x}\Bigl\{
+  u(s,x) + \gamma\,\mathbb{E}[V(s_{t+1})\mid s]
+\Bigr\},
+$$
+with
+$$
+u(s,x) = -\frac12\,s^\top Q\,s 
+         - s^\top N\,x 
+         - \frac12\,R\,x^2,
+\qquad
+s_{t+1} = F\,s + G\,x + \Sigma^{1/2}\,\varepsilon.
+$$
+
+1. **Compute** \(\mathbb{E}[V(s_{t+1})]\):
+   $$
+   \mathbb{E}[V(s')]
+   = -\tfrac12\,(F s + G x)^\top M\,(F s + G x)
+     -\tfrac12\,\mathrm{tr}\bigl(\Sigma^{1/2}M\Sigma^{1/2}\bigr)
+     + m^\top(F s + G x) + c.
+   $$
+
+2. **Form** the Bellman integrand \(R(s,x)=u(s,x)+\gamma\mathbb{E}[V(s')]\) and **FOC** \(\partial R/\partial x=0\):
+   $$
+   0
+   = -\,s^\top N 
+     - \gamma\,s^\top F^\top M G
+     - \bigl(R + \gamma\,G^\top M G\bigr)\,x^*
+     + \gamma\,m^\top G.
+   $$
+   Thus
+   $$
+   (R + \gamma\,G^\top M G)\,x^*
+   = -\,(N + \gamma\,F^\top M G)^\top s
+     + \gamma\,G^\top m,
+   $$
+   giving
+   $$
+   x^* = -K\,s + k,
+   \quad
+   K = \bigl(R + \gamma G^\top M G\bigr)^{-1}(N + \gamma F^\top M G)^\top,
+   \quad
+   k = \bigl(R + \gamma G^\top M G\bigr)^{-1}\,\gamma\,G^\top m.
+   $$
+
+3. **Substitute** \(x^*=-Ks+k\) into \(R(s,x^*)\).  **Collect** the terms **linear** in \(s\).  One obtains
+   $$
+   m^\top s
+   = -\,s^\top N\,k
+     + s^\top K^\top R\,k
+     - \gamma\,s^\top F^\top M G\,k
+     + \gamma\,m^\top F\,s
+     - \gamma\,m^\top G\,K\,s.
+   $$
+   Using the definitions of \(K\) and \(k\), the right‐hand side simplifies so that **all non-\(m\) terms vanish**, leaving
+   $$
+   m^\top s
+   = \bigl[\gamma\,F^\top 
+        - \gamma\,(N + \gamma\,F^\top M G)\,(R + \gamma\,G^\top M G)^{-1}G^\top
+     \bigr]m\;^\top s.
+   $$
+   Because \(s\) is arbitrary, we conclude
+   $$
+   \boxed{%
+     \bigl[I \;-\; A_{\rm lin}\bigr]\,m = 0,
+     \quad
+     A_{\rm lin}
+     = \gamma\,F^\top
+       - \gamma\,(N + \gamma\,F^\top M G)\,(R + \gamma\,G^\top M G)^{-1}G^\top.
+   }
+   $$
+   Under standard assumptions the unique solution is \(m=0\).
