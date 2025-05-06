@@ -1,0 +1,110 @@
+# Solving the Generalized Discrete‐Time ARE with Cross‐Term \(N\)
+
+We start from the Bellman equation  
+$$
+V(s_t)=\max_{x_t}\Bigl\{
+-\tfrac12\,s_t^\top Q\,s_t
+\;-\;s_t^\top N\,x_t
+\;-\;\tfrac12\,R\,x_t^2
+\;+\;\gamma\,\mathbb{E}\bigl[V(s_{t+1})\mid s_t\bigr]
+\Bigr\},
+$$
+with linear dynamics  
+$$
+s_{t+1}=F\,s_t+G\,x_t+\Sigma^{1/2}\,\varepsilon_{t+1},\quad\varepsilon\sim N(0,I).
+$$
+
+---
+
+## 1. Generalized ARE
+
+Matching quadratic terms in \(s\) and \(x\) gives the **Generalized Discrete‐Time ARE**  
+$$
+\boxed{%
+M
+=Q
+\;+\;\gamma\,F^\top M F
+\;-\;
+\bigl(N + \gamma\,F^\top M G\bigr)\,
+\bigl(R + \gamma\,G^\top M G\bigr)^{-1}\,
+\bigl(N^\top + \gamma\,G^\top M F\bigr).
+}
+$$
+
+---
+
+## 2. Complete‐the‐Square
+
+Define the “completed‐square” matrices  
+$$
+\tilde F = F - G\,R^{-1}N^\top,\qquad
+\tilde Q = Q - N\,R^{-1}N^\top.
+$$
+Then scale for discounting:  
+$$
+\bar A = \sqrt{\gamma}\,\tilde F,
+\quad
+\bar B = \sqrt{\gamma}\,G.
+$$
+One shows algebraically that solving the **standard** discrete‐time ARE  
+$$
+M = \tilde Q
+    \;+\;\bar A^\top M\,\bar A
+    \;-\;\bar A^\top M\,\bar B\,(R + \bar B^\top M\,\bar B)^{-1}\,\bar B^\top M\,\bar A
+$$
+yields the same \(M\) as the GARE above.
+
+---
+
+## 3. Linear Term and Constant
+
+With the ansatz
+$$
+V(s)=-\tfrac12\,s^\top M\,s + m^\top s + c,
+$$
+matching **linear** terms gives
+$$
+\boxed{%
+m
+=
+\gamma\,F^\top m
+\;-\;
+\bigl(N + \gamma\,F^\top M G\bigr)\,
+\bigl(R + \gamma\,G^\top M G\bigr)^{-1}\,
+\gamma\,G^\top m,
+}
+$$
+which under standard stabilizability/observability implies \(m=0\).
+
+Matching the **constant** term yields
+$$
+\begin{aligned}
+c
+&=\gamma\,c
+  -\tfrac{\gamma}{2}\,\mathrm{tr}\!\bigl(\Sigma^{1/2}{}^\top M\,\Sigma^{1/2}\bigr)
+  +\tfrac12\,k^\top(R + \gamma\,G^\top M G)\,k
+  -\gamma\,m^\top G\,k,
+\end{aligned}
+$$
+which determines \(c\) but does not affect the policy.
+
+---
+
+## 4. Optimal Feedback
+
+The first‐order condition gives
+$$
+(R + \gamma\,G^\top M G)\,x^*
+= -\bigl(N + \gamma\,F^\top M G\bigr)^\top s
+  +\gamma\,G^\top m.
+$$
+Hence the **optimal policy** is
+$$
+\boxed{%
+x^* = -\,K\,s + k,
+\quad
+K = (R + \gamma\,G^\top M G)^{-1}(N^\top + \gamma\,G^\top M F),
+\quad
+k = (R + \gamma\,G^\top M G)^{-1}\,\gamma\,G^\top m.
+}
+$$
