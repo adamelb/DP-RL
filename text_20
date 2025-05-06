@@ -1,0 +1,63 @@
+# Why \(\displaystyle\mathbb{E}[\varepsilon^\top \Sigma^{1/2} M\,\Sigma^{1/2}\,\varepsilon]
+= \mathrm{tr}\bigl(\Sigma^{1/2} M\,\Sigma^{1/2}\bigr)\)
+
+Let \(\varepsilon\sim N(0,I_n)\).  Define the matrix
+\[
+A \;=\;\Sigma^{1/2}\,M\,\Sigma^{1/2},
+\]
+which is symmetric if \(M\) and \(\Sigma\) are.  We want to compute
+\[
+\mathbb{E}\bigl[\varepsilon^\top A\,\varepsilon\bigr].
+\]
+
+---
+
+## 1. Rewrite the quadratic form as a trace
+
+For any vector \(x\in\mathbb{R}^n\) and matrix \(A\in\mathbb{R}^{n\times n}\),
+\[
+x^\top A\,x
+\;=\;
+\mathrm{tr}\bigl(x^\top A\,x\bigr)
+\;=\;
+\mathrm{tr}\bigl(A\,x\,x^\top\bigr),
+\]
+using the fact that \(\mathrm{tr}(uv^\top)=v^\top u\) and the cyclicity \(\mathrm{tr}(BC)=\mathrm{tr}(CB)\).
+
+Thus,
+\[
+\varepsilon^\top A\,\varepsilon
+=\mathrm{tr}\bigl(A\,\varepsilon\,\varepsilon^\top\bigr).
+\]
+
+---
+
+## 2. Take expectations
+
+Since \(\varepsilon\) has zero mean and covariance \(I_n\),
+\[
+\mathbb{E}[\varepsilon\,\varepsilon^\top]
+= I_n.
+\]
+Therefore
+\[
+\mathbb{E}\bigl[\varepsilon^\top A\,\varepsilon\bigr]
+= \mathbb{E}\Bigl[\mathrm{tr}\bigl(A\,\varepsilon\,\varepsilon^\top\bigr)\Bigr]
+= \mathrm{tr}\bigl(A\,\mathbb{E}[\varepsilon\,\varepsilon^\top]\bigr)
+= \mathrm{tr}\bigl(A\,I_n\bigr)
+= \mathrm{tr}(A).
+\]
+
+---
+
+## 3. Substitute back \(A\)
+
+Recalling \(A=\Sigma^{1/2}M\,\Sigma^{1/2}\), we obtain
+\[
+\boxed{%
+\mathbb{E}\bigl[\varepsilon^\top \Sigma^{1/2} M\,\Sigma^{1/2}\,\varepsilon\bigr]
+= \mathrm{tr}\bigl(\Sigma^{1/2} M\,\Sigma^{1/2}\bigr).
+}
+\]
+
+This is the result used in the Bellman‐equation step to drop the constant “noise‐term.”  
