@@ -1,0 +1,64 @@
+import torch
+import torch.nn as nn
+
+# 1) Define ValueMLP class with normalization buffers
+class ValueMLP(nn.Module):
+    def __init__(self, f, zero=False):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(f, 256), nn.ReLU(), nn.Dropout(0.4),
+            nn.Linear(256, 256), nn.ReLU(), nn.Dropout(0.4),
+            nn.Linear(256, 256), nn.ReLU(), nn.Dropout(0.4),
+            nn.Linear(256,   1)
+        )
+        if zero:
+            for p in self.parameters():
+                nn.init.zeros_(p)
+        # running moment buffers for Q normalization
+        self.register_buffer('mean_q', torch.tensor(0.0))
+        self.register_buffer('std_q',  torch.tensor(1.0))
+
+    def forward(self, phi):
+        return self.net(phi).squeeze(-1)
+
+    def set_normalization(self, mean_q_value, std_q_value):
+        # update buffers after training
+        self.mean_q.copy_(torch.as_tensor(mean_q_value, dtype=self.mean_q.dtype, device=self.mean_q.device))
+        self.std_q.copy_(torch.as_tensor(std_q_value,  dtype=self.std_q.dtype,  device=self.std_q.device))
+
+    def normalize_targets(self, Q_raw):
+        # normalize raw Q targets
+        return (Q_raw - self.mean_q) / self.std_q
+
+    def denormalize(self, q_norm):
+        # recover real-scale Q from normalized output
+        return q_norm * self.std_q + self.mean_q
+
+# 2) Instantiate model and copy to target_model
+model = ValueMLP(f, zero=False).to(DEVICE)
+target_model = ValueMLP(f, zero=False).to(DEVICE)
+# copy weights and buffers (including mean_q, std_q)
+target_model.load_state_dict(model.state_dict())
+# freeze target_model parameters
+for p in target_model.parameters():
+    p.requires_grad = False
+
+# ... train model for 800 epochs, updating Welford's mean_q and std_q ...
+
+# 3) After training: set final normalization constants on both models
+model.set_normalization(mean_q, std_q)
+target_model.set_normalization(mean_q, std_q)
+
+# 4) Next iteration: compute Bellman targets using denorm→renorm
+# assume feat_mean, feat_std, R, gamma are defined
+phi = features(p, alpha1, alpha2, c, rho1, rho2, t1, imbalance1, imbalance2, PHI1, PHI2)
+# input normalization
+phi_norm = (phi - feat_mean) / feat_std
+# target_model outputs normalized Q
+V_norm = target_model(phi_norm)
+# convert to real-scale Q
+V_raw = target_model.denormalize(V_norm)
+# raw Bellman target
+Q_target_raw = R + gamma * V_raw
+# normalize Bellman target for training
+Q_target_norm = model.normalize_targets(Q_target_raw)
