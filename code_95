@@ -1,0 +1,41 @@
+# before training:
+count_q = 0
+mean_q  = 0.
+M2_q    = 0.    # sum of squares of differences
+
+# each time you compute a batch of raw Q_targets:
+batch = Q_target.detach().view(-1)  # shape (B,)
+n = batch.numel()
+batch_mean = batch.mean()
+batch_var  = batch.var(unbiased=False)
+
+# update running stats
+delta = batch_mean - mean_q
+total = count_q + n
+mean_q += delta * n/total
+M2_q   += batch_var*n + delta*delta * count_q*n/total
+count_q = total
+
+# at any point:
+var_q  = M2_q / count_q
+std_q  = torch.sqrt(var_q + 1e-6)
+
+
+
+# compute raw targets
+Q_target = R + γ * V_avg    # shape (B, A) or whatever
+
+# normalize them
+Q_norm = (Q_target - mean_q) / std_q
+
+# compute loss against your network’s output
+loss = F.smooth_l1_loss(V_pred, Q_norm)  
+...
+
+
+
+
+feat = features(s)                   # build the same feature vector
+feat = (feat - feat_mean) / feat_std # your input normalization
+q_norm = model(feat).item()          # scalar normalized prediction
+q_real = q_norm * std_q + mean_q     # de-normalize
