@@ -1,0 +1,88 @@
+\documentclass{article}
+\usepackage{amsmath,amssymb}
+\usepackage{microtype}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\begin{document}
+
+\section*{Online Normalization of Bellman Targets}
+
+We denote by
+\[
+\{\,Q^{(\mathrm{raw})}_{i}\}_{i=1}^{N}
+\]
+the sequence of raw Bellman‐targets produced during training, and we wish to train our network on
+\[
+\hat Q_i \;=\; \frac{Q^{(\mathrm{raw})}_i - \mu_i}{\sigma_i},
+\]
+where \(\mu_i\) and \(\sigma_i\) are estimates of the running mean and standard deviation of the \(Q\)-distribution up to sample \(i\).
+
+\bigskip
+
+\section*{1. Online Moment Estimation (Welford’s Algorithm)}
+
+Initialize
+\[
+\mu_{0} = 0,\quad
+M_{2,0} = 0,\quad
+n_0 = 0.
+\]
+Each time we compute a new minibatch of raw targets
+\(\{Q^{(\mathrm{raw})}_{i_1},\dots,Q^{(\mathrm{raw})}_{i_b}\}\) of size \(b\), let
+\[
+n' = n + b,\qquad
+\bar Q = \frac{1}{b}\sum_{k=1}^b Q^{(\mathrm{raw})}_{i_k},\qquad
+S = \sum_{k=1}^b \bigl(Q^{(\mathrm{raw})}_{i_k} - \bar Q\bigr)^2.
+\]
+We update
+\begin{align*}
+\delta &= \bar Q - \mu_n,\\
+\mu_{n'} &= \mu_n + \frac{b}{n'}\,\delta,\\
+M_{2,n'} &= M_{2,n} + S + \frac{n\,b}{n'}\,\delta^2,\\
+n &\leftarrow n',
+\end{align*}
+and then form the variance estimate
+\[
+\sigma^2_n = \frac{M_{2,n}}{n}, 
+\quad
+\sigma_n = \sqrt{\sigma^2_n + \varepsilon},
+\]
+where \(\varepsilon>0\) is a small constant for numerical stability.
+
+\bigskip
+
+\section*{2. Normalizing Targets}
+
+For each raw target \(Q^{(\mathrm{raw})}\) in the minibatch we compute
+\[
+\hat Q \;=\;
+\frac{Q^{(\mathrm{raw})} - \mu_{n}}{\sigma_{n}}.
+\]
+We then regress our network’s prediction on \(\hat Q\), for example via the Huber loss:
+\[
+\mathcal{L} = \mathrm{Huber}\bigl(\hat Q_{\mathrm{pred}},\,\hat Q\bigr).
+\]
+
+\bigskip
+
+\section*{3. Why It Works}
+
+\begin{enumerate}
+  \item \textbf{Unknown global distribution.} We never load all \(Q\) values at once, so we cannot compute the true mean and variance in advance.
+  \item \textbf{Online consistency.} Welford’s algorithm guarantees
+  \(\mu_n \to \mathbb{E}[Q]\) and \(\sigma_n^2 \to \mathrm{Var}[Q]\) as \(n \to \infty\).
+  \item \textbf{Stable gradients.} By normalizing, gradients remain on a consistent scale regardless of drift in the Bellman‐target magnitudes, especially across outer iterations.
+\end{enumerate}
+
+\bigskip
+
+\section*{4. Recovering Real‐Scale Values}
+
+At evaluation time, given a normalized network output \(\hat q\), we invert:
+\[
+q \;=\; \hat q\,\sigma_n \;+\;\mu_n.
+\]
+Because \((\mu_n,\sigma_n)\) track the true Bellman‐target statistics ever more closely as training proceeds, this de‐normalization yields an accurate estimate of the real value function—despite never having direct, full‐batch access to its distribution.
+
+\end{document}
