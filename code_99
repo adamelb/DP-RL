@@ -1,0 +1,111 @@
+import numpy as np
+import torch
+from scipy.linalg import solve_discrete_are  # or wherever your ARE solver lives
+
+def batch_retrieve(data_cuda,
+                   tau1=1.0,
+                   tau2=5.0,
+                   gamma=0.99):
+    """
+    data_cuda: torch.Tensor of shape (5000,9) on CUDA
+       columns = [p, alpha1, alpha2, c_unused, tl, rho1, rho2, imb1, imb2]
+    returns:
+      x: (5000,)   best‐action choice
+      V: (5000,)   value function at that state
+    """
+    # 1) move to NumPy on CPU
+    data = data_cuda.detach().cpu().numpy()     # (5000,9)
+
+    # 2) unpack into per‐row quantities
+    p      = data[:,0]
+    alpha1 = data[:,1]
+    alpha2 = data[:,2]
+    # c_col = data[:,3]    # not used as input to the LQR solve
+    tl     = data[:,4]
+    rho1   = data[:,5]
+    rho2   = data[:,6]
+    imb1   = data[:,7]
+    imb2   = data[:,8]
+
+    # 3) build your 5000×5 “state” matrix S:
+    #    each row = [ p, imb1, imb2, alpha1, alpha2 ]
+    S = np.stack([p, imb1, imb2, alpha1, alpha2], axis=1)  # (5000,5)
+
+    # 4) precompute any static scalars
+    phi1 = np.exp(-1.0/tau1)
+    phi2 = np.exp(-1.0/tau2)
+
+    # 5) for each row i you have to solve a tiny Riccati eqn
+    #    and extract its Kᵢ, Hᵢ and cᵢ — here we do it in a loop,
+    #    but once you have K,H,c you can vectorize the final x,V step.
+    Ks = np.zeros((len(S), 1, 5))   # will hold each row's K  shape=(5000,1,5)
+    Hs = np.zeros((len(S), 5, 5))   # will hold each row's H  shape=(5000,5,5)
+    cs = np.zeros(len(S))           # will hold each row's constant term
+
+    # fixed G and Q
+    G = np.array([1.0, 1-phi1, 1-phi2, 0.0, 0.0])[:,None]   # (5,1)
+    Q = np.zeros((5,5))
+    Q[0,0] = 1.0
+    Q[0,3] = Q[3,0] = -1.0
+    Q[0,4] = Q[4,0] = -1.0
+
+    for i in range(len(S)):
+        # build per‐row F, N, R, σ
+        Fi = np.diag([1.0, phi1, phi2, rho1[i], rho2[i]])
+        Ni = np.zeros((5,1))
+        Ni[0,0] = 1.0
+        Ni[1,0] = 0.5 * tl[i] * phi1
+        Ni[2,0] = 0.5 * tl[i] * phi2
+        Ni[3,0] = -1.0
+        Ni[4,0] = -1.0
+
+        Ri = 1.0 + tl[i] * (2.0 - phi1 - phi2)
+        Rinv = 1.0 / Ri
+
+        Ftilde = Fi - G @ (Ni.T * Rinv)   # (5,5)
+        Qtild = Q - (Ni @ Ni.T) * Rinv    # (5,5)
+
+        # solve the discrete‐algebraic Riccati
+        Abar = np.sqrt(gamma) * Ftilde
+        Bbar = np.sqrt(gamma) * G
+        Mi   = solve_discrete_are(Abar, Bbar, Qtild, Ri)  # (5,5)
+
+        # gain Kᵢ
+        denom = Ri + gamma * float((G.T @ Mi @ G)[0,0])
+        Ki    = (Ni.T + gamma*(G.T @ Mi @ Fi)) / denom     # (1,5)
+        Ks[i] = Ki
+
+        # build the quadratic part Hᵢ = Kᵀ M K
+        Hs[i] = Ki.T @ Mi @ Ki     # (5,5)
+
+        # build the constant term from the noise‐trace
+        sigma_half = np.zeros((5,2))
+        sigma_half[3,0] = np.sqrt(1 - rho1[i]**2)
+        sigma_half[4,1] = np.sqrt(1 - rho2[i]**2)
+        trace_term = np.trace(sigma_half.T @ Mi @ sigma_half)
+        cs[i] = - (gamma / (2*(1-gamma))) * trace_term
+
+    # 6) now vectorize the final two lines:
+    #    x[i] = -Kᵢ @ sᵢ
+    #    V[i] = -½ sᵢᵀ Hᵢ sᵢ  +  (Ni.T @ sᵢ)  +  cᵢ
+    #  note Ni.T @ sᵢ = (Ni.squeeze() @ sᵢ)
+    Nvecs = np.stack([ 
+        np.ones_like(tl), 
+        0.5*tl*phi1, 
+        0.5*tl*phi2, 
+        -np.ones_like(tl), 
+        -np.ones_like(tl)
+    ], axis=1)                              # (5000,5)
+
+    # x = -( K @ s )  →   each K[i] is (1×5), each s is (5,)
+    x = - np.einsum('ijk,ik->i', Ks, S)
+
+    # quadratic term  .5 * sᵀ H s
+    quad = 0.5 * np.einsum('ij,ij->i', S, np.einsum('ijk,ik->ij', Hs, S))
+
+    # linear term  Nᵀ s
+    lin  = np.einsum('ij,ij->i', Nvecs, S)
+
+    V = - quad + lin + cs
+
+    return x, V
