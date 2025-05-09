@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-# --- 1) Define the ValueMLP class ---
+# --- 1) Define ValueMLP with normalization buffers and a learnable shift ---
 class ValueMLP(nn.Module):
     def __init__(self, input_dim, zero=False):
         super().__init__()
@@ -16,35 +16,27 @@ class ValueMLP(nn.Module):
         if zero:
             for p in self.parameters():
                 nn.init.zeros_(p)
-        # Running mean & std buffers for Q normalization
+        # buffers for global target‐normalization
         self.register_buffer('mean_q', torch.tensor(0.0))
         self.register_buffer('std_q',  torch.tensor(1.0))
-        # Learnable shift to recover the lost mean
+        # learnable shift to recover the mean
         self.shift = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, phi):
-        # phi: normalized input features
-        # returns: de-normalized Q prediction plus learned shift
+        # phi is already normalized input features
         q_norm = self.net(phi).squeeze(-1)
-        q_real = q_norm * self.std_q + self.mean_q + self.shift
-        return q_real
+        # de‐normalize and add shift
+        return q_norm * self.std_q + self.mean_q + self.shift
 
     def set_normalization(self, mean_q_value, std_q_value):
-        # Update buffers after computing running stats
         self.mean_q.copy_(torch.as_tensor(mean_q_value, device=self.mean_q.device))
         self.std_q.copy_( torch.as_tensor(std_q_value,  device=self.std_q.device))
 
 
-# --- 2) Setup ---
-# Replace these placeholders with your actual data pipeline and constants:
-input_dim   = f              # number of features
-DEVICE      = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-gamma       = 0.99
-feat_mean   = ...            # tensor of shape (input_dim,)
-feat_std    = ...            # tensor of shape (input_dim,)
-dataloader  = ...            # yields (s, a, r, s_next) batches
-n_epochs    = 10
-learning_rate = 1e-4
+# --- 2) Instantiate model & target, freeze target ---
+input_dim = f               # number of input features
+DEVICE    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+gamma     = 0.99
 
 model = ValueMLP(input_dim).to(DEVICE)
 target_model = ValueMLP(input_dim).to(DEVICE)
@@ -52,52 +44,57 @@ target_model.load_state_dict(model.state_dict())
 for p in target_model.parameters():
     p.requires_grad = False
 
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-# Welford running stats for Q_target normalization
-count = 0
-mean_q = 0.0
-M2     = 0.0  # sum of squares of differences
+# --- 3) Precompute Bellman targets and global normalization ---
+# Assume you have tensors for your entire dataset:
+#   `states`       of shape (N, state_dim)
+#   `next_states`  of shape (N, state_dim)
+#   `rewards`      of shape (N,)
+# and `features()` that maps a state -> feature vector of length input_dim
+# also precomputed `feat_mean`, `feat_std` for input normalization
+
+# Normalize next‐state features
+phi_next_all = (features(next_states) - feat_mean) / feat_std
+
+# Compute raw Bellman targets
+with torch.no_grad():
+    Q_next_all = target_model(phi_next_all)           # real‐scale Q(s')
+Q_target_raw_all = rewards + gamma * Q_next_all      # B(target_model)
+
+# Compute global mean & std of these targets
+mean_q = Q_target_raw_all.mean().item()
+std_q  = Q_target_raw_all.std().item()
+
+# Tell our model about the normalization
+model.set_normalization(mean_q, std_q)
 
 
-# --- 3) Training loop with Bellman updates ---
+# --- 4) Build a DataLoader for (state, Q_target_raw) ---
+dataset = torch.utils.data.TensorDataset(states, Q_target_raw_all)
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
+
+
+# --- 5) Mini training loop fitting B(target_model) ---
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
+n_epochs = 10
+
 for epoch in range(n_epochs):
-    for s_batch, a_batch, r_batch, s_next_batch in dataloader:
-        # Move to device
-        s_batch      = s_batch.to(DEVICE)
-        r_batch      = r_batch.to(DEVICE)
-        s_next_batch = s_next_batch.to(DEVICE)
+    model.train()
+    for state_batch, Q_raw_batch in dataloader:
+        state_batch = state_batch.to(DEVICE)
+        Q_raw_batch = Q_raw_batch.to(DEVICE)
 
-        # Compute and normalize features
-        phi      = (features(s_batch)      - feat_mean) / feat_std
-        phi_next = (features(s_next_batch) - feat_mean) / feat_std
+        # normalize inputs
+        phi = (features(state_batch) - feat_mean) / feat_std
 
-        # Compute Bellman target with frozen target_model
-        with torch.no_grad():
-            Q_next = target_model(phi_next)         # real-scale Q(s')
-        Q_target_raw = r_batch + gamma * Q_next     # raw Bellman target
-
-        # --- Update running mean/std via Welford ---
-        b = Q_target_raw.numel()
-        batch_mean = Q_target_raw.mean()
-        batch_var  = Q_target_raw.var(unbiased=False)
-        delta = batch_mean - mean_q
-        total = count + b
-        mean_q += delta * b/total
-        M2     += batch_var * b + (delta**2) * count * b/total
-        count   = total
-        std_q   = torch.sqrt(M2/count + 1e-6)
-
-        # Update model's normalization buffers
-        model.set_normalization(mean_q, std_q)
-
-        # Forward pass and loss on raw targets
-        Q_pred = model(phi)                     # de-normalized prediction + shift
-        loss = F.mse_loss(Q_pred, Q_target_raw)
+        # forward & compute loss on raw targets
+        Q_pred = model(phi)
+        loss = F.mse_loss(Q_pred, Q_raw_batch)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-    # Sync target_model after each epoch
+    # After each epoch (or outer iteration), sync target_model if needed:
     target_model.load_state_dict(model.state_dict())
+    target_model.eval()
