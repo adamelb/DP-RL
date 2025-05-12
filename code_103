@@ -1,0 +1,161 @@
+# Conditional Target Normalization via K-Means
+
+Let  
+\(\phi(s)\in\mathbb{R}^d\) be your z-scored feature vector for state \(s\):
+\[
+  \phi(s) \;=\; \frac{\mathrm{features}(s) - \mu_\phi}{\sigma_\phi}\,.
+\]
+Let the Bellman target be
+\[
+  Q(s) \;=\; r(s,a) \;+\;\gamma\,V_{\rm target}(s')\,.
+\]
+
+---
+
+## 1. Clustering in Feature-Space
+
+Run K-means on \(\{\phi_i\}_{i=1}^N\) into \(K\) clusters:
+\[
+  \{\mu_k\}_{k=1}^K = \mathrm{KMeans}(\{\phi_i\}), 
+  \quad
+  c_i = \arg\min_{1\le k\le K} \|\phi_i - \mu_k\|.
+\]
+Here \(\mu_k\) is the centroid of cluster \(k\), and \(c_i\) is the assignment of sample \(i\).
+
+---
+
+## 2. Per-Cluster Statistics
+
+For each cluster \(k\), collect raw targets \(\{Q_i \mid c_i=k\}\) and compute
+\[
+  \mu_k^Q = \frac1{|\mathcal{C}_k|}\sum_{i:c_i=k} Q_i,
+  \quad
+  \sigma_k^Q = \sqrt{\frac1{|\mathcal{C}_k|}\sum_{i:c_i=k}(Q_i-\mu_k^Q)^2} + \varepsilon.
+\]
+
+---
+
+## 3. Training with Conditional Normalization
+
+For each minibatch \(\{(\phi_j, Q_j)\}_{j=1}^B\):
+
+1. **Assign** clusters: \(k_j = \arg\min_k \|\phi_j - \mu_k\|\).  
+2. **Gather** \(\mu_{k_j}^Q\) and \(\sigma_{k_j}^Q\).  
+3. **Normalize**:
+   \[
+     \hat Q_j = \frac{Q_j - \mu_{k_j}^Q}{\sigma_{k_j}^Q}\,.
+   \]
+4. **Predict** \(\hat Q_j\) via network \(f_\theta(\phi_j)\).  
+5. **Loss**:
+   \[
+     \mathcal{L} = \frac1B\sum_{j=1}^B \bigl(f_\theta(\phi_j) - \hat Q_j\bigr)^2.
+   \]
+
+---
+
+## 4. Evaluation / De-normalization
+
+Given new state \(s\):
+
+1. Compute \(\phi = (\mathrm{features}(s)-\mu_\phi)/\sigma_\phi\).  
+2. Find \(k=\arg\min_\ell\|\phi-\mu_\ell\|\).  
+3. Predict \(\hat Q = f_\theta(\phi)\).  
+4. Recover real-scale:
+   \[
+     Q = \hat Q\,\sigma_k^Q + \mu_k^Q.
+   \]
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from sklearn.cluster import KMeans
+import numpy as np
+
+# 1) Prepare all normalized features and Bellman targets
+# ----------------------------------------------------
+# states_all, next_states_all: (N, state_dim) tensors
+# rewards_all: (N,) tensor
+# features(): maps state -> raw feature vector (state_dim -> input_dim)
+# feat_mean, feat_std: tensors of shape (input_dim,)
+# target_model: frozen network giving V(s)
+# gamma: discount
+
+phi_all = ((features(states_all) - feat_mean) / feat_std).cpu().numpy()  # (N, d)
+with torch.no_grad():
+    phi_next = (features(next_states_all) - feat_mean) / feat_std
+    Q_next   = target_model(phi_next.to(DEVICE)).cpu().numpy()           # (N,)
+Q_raw_all = rewards_all.cpu().numpy() + gamma * Q_next                  # (N,)
+
+# 2) Fit k-means
+# ---------------
+K = 8
+kmeans = KMeans(n_clusters=K, random_state=0).fit(phi_all)
+centroids = kmeans.cluster_centers_   # (K, d)
+labels    = kmeans.labels_            # (N,)
+
+# 3) Compute per-cluster mean & std of Q_raw
+# ------------------------------------------
+mu_q  = np.zeros(K, dtype=np.float32)
+std_q = np.zeros(K, dtype=np.float32)
+for k in range(K):
+    Qk = Q_raw_all[labels == k]
+    mu_q[k]  = Qk.mean() if len(Qk)>0 else 0.0
+    std_q[k] = Qk.std()  if len(Qk)>0 else 1.0
+std_q += 1e-6  # numerical safety
+
+# Convert to torch tensors on DEVICE
+centers_t = torch.tensor(centroids, device=DEVICE)  # (K, d)
+mu_q_t    = torch.tensor(mu_q,      device=DEVICE)  # (K,)
+std_q_t   = torch.tensor(std_q,     device=DEVICE)  # (K,)
+
+# 4) Define your regressor f_theta predicting normalized Q
+# ---------------------------------------------------------
+input_dim = centroids.shape[1]
+model = nn.Sequential(
+    nn.Linear(input_dim,256), nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256,256), nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256,256), nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256,  1)
+).to(DEVICE)
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
+
+# 5) Training loop with conditional normalization
+# -----------------------------------------------
+for epoch in range(n_epochs):
+    model.train()
+    for states, Q_raw in train_loader:  # train_loader yields (state_batch, Q_raw_batch)
+        states = states.to(DEVICE)
+        Q_raw  = Q_raw.to(DEVICE)
+
+        # normalize inputs
+        phi = (features(states) - feat_mean) / feat_std  # (B, d)
+
+        # assign clusters
+        dists = torch.sum((phi.unsqueeze(1) - centers_t.unsqueeze(0))**2, dim=2)  # (B, K)
+        idx   = torch.argmin(dists, dim=1)                                        # (B,)
+
+        # lookup mu/std per sample
+        mu_batch  = mu_q_t[idx]     # (B,)
+        std_batch = std_q_t[idx]    # (B,)
+
+        # normalize targets conditionally
+        Q_norm = (Q_raw - mu_batch) / std_batch  # (B,)
+
+        # forward & loss
+        Q_pred_norm = model(phi).squeeze(-1)    # (B,)
+        loss = F.mse_loss(Q_pred_norm, Q_norm)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+# 6) Evaluation example
+# ----------------------
+state = some_state.to(DEVICE)
+phi   = (features(state) - feat_mean) / feat_std
+dists = torch.sum((phi.unsqueeze(0) - centers_t)**2, dim=1)
+k     = torch.argmin(dists).item()
+Q_norm_pred = model(phi.unsqueeze(0)).item()
+Q_real_pred = Q_norm_pred * std_q[k] + mu_q[k]
+print("Predicted Q:", Q_real_pred)
