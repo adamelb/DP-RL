@@ -1,0 +1,171 @@
+# Smooth Conditional Normalization via Gaussian Mixture
+
+Let  
+\(\phi(s)\in\mathbb{R}^d\) be your z-scored feature vector:
+\[
+  \phi(s) \;=\; \frac{\mathrm{features}(s) - \mu_\phi}{\sigma_\phi}.
+\]
+Let the Bellman target be
+\[
+  Q(s) \;=\; r(s,a)\;+\;\gamma\,V_{\mathrm{target}}(s').
+\]
+
+---
+
+## 1. Fit a Gaussian Mixture
+
+Fit a \(K\)-component GMM with diagonal covariances on \(\{\phi_i\}\):
+\[
+  \{\pi_k,\mu_k,\Sigma_k\}_{k=1}^K 
+    = \mathrm{GMM}\bigl(\{\phi_i\}\bigr).
+\]
+
+---
+
+## 2. Per-Component Q Statistics
+
+For each component \(k\), collect raw targets \(\{Q_i\mid z_i=k\}\) and compute
+\[
+  \mu_k^Q \;=\;\frac{1}{N_k}\sum_{i:z_i=k}Q_i,
+  \quad
+  (\sigma_k^Q)^2
+    = \frac{1}{N_k}\sum_{i:z_i=k}(Q_i-\mu_k^Q)^2 + \varepsilon.
+\]
+
+---
+
+## 3. Soft Responsibilities & Normalization
+
+For any feature \(\phi\), compute responsibilities
+\[
+  r_k(\phi)
+    = \frac{\pi_k\,\mathcal{N}(\phi;\mu_k,\Sigma_k)}
+           {\sum_{j=1}^K \pi_j\,\mathcal{N}(\phi;\mu_j,\Sigma_j)}.
+\]
+Define sample-wise mean and variance
+\begin{align*}
+  \mu(\phi) &= \sum_{k=1}^K r_k(\phi)\,\mu_k^Q,\\
+  \sigma^2(\phi)
+    &= \sum_{k=1}^K r_k(\phi)\bigl[(\sigma_k^Q)^2 + (\mu_k^Q)^2\bigr]
+      \;-\;\mu(\phi)^2.
+\end{align*}
+Then normalize each target:
+\[
+  \hat Q = \frac{Q - \mu(\phi)}{\sigma(\phi)}.
+\]
+
+---
+
+## 4. Training & Evaluation
+
+- **Training**: regress your network \(f_\theta(\phi)\) onto \(\hat Q\) with MSE or Huber loss.  
+- **Inference**: for a new state \(s\), compute \(\phi\), responsibilities \(r_k(\phi)\), then  
+  \(\mu(\phi),\sigma(\phi)\); predict \(\hat Q=f_\theta(\phi)\); recover  
+  \[
+    Q = \hat Q\,\sigma(\phi) + \mu(\phi).
+  \]
+
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from sklearn.mixture import GaussianMixture
+import numpy as np
+
+# --- 1) Prepare data and features ---
+# states_all, next_states_all: (N, state_dim) torch tensors
+# rewards_all: (N,) torch tensor
+# features(): maps state -> raw feature vector (state_dim -> input_dim)
+# feat_mean, feat_std: (input_dim,) tensors for input normalization
+# target_model: frozen network for V(s)
+# DEVICE, gamma, n_epochs, train_loader defined elsewhere
+
+phi_all = ((features(states_all) - feat_mean) / feat_std).cpu().numpy()  # (N, d)
+with torch.no_grad():
+    phi_next = (features(next_states_all) - feat_mean) / feat_std
+    Q_next   = target_model(phi_next.to(DEVICE)).cpu().numpy()            # (N,)
+Q_raw_all = rewards_all.cpu().numpy() + gamma * Q_next                   # (N,)
+
+# --- 2) Fit Gaussian Mixture ---
+K = 8
+gmm = GaussianMixture(n_components=K, covariance_type='diag', random_state=0)
+gmm.fit(phi_all)
+# responsibilities for all samples
+resp_all = gmm.predict_proba(phi_all)  # shape (N, K)
+
+# --- 3) Compute per-component Q stats ---
+mu_q  = np.zeros(K, dtype=np.float32)
+var_q = np.zeros(K, dtype=np.float32)
+for k in range(K):
+    r_k = resp_all[:, k]
+    mu_q[k]  = (r_k * Q_raw_all).sum() / (r_k.sum() + 1e-6)
+    m2 = (r_k * (Q_raw_all**2)).sum() / (r_k.sum() + 1e-6)
+    var_q[k] = m2 - mu_q[k]**2
+std_q = np.sqrt(var_q + 1e-6)
+
+# Move to torch
+centers_t  = torch.tensor(gmm.means_,      device=DEVICE)  # (K, d)
+prec_t     = torch.tensor(gmm.precisions_, device=DEVICE)  # (K, d) inv diag cov
+mu_q_t     = torch.tensor(mu_q,            device=DEVICE)  # (K,)
+std_q_t    = torch.tensor(std_q,           device=DEVICE)  # (K,)
+
+# --- 4) Define model predicting normalized Q ---
+input_dim = centers_t.size(1)
+model = nn.Sequential(
+    nn.Linear(input_dim,256), nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256,256), nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256,256), nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256,  1)
+).to(DEVICE)
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
+
+# --- 5) Training loop with soft conditional normalization ---
+for epoch in range(n_epochs):
+    model.train()
+    for states, Q_raw in train_loader:
+        states = states.to(DEVICE)
+        Q_raw  = Q_raw.to(DEVICE)
+
+        # normalize inputs
+        phi = (features(states) - feat_mean) / feat_std  # (B, d)
+
+        # compute soft responsibilities
+        diff = phi.unsqueeze(1) - centers_t.unsqueeze(0)                      # (B,K,d)
+        maha = (diff**2 * prec_t.unsqueeze(0)).sum(-1)                        # (B,K)
+        log_prob = -0.5 * (maha + torch.log(torch.prod(torch.tensor(gmm.covariances_, device=DEVICE),dim=1)))
+        log_resp = log_prob + torch.log(torch.tensor(gmm.weights_, device=DEVICE))
+        resp = torch.softmax(log_resp, dim=1)                                 # (B,K)
+
+        # sample-wise mu, sigma
+        mu_b    = (resp * mu_q_t.unsqueeze(0)).sum(dim=1)                     # (B,)
+        sq      = mu_q_t**2 + std_q_t**2
+        var_b   = (resp * sq.unsqueeze(0)).sum(dim=1) - mu_b**2
+        std_b   = torch.sqrt(var_b + 1e-6)                                    # (B,)
+
+        # normalize targets
+        Q_norm = (Q_raw - mu_b) / std_b                                       # (B,)
+
+        # forward & loss
+        Q_pred_norm = model(phi).squeeze(-1)                                  # (B,)
+        loss = F.mse_loss(Q_pred_norm, Q_norm)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+# --- 6) Inference on a new state ---
+state = some_state.to(DEVICE)
+phi   = (features(state) - feat_mean) / feat_std                          # (d,)
+diff  = phi.unsqueeze(0) - centers_t                                      # (K,d)
+maha  = (diff**2 * prec_t).sum(dim=1)                                      # (K,)
+logp  = -0.5 * (maha + torch.log(torch.prod(torch.tensor(gmm.covariances_,device=DEVICE),dim=1)))
+logr  = logp + torch.log(torch.tensor(gmm.weights_, device=DEVICE))
+resp0 = torch.softmax(logr, dim=0)                                         # (K,)
+mu0   = (resp0 * mu_q_t).sum()
+sq0   = mu_q_t**2 + std_q_t**2
+var0  = (resp0 * sq0).sum() - mu0**2
+std0  = torch.sqrt(var0 + 1e-6)
+Q_norm_pred = model(phi.unsqueeze(0)).item()
+Q_real_pred = Q_norm_pred * std0.item() + mu0.item()
+print("Predicted Q:", Q_real_pred)
