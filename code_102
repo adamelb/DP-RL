@@ -1,0 +1,99 @@
+import torch
+import torch.nn.functional as F
+from sklearn.preprocessing import QuantileTransformer
+from torch.utils.data import TensorDataset, DataLoader
+
+# --- hyper-params (fill in) ---
+BATCH_SIZE      = 1024
+M_SAMPLES       = 64
+MAX_EPOCHS      = 200
+N_OUTER_ITERS   = 10
+LR              = 1e-3
+WEIGHT_DECAY    = 1e-5
+PATIENCE        = 20
+CLOSED_SOL      = closed_sol  # your function
+
+model = ValueMLP().to(DEVICE)
+optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+
+best_val_mse = float('inf')
+best_state   = None
+
+for outer in range(N_OUTER_ITERS):
+    # 1) sample training data (with costs PHI1, PHI2)
+    feat_train, target_train, _, _ = create(
+        target_model, std_q_fix, mean_q_fix,
+        BATCH_SIZE, M_SAMPLES,
+        PHI1, PHI2, ACTIONS
+    )
+    # feat_train: (N, D), target_train: (N,)
+    feat_train = feat_train.cpu().numpy()
+    target_train = target_train.cpu().unsqueeze(1).numpy()
+
+    # 2) fit a quantile normalizer on inputs & outputs
+    #    output_distribution='normal' will map each feature to a ~N(0,1)
+    input_norm  = QuantileTransformer(output_distribution='normal', random_state=0)
+    target_norm = QuantileTransformer(output_distribution='normal', random_state=0)
+
+    feat_train_n = input_norm.fit_transform(feat_train)
+    targ_train_n = target_norm.fit_transform(target_train)
+
+    # wrap in a DataLoader
+    ds = TensorDataset(
+        torch.from_numpy(feat_train_n).float().to(DEVICE),
+        torch.from_numpy(targ_train_n).float().to(DEVICE)
+    )
+    loader = DataLoader(ds, batch_size=256, shuffle=True)
+
+    # 3) train for MAX_EPOCHS
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.95,
+        patience=10, cooldown=5, verbose=True
+    )
+
+    model.train()
+    for epoch in range(1, MAX_EPOCHS+1):
+        epoch_loss = 0.0
+        for xb, yb in loader:
+            optimizer.zero_grad()
+            pred = model(xb).view(-1,1)
+            loss = F.mse_loss(pred, yb)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item() * xb.size(0)
+        epoch_loss /= len(ds)
+        scheduler.step(epoch_loss)
+
+    # 4) validation on a fresh zero-cost batch
+    feat_zero, target_zero, *_ = create(
+        target_model, std_q_fix, mean_q_fix,
+        BATCH_SIZE, M_SAMPLES,
+        PHI1=0.0, PHI2=0.0, ACTIONS=ACTIONS
+    )
+    # closed-form “true” Q from your solver:
+    y_true = CLOSED_SOL(feat_zero)                # shape (N,)
+    # normalize both feat_zero and y_true using the SAME fitted transformers:
+    feat_zero_n = input_norm.transform(feat_zero.cpu().numpy())
+    y_true_n    = target_norm.transform(y_true.cpu().numpy().reshape(-1,1)).ravel()
+
+    model.eval()
+    with torch.no_grad():
+        pred_n = model(torch.from_numpy(feat_zero_n).float().to(DEVICE)).view(-1).cpu().numpy()
+    val_mse = ((pred_n - y_true_n)**2).mean()
+
+    print(f"[Iter {outer+1}/{N_OUTER_ITERS}] val zero-cost MSE (normalized) = {val_mse:.6f}")
+
+    # track best
+    if val_mse < best_val_mse:
+        best_val_mse = val_mse
+        best_state   = model.state_dict().copy()
+
+# After loop, reload best
+model.load_state_dict(best_state)
+print("Done. Best zero-cost MSE:", best_val_mse)
+
+
+
+from sklearn.preprocessing import RobustScaler
+input_norm  = RobustScaler()
+target_norm = RobustScaler()
