@@ -1,0 +1,228 @@
+import math
+import torch
+
+# 1) DEVICE
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 2) TAUCHEN DISCRETIZATION
+def tauchen(n, mu, rho, sigma, m=3.0):
+    """
+    Tauchen (1986) method for AR(1): y' = rho*y + eps, eps~N(0,sigma^2).
+    Returns:
+      y_grid:   (n,) tensor of states
+      P:        (n,n) transition matrix, P[i,j]=Pr(y'==y_grid[j] | y==y_grid[i])
+    """
+    # stationary std
+    std_y = sigma / math.sqrt(1 - rho**2)
+    y_max = mu + m*std_y
+    y_min = mu - m*std_y
+    y_grid = torch.linspace(y_min, y_max, n, device=device)
+    step = (y_max - y_min) / (n - 1)
+
+    # standard normal CDF
+    def norm_cdf(x):
+        return 0.5 * (1 + torch.erf(x / math.sqrt(2)))
+
+    P = torch.zeros(n, n, device=device)
+    for i in range(n):
+        for j in range(n):
+            z_low  = (y_grid[j] - rho*y_grid[i] - step/2) / sigma
+            z_high = (y_grid[j] - rho*y_grid[i] + step/2) / sigma
+            if j == 0:
+                P[i, j] = norm_cdf(z_high)
+            elif j == n - 1:
+                P[i, j] = 1 - norm_cdf(z_low)
+            else:
+                P[i, j] = norm_cdf(z_high) - norm_cdf(z_low)
+    return y_grid, P
+
+# 3) NEAREST‐INDEX HELPER
+def nearest_idx(vals, grid):
+    """
+    For each val in vals (shape (N,)), finds the index in grid (shape (M,))
+    of the nearest point.
+    Returns (N,) LongTensor.
+    """
+    # |vals_i - grid_j| → (N,M)
+    d = torch.abs(vals.unsqueeze(1) - grid.unsqueeze(0))
+    return torch.argmin(d, dim=1)
+
+# 4) BUILD GRID & PARAMETERS
+# --- AR(1) parameters for a1, a2
+rho1, rho2 = 0.9, 0.8
+sigma1, sigma2 = 1.0, 1.0
+n_a1, n_a2 = 15, 15
+
+# Tauchen
+a1_grid, P1 = tauchen(n_a1, mu=0.0, rho=rho1, sigma=sigma1)
+a2_grid, P2 = tauchen(n_a2, mu=0.0, rho=rho2, sigma=sigma2)
+
+# price grid p
+p_min, p_max, n_p = -5.0, +5.0, 50
+p_grid = torch.linspace(p_min, p_max, n_p, device=device)
+
+# imbalance grids
+imb1_min, imb1_max, n_imb1 = -3.0, +3.0, 40
+imb2_min, imb2_max, n_imb2 = -3.0, +3.0, 40
+imb1_grid = torch.linspace(imb1_min, imb1_max, n_imb1, device=device)
+imb2_grid = torch.linspace(imb2_min, imb2_max, n_imb2, device=device)
+
+# action grid x
+x_min, x_max, n_x = -2.0, +2.0, 25
+x_grid = torch.linspace(x_min, x_max, n_x, device=device)
+
+# model constants
+phi1, phi2 = 0.7, 0.5
+tl = 0.1
+gamma = 0.95
+
+# DP tolerance & iterations
+tol = 1e-5
+max_iter = 500
+
+# 5) PRECOMPUTE NEXT‐STATE INDICES FOR p, imb1, imb2 FOR EACH ACTION
+#    These depend only on current p_i (or imb_i) and action x_j.
+
+# price next = p_i + x_j → nearest index in p_grid
+_p, _x = torch.meshgrid(p_grid, x_grid, indexing='ij')
+p_plus_x = (_p + _x).reshape(-1)    # (n_p*n_x)
+p_idx_flat = nearest_idx(p_plus_x, p_grid)
+p_idx = p_idx_flat.view(n_p, n_x)   # (n_p, n_x)
+
+# imb1 next = phi1*imb1 + (1-phi1)*x
+_i1, _x = torch.meshgrid(imb1_grid, x_grid, indexing='ij')
+imb1_next = (phi1*_i1 + (1-phi1)*_x).reshape(-1)
+i1_idx_flat = nearest_idx(imb1_next, imb1_grid)
+i1_idx = i1_idx_flat.view(n_imb1, n_x)  # (n_imb1, n_x)
+
+# imb2 next
+_i2, _x = torch.meshgrid(imb2_grid, x_grid, indexing='ij')
+imb2_next = (phi2*_i2 + (1-phi2)*_x).reshape(-1)
+i2_idx_flat = nearest_idx(imb2_next, imb2_grid)
+i2_idx = i2_idx_flat.view(n_imb2, n_x)  # (n_imb2, n_x)
+
+# 6) VALUE‐ITERATION
+# initialize
+V = torch.zeros(n_p, n_a1, n_a2, n_imb1, n_imb2, device=device)
+policy = torch.zeros_like(V)
+
+for it in range(max_iter):
+    V_new = torch.full_like(V, -1e30)   # will hold max over x
+    best_x = torch.zeros_like(V)
+
+    # broadcast helpers for indexing
+    # we'll build index arrays of shape (n_p, n_imb1, n_imb2) for each action
+    p_idx_b = p_idx.unsqueeze(1).unsqueeze(1)     # → (n_p, 1, 1, n_x)
+    i1_idx_b = i1_idx.unsqueeze(0).unsqueeze(2)   # → (1, n_imb1, 1, n_x)
+    i2_idx_b = i2_idx.unsqueeze(0).unsqueeze(1)   # → (1, 1, n_imb2, n_x)
+
+    # mesh for p, imb1, imb2
+    p_mesh   = _p           .to(device) # shape (n_p, n_x)
+    i1_mesh  = _i1          .to(device) # shape (n_imb1, n_x)
+    i2_mesh  = _i2          .to(device) # shape (n_imb2, n_x)
+
+    for j in range(n_x):
+        xj = x_grid[j]
+
+        # 6.1) immediate reward r(s,xj)
+        #    = (a1+a2)*(p+x) 
+        #      - 0.5*tl*(phi1*imb1+(1-phi1)*x + phi2*imb2+(1-phi2)*x)*x 
+        #      - 0.5*(p+x)**2
+        R = (
+            (a1_grid[None,:,None,None,None] + 
+             a2_grid[None,None,:,None,None])
+            * (p_grid[:,None,None,None,None] + xj)
+        )
+        cost = 0.5*tl*(
+            phi1*imb1_grid[None,None,None,:,None] +
+            (1-phi1)*xj +
+            phi2*imb2_grid[None,None,None,None,:] +
+            (1-phi2)*xj
+        ) * xj
+        penalty = 0.5*(p_grid[:,None,None,None,None] + xj)**2
+        r = R - cost - penalty
+
+        # 6.2) expected continuation value
+        #    first: gather V at next (p', a1', a2', imb1', imb2')
+        #    using advanced indexing:
+        idx_p = p_idx[:, j]               # (n_p,)
+        idx_i1 = i1_idx[:, j]             # (n_imb1,)
+        idx_i2 = i2_idx[:, j]             # (n_imb2,)
+
+        # build 3D broadcasted index arrays
+        ip = idx_p.view(n_p,1,1).expand(n_p,n_imb1,n_imb2)
+        ii1 = idx_i1.view(1,n_imb1,1).expand(n_p,n_imb1,n_imb2)
+        ii2 = idx_i2.view(1,1,n_imb2).expand(n_p,n_imb1,n_imb2)
+
+        # V_prev[ip, :, :, ii1, ii2] returns shape (n_p,n_imb1,n_imb2,n_a1,n_a2)
+        Vg = V[ip, :, :, ii1, ii2].permute(0,3,4,1,2)
+        # now Vg is (p_next, a1_next, a2_next, imb1_next, imb2_next)
+        # next: sum out a2'
+        tmp = torch.tensordot(Vg, P2, dims=([2],[1]))
+        # now tmp is (p,a1,a2_current,imb1,imb2)
+        tmp = tmp.permute(0,1,4,2,3)  # → (n_p, n_a1, n_a2, n_imb1, n_imb2)
+        # then sum out a1'
+        EV = torch.tensordot(tmp, P1, dims=([1],[1]))
+        # EV is now (n_p, n_a1_current, n_a2, n_imb1, n_imb2)
+        EV = EV.permute(0,4,1,2,3)  # reorder → (p,a1,a2,imb1,imb2)
+
+        # 6.3) Bellman RHS & max
+        Q = r + gamma*EV
+        better = Q > V_new
+        V_new = torch.where(better, Q, V_new)
+        best_x = torch.where(better, xj, best_x)
+
+    # convergence check
+    diff = torch.max(torch.abs(V_new - V))
+    V.copy_(V_new)
+    policy.copy_(best_x)
+    if diff < tol:
+        print(f"Converged in {it+1} iterations (Δ={diff:.2e})")
+        break
+else:
+    print(f"WARNING: did not converge after {max_iter} iters, Δ={diff:.2e}")
+
+# 7) SIMULATION
+@torch.no_grad()
+def simulate(T, 
+             policy, 
+             p_grid, a1_grid, a2_grid, imb1_grid, imb2_grid,
+             rho1, rho2):
+    """
+    Simulate one path of length T following the optimal policy.
+    Returns dict of tensors.
+    """
+    # pre‐allocate
+    p_path    = torch.zeros(T+1, device=device)
+    a1_path   = torch.zeros(T+1, device=device)
+    a2_path   = torch.zeros(T+1, device=device)
+    imb1_path = torch.zeros(T+1, device=device)
+    imb2_path = torch.zeros(T+1, device=device)
+    x_path    = torch.zeros(T,   device=device)
+
+    for t in range(T):
+        # find closest indices
+        i0 = nearest_idx(p_path[t].unsqueeze(0), p_grid)[0]
+        i1 = nearest_idx(a1_path[t].unsqueeze(0), a1_grid)[0]
+        i2 = nearest_idx(a2_path[t].unsqueeze(0), a2_grid)[0]
+        i3 = nearest_idx(imb1_path[t].unsqueeze(0), imb1_grid)[0]
+        i4 = nearest_idx(imb2_path[t].unsqueeze(0), imb2_grid)[0]
+
+        x = policy[i0,i1,i2,i3,i4]
+        x_path[t] = x
+
+        # evolve states
+        p_path[t+1]    = p_path[t]    + x
+        imb1_path[t+1] = phi1*imb1_path[t] + (1-phi1)*x
+        imb2_path[t+1] = phi2*imb2_path[t] + (1-phi2)*x
+        # AR(1) innovations
+        eps1 = torch.randn(1, device=device)
+        eps2 = torch.randn(1, device=device)
+        a1_path[t+1] = rho1*a1_path[t] + math.sqrt(1-rho1**2)*eps1
+        a2_path[t+1] = rho2*a2_path[t] + math.sqrt(1-rho2**2)*eps2
+
+    return dict(p=p_path, a1=a1_path, a2=a2_path, imb1=imb1_path, imb2=imb2_path, x=x_path)
+
+# run a quick sim
+sim = simulate(200, policy, p_grid, a1_grid, a2_grid, imb1_grid, imb2_grid, rho1, rho2)
+print("Sample of simulated x’s:", sim['x'][:10].cpu().numpy())
