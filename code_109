@@ -1,0 +1,107 @@
+import numpy as np
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+
+# --------------------------------------------------
+# 0) Prepare your data as NumPy arrays:
+# --------------------------------------------------
+# φ_all:      shape (N, d)  — your z-scored feature matrix
+# Q_raw_all:  shape (N,)    — your raw Bellman targets
+#
+# For example, if you have Torch tensors:
+# φ_all = features(states_all).cpu().numpy()
+# Q_raw_all = Q_raw_all_tensor.cpu().numpy()
+
+# --------------------------------------------------
+# 1) Split into train / test sets
+# --------------------------------------------------
+phi_train, phi_test, Q_train, Q_test = train_test_split(
+    φ_all, Q_raw_all, test_size=0.2, random_state=0
+)
+
+# --------------------------------------------------
+# 2) Choose RBF kernel γ by the median heuristic
+# --------------------------------------------------
+# Subsample up to M points to estimate pairwise distances
+M = min(2000, phi_train.shape[0])
+idx = np.random.choice(phi_train.shape[0], M, replace=False)
+phi_sub = phi_train[idx]  # (M, d)
+
+# Compute pairwise Euclidean distances and take the median
+dists = np.linalg.norm(
+    phi_sub[:, None, :] - phi_sub[None, :, :],
+    axis=-1
+)  # shape (M, M)
+median_dist = np.median(dists)
+gamma_rbf = 1.0 / (2 * (median_dist**2) + 1e-8)
+
+# --------------------------------------------------
+# 3) Train Kernel Ridge for the mean: μ(φ)
+# --------------------------------------------------
+alpha_mean = 1e-3  # regularization strength
+krr_mean = KernelRidge(kernel='rbf', gamma=gamma_rbf, alpha=alpha_mean)
+krr_mean.fit(phi_train, Q_train)
+
+# --------------------------------------------------
+# 4) Compute squared residuals on the training set
+# --------------------------------------------------
+# r_i = (Q_i - μ(φ_i))^2
+residuals_train = (Q_train - krr_mean.predict(phi_train))**2
+
+# --------------------------------------------------
+# 5) Train a second Kernel Ridge for the variance: σ²(φ)
+# --------------------------------------------------
+alpha_var = 1e-3  # you can tune separately from alpha_mean
+krr_var = KernelRidge(kernel='rbf', gamma=gamma_rbf, alpha=alpha_var)
+krr_var.fit(phi_train, residuals_train)
+
+# --------------------------------------------------
+# 6) Evaluation on the test set
+# --------------------------------------------------
+# Predict mean
+mu_pred = krr_mean.predict(phi_test)                # shape (n_test,)
+
+# Predict variance, clamp to ≥0, then take sqrt
+var_pred = krr_var.predict(phi_test)
+var_pred = np.maximum(var_pred, 0.0)
+sigma_pred = np.sqrt(var_pred)
+
+# Compute mean‐squared error for the mean predictor
+mse_mean = mean_squared_error(Q_test, mu_pred)
+
+# Compute Gaussian NLL on the test set:
+#   NLL = 0.5*[log(2πσ²) + (Q - μ)²/σ²]
+nll = 0.5 * np.mean(
+    np.log(2*np.pi*sigma_pred**2) + (Q_test - mu_pred)**2 / (sigma_pred**2 + 1e-8)
+)
+
+print(f"Test MSE (mean): {mse_mean:.6f}")
+print(f"Test NLL (mean+var): {nll:.6f}")
+
+# Optional: calibration metrics
+for k in (1, 2, 3):
+    frac = np.mean(np.abs(Q_test - mu_pred) <= k * sigma_pred)
+    print(f"Fraction within ±{k}σ: {frac:.3f}")
+
+# --------------------------------------------------
+# 7) Save your trained models for later use
+# --------------------------------------------------
+import joblib
+joblib.dump(krr_mean, 'krr_mean.pkl')
+joblib.dump(krr_var,  'krr_var.pkl')
+
+# --------------------------------------------------
+# 8) Inference on brand‐new data φ_new (shape (m, d))
+# --------------------------------------------------
+# Load models:
+# krr_mean = joblib.load('krr_mean.pkl')
+# krr_var  = joblib.load('krr_var.pkl')
+
+# φ_new = ... your new features as an (m, d) NumPy array
+mu_new    = krr_mean.predict(phi_new)
+var_new   = krr_var.predict(phi_new)
+var_new   = np.maximum(var_new, 0.0)
+sigma_new = np.sqrt(var_new)
+
+# Now (mu_new, sigma_new) give your local mean & std estimates.
