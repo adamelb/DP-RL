@@ -1,0 +1,83 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# 1) Prepare your data (as before):
+#    phi_all:  (N, d)  z-scored inputs
+#    Q_raw_all:(N,)    raw Bellman targets
+#    DEVICE, n_epochs, batch_size, lr all defined
+
+dataset = torch.utils.data.TensorDataset(phi_all, Q_raw_all.unsqueeze(1))
+loader  = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+# 2) Define a small heteroskedastic net:
+class MeanVarNet(nn.Module):
+    def __init__(self, d, hidden=64):
+        super().__init__()
+        self.shared = nn.Sequential(
+            nn.Linear(d, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+        )
+        # two “heads”
+        self.mu_head  = nn.Linear(hidden, 1)
+        self.logvar_head = nn.Linear(hidden, 1)
+
+    def forward(self, phi):
+        h = self.shared(phi)
+        mu      = self.mu_head(h)           # E[Q|φ]
+        log_var = self.logvar_head(h)       # log Var[Q|φ]
+        sigma   = torch.exp(0.5 * log_var)  # std = exp(½ logvar)
+        return mu, sigma
+
+model_mv = MeanVarNet(d=phi_all.shape[1]).to(DEVICE)
+opt_mv   = optim.Adam(model_mv.parameters(), lr=lr)
+
+# 3) Train by Gaussian negative log-likelihood:
+#    NLL = ½[(Q - μ)²/σ² + logσ²]  (up to const)
+for epoch in range(n_epochs):
+    total_nll = 0.0
+    for phi_batch, Q_batch in loader:
+        phi_batch = phi_batch.to(DEVICE)
+        Q_batch   = Q_batch.to(DEVICE)
+
+        mu, sigma = model_mv(phi_batch)
+        var = sigma**2
+        # element-wise NLL
+        nll = 0.5 * ((Q_batch - mu).pow(2)/var + torch.log(var))
+        loss = nll.mean()
+
+        opt_mv.zero_grad()
+        loss.backward()
+        opt_mv.step()
+
+        total_nll += loss.item() * phi_batch.size(0)
+    print(f"Epoch {epoch:2d} | NLL {total_nll/len(dataset):.6f}")
+
+# 4) Now you have a compact φ→(μ,σ) model.
+#    At value–iteration time, instead of doing kernels:
+#      μ_loc, σ_loc = compute_mu_sigma(phi_batch,…)
+#    you simply run:
+#      mu, sigma = model_mv(phi_batch)
+#
+# 5) To normalize targets and train your value‐network V_net:
+#    Q_norm = (Q_raw - mu) / sigma
+#    then fit V_net(phi) ≈ Q_norm with MSE (or Huber).
+#
+# 6) Save & Reload both networks:
+torch.save({
+    'mv_state': model_mv.state_dict(),
+    'V_state':  V_net.state_dict(),
+}, 'two_net_checkpoint.pth')
+
+# 7) Inference:
+ckpt = torch.load('two_net_checkpoint.pth', map_location=DEVICE)
+model_mv.load_state_dict(ckpt['mv_state'])
+V_net.load_state_dict(ckpt['V_state'])
+model_mv.eval(); V_net.eval()
+
+phi_new = ((features(s_new) - feat_mean) / feat_std).to(DEVICE)
+with torch.no_grad():
+    mu, sigma = model_mv(phi_new.unsqueeze(0))
+    q_norm    = V_net(phi_new.unsqueeze(0))
+    q_real    = q_norm * sigma + mu
+    print("Pred Q:", q_real.item())
