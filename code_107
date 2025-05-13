@@ -1,0 +1,173 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+
+# ----------------------------------------------------------------------------
+# 0) Assumed pre‐set variables, replace these with your actual data & models
+# ----------------------------------------------------------------------------
+# states_all, next_states_all: (N, state_dim) tensors
+# rewards_all:                (N,) tensor
+# features(state) → raw feature vector (state_dim → input_dim)
+# feat_mean, feat_std:        (input_dim,) tensors for input z-score
+# target_model:               frozen nn.Module giving V(s)
+# DEVICE, gamma, n_epochs, batch_size as before
+
+# ----------------------------------------------------------------------------
+# 1) Precompute φ_i and raw targets Q_i
+# ----------------------------------------------------------------------------
+phi_all = (features(states_all) - feat_mean) / feat_std  # (N, d)
+phi_all_t = phi_all.to(DEVICE)
+
+with torch.no_grad():
+    phi_next  = (features(next_states_all) - feat_mean) / feat_std
+    Q_next    = target_model(phi_next.to(DEVICE)).cpu()   # (N,)
+Q_raw_all = (rewards_all + gamma * Q_next).to(DEVICE)    # (N,)
+
+# ----------------------------------------------------------------------------
+# 2) Compute global fallback stats μ_glob, σ_glob (or median/MAD)
+# ----------------------------------------------------------------------------
+mu_glob   = Q_raw_all.mean()
+sigma_glob= Q_raw_all.std().clamp(min=1e-6)
+
+# ----------------------------------------------------------------------------
+# 3) Choose bandwidth h via median heuristic
+# ----------------------------------------------------------------------------
+M = min(2000, phi_all_t.size(0))
+idx = torch.randperm(phi_all_t.size(0))[:M]
+phi_sub = phi_all_t[idx]                            # (M, d)
+d2 = torch.cdist(phi_sub, phi_sub).pow(2)            # (M, M)
+h = torch.sqrt(d2.median())                         # scalar bandwidth
+
+# ----------------------------------------------------------------------------
+# 4) Kernel + blending helpers
+# ----------------------------------------------------------------------------
+lambda_reg = 1.0  # fallback strength; tune via CV
+
+def compute_locals(phi_batch, phi_ref, Q_ref, h):
+    """
+    Compute local weighted mean & std and the density sum for blending.
+    Returns (mu_loc, sigma_loc, density) all shape (B,1).
+    """
+    # pairwise squared distances (B,N)
+    d2 = torch.cdist(phi_batch, phi_ref).pow(2)
+    # Gaussian RBF
+    W  = torch.exp(-d2 / (2*h*h))               # (B,N)
+    den= W.sum(dim=1, keepdim=True)             # density (B,1)
+
+    # local mean
+    mu_loc    = (W @ Q_ref.view(-1,1)) / (den + 1e-6)
+    # local variance
+    diff      = Q_ref.view(1,-1) - mu_loc       # (B,N)
+    var_loc   = (W * diff.pow(2)).sum(dim=1,keepdim=True) / (den + 1e-6)
+    sigma_loc = torch.sqrt(var_loc + 1e-6)
+
+    return mu_loc, sigma_loc, den
+
+def compute_mu_sigma(phi_batch):
+    """
+    Full blended μ,σ for a batch of φ.
+    """
+    mu_loc, sigma_loc, density = compute_locals(phi_batch, phi_all_t, Q_raw_all, h)
+    # blending weight w ∈ [0,1]
+    w = density / (density + lambda_reg)
+    # final mix
+    mu    = w*mu_loc    + (1-w)*mu_glob
+    sigma = w*sigma_loc + (1-w)*sigma_glob
+    return mu, sigma
+
+# ----------------------------------------------------------------------------
+# 5) Build DataLoader & regression model fθ
+# ----------------------------------------------------------------------------
+dataset = TensorDataset(phi_all.cpu(), Q_raw_all.cpu())
+loader  = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+input_dim = phi_all.size(1)
+model = nn.Sequential(
+    nn.Linear(input_dim,256), nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256,256), nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256,256), nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256,  1)
+).to(DEVICE)
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
+
+# ----------------------------------------------------------------------------
+# 6) Training loop on blended normalization
+# ----------------------------------------------------------------------------
+for epoch in range(1, n_epochs+1):
+    model.train()
+    total_loss = 0.0
+
+    for phi_cpu, Q_cpu in loader:
+        phi = phi_cpu.to(DEVICE)                      # (B,d)
+        Qr  = Q_cpu.to(DEVICE).view(-1,1)             # (B,1)
+
+        # get blended μ(φ), σ(φ)
+        mu, sigma = compute_mu_sigma(phi)             # (B,1),(B,1)
+
+        # normalize target
+        Qn = (Qr - mu) / sigma                        # (B,1)
+
+        # predict normalized Q
+        Qp = model(phi)                               # (B,1)
+        loss = F.mse_loss(Qp, Qn)
+        total_loss += loss.item() * phi.size(0)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    print(f"Epoch {epoch:2d} | Loss {total_loss/len(loader.dataset):.6f}")
+
+# ----------------------------------------------------------------------------
+# 7) Save everything for later
+# ----------------------------------------------------------------------------
+torch.save({
+    'model_state': model.state_dict(),
+    'phi_ref':     phi_all.cpu(), 
+    'Q_ref':       Q_raw_all.cpu(),
+    'h':           h.cpu().item(),
+    'lambda':      lambda_reg,
+    'mu_glob':     mu_glob.cpu(),
+    'sigma_glob':  sigma_glob.cpu(),
+    'feat_mean':   feat_mean,
+    'feat_std':    feat_std,
+}, 'blended_kernel_norm.pth')
+
+# ----------------------------------------------------------------------------
+# 8) Inference: load & predict on a new state
+# ----------------------------------------------------------------------------
+ckpt = torch.load('blended_kernel_norm.pth', map_location=DEVICE)
+model.load_state_dict(ckpt['model_state'])
+phi_ref    = ckpt['phi_ref'].to(DEVICE)
+Q_ref      = ckpt['Q_ref'].to(DEVICE)
+h_val      = torch.tensor(ckpt['h'], device=DEVICE)
+lambda_val = ckpt['lambda']
+mu_glob    = ckpt['mu_glob'].to(DEVICE)
+sigma_glob = ckpt['sigma_glob'].to(DEVICE)
+
+model.eval()
+with torch.no_grad():
+    # new state
+    phi_new = (features(s_new) - feat_mean) / feat_std
+    phi_new = phi_new.unsqueeze(0).to(DEVICE)
+
+    # recompute μ_loc,σ_loc,density with stored phi_ref,Q_ref,h_val
+    def compute_locals_new(phi_b):
+        d2   = torch.cdist(phi_b, phi_ref).pow(2)
+        W    = torch.exp(-d2 / (2*h_val*h_val))
+        den  = W.sum(dim=1, keepdim=True)
+        mu_l = (W @ Q_ref.view(-1,1)) / (den + 1e-6)
+        diff = Q_ref.view(1,-1) - mu_l
+        var_l= (W * diff.pow(2)).sum(dim=1,keepdim=True) / (den+1e-6)
+        return mu_l, torch.sqrt(var_l+1e-6), den
+
+    mu_l, sigma_l, den = compute_locals_new(phi_new)
+    w    = den / (den + lambda_val)
+    mu_n = w*mu_l + (1-w)*mu_glob
+    sig_n= w*sigma_l + (1-w)*sigma_glob
+
+    Qn   = model(phi_new)
+    Qreal= Qn*sig_n + mu_n
+    print("Predicted Q:", Qreal.item())
