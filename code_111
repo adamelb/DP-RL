@@ -1,0 +1,92 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+
+# 1) Define a Gaussian-output neural net that predicts mean and log-variance
+class GaussianNN(nn.Module):
+    def __init__(self, input_dim, hidden_dim=256):
+        super().__init__()
+        # shared layers
+        self.shared = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.4),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.4)
+        )
+        # head for the mean μ(φ)
+        self.mean_head    = nn.Linear(hidden_dim, 1)
+        # head for the log-variance ℓ(φ)=log σ²(φ)
+        self.log_var_head = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x):
+        h = self.shared(x)
+        mu      = self.mean_head(h)      # shape (B,1)
+        log_var = self.log_var_head(h)   # shape (B,1)
+        return mu, log_var
+
+# 2) Gaussian negative-log-likelihood loss
+def gaussian_nll_loss(mu, log_var, y_true):
+    """
+    ½[(y-mu)²/σ² + log σ²], averaged over batch
+    with σ² = exp(log_var).
+    """
+    inv_var = torch.exp(-log_var)            # = 1/σ²
+    se_term  = 0.5 * (y_true - mu).pow(2) * inv_var
+    reg_term = 0.5 * log_var
+    return (se_term + reg_term).mean()
+
+# 3) Prepare data loader
+# φ_all: torch.Tensor of shape (N, d) — your normalized features
+# Q_raw_all: torch.Tensor of shape (N,) — your raw targets
+batch_size = 64
+dataset = TensorDataset(φ_all, Q_raw_all.unsqueeze(1))
+loader  = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+# 4) Instantiate model & optimizer
+DEVICE     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+input_dim  = φ_all.size(1)
+model      = GaussianNN(input_dim).to(DEVICE)
+optimizer  = optim.Adam(model.parameters(), lr=1e-4)
+n_epochs   = 10
+
+# 5) Training loop
+for epoch in range(1, n_epochs+1):
+    model.train()
+    total_loss = 0.0
+    for phi_batch, Q_batch in loader:
+        phi = phi_batch.to(DEVICE)
+        y   = Q_batch.to(DEVICE)
+
+        # forward pass
+        mu, log_var = model(phi)
+
+        # compute NLL loss
+        loss = gaussian_nll_loss(mu, log_var, y)
+
+        # backpropagation
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * phi.size(0)
+
+    avg_loss = total_loss / len(loader.dataset)
+    print(f"Epoch {epoch:2d} | Avg NLL Loss: {avg_loss:.6f}")
+
+# 6) Inference on new data
+model.eval()
+with torch.no_grad():
+    # φ_new: torch.Tensor shape (M, d) of new normalized features
+    mu_pred, log_var_pred = model(φ_new.to(DEVICE))
+    var_pred   = torch.exp(log_var_pred)
+    sigma_pred = torch.sqrt(var_pred)
+
+    # Flatten to 1D arrays if needed
+    mu_pred    = mu_pred.squeeze(1).cpu().numpy()
+    sigma_pred = sigma_pred.squeeze(1).cpu().numpy()
+
+    print("Predicted means:", mu_pred)
+    print("Predicted stds:",  sigma_pred)
