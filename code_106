@@ -1,0 +1,174 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+
+# ------------------------------------------------------------------
+# 1) Configuration & placeholders — replace these with your real data
+# ------------------------------------------------------------------
+# states_all:       torch.Tensor shape (N, state_dim)
+# next_states_all:  torch.Tensor shape (N, state_dim)
+# rewards_all:      torch.Tensor shape (N,)
+# features(state):  function mapping states to raw feature vectors (state_dim → input_dim)
+# feat_mean, feat_std: torch.Tensor of shape (input_dim,) for input z-scoring
+# target_model:     frozen nn.Module implementing V(s)
+# DEVICE:           e.g. torch.device('cuda') or 'cpu'
+# gamma:            discount factor, e.g. 0.99
+# n_epochs:         number of training epochs, e.g. 10
+# batch_size:       e.g. 64
+
+# Example (uncomment and set appropriately in your script):
+# DEVICE         = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# input_dim      = 9  # your feature vector size
+# gamma          = 0.99
+# n_epochs       = 10
+# batch_size     = 64
+
+# ------------------------------------------------------------------
+# 2) Precompute normalized features φ_i and raw Bellman targets Q_i
+# ------------------------------------------------------------------
+# 2.1 Normalize all feature vectors once:
+phi_all = (features(states_all) - feat_mean) / feat_std      # shape (N, input_dim)
+phi_all_t = phi_all.to(DEVICE)                               # move to GPU/CPU
+
+# 2.2 Compute raw Bellman targets: Q_i = r_i + γ ⋅ V_target(s_i')
+with torch.no_grad():
+    phi_next = (features(next_states_all) - feat_mean) / feat_std
+    phi_next_t = phi_next.to(DEVICE)
+    Q_next = target_model(phi_next_t).cpu()                   # shape (N,)
+Q_raw_all = (rewards_all + gamma * Q_next).to(DEVICE)        # shape (N,)
+
+# ------------------------------------------------------------------
+# 3) Select RBF bandwidth h via the median heuristic
+# ------------------------------------------------------------------
+# Subsample M points (to limit cost of pairwise distances)
+M = min(2000, phi_all_t.shape[0])
+idx = torch.randperm(phi_all_t.shape[0])[:M]
+phi_sub = phi_all_t[idx]                                      # shape (M, input_dim)
+
+# Compute M×M pairwise Euclidean distances
+dists = torch.cdist(phi_sub, phi_sub, p=2)                   # shape (M, M)
+h = torch.median(dists)                                      # scalar bandwidth
+
+# ------------------------------------------------------------------
+# 4) Define function to compute local μ(φ), σ(φ) via Gaussian kernel
+# ------------------------------------------------------------------
+def compute_mu_sigma(phi_batch, phi_ref, Q_ref, h):
+    """
+    Given:
+      phi_batch: (B, d) normalized features for a minibatch
+      phi_ref:   (N, d) all reference features
+      Q_ref:     (N,)   raw targets for those references
+      h:         scalar bandwidth
+    Returns:
+      mu:    (B, 1) weighted local mean of Q_ref
+      sigma: (B, 1) weighted local std  of Q_ref
+    """
+    # 1) squared distances: (B, N)
+    d2 = torch.cdist(phi_batch, phi_ref, p=2).pow(2)
+
+    # 2) Gaussian RBF weights: w_ij = exp(−d2_ij / (2 h^2))
+    W = torch.exp(-d2 / (2 * h * h))                         # (B, N)
+    Wsum = W.sum(dim=1, keepdim=True)                        # (B, 1)
+
+    # 3) weighted mean: μ = (W @ Q_ref) / sum(W)
+    mu = (W @ Q_ref.view(-1, 1)) / (Wsum + 1e-6)              # (B, 1)
+
+    # 4) weighted variance: E[(Q - μ)^2]
+    diff = Q_ref.view(1, -1) - mu                             # (B, N)
+    var = (W * diff.pow(2)).sum(dim=1, keepdim=True) / (Wsum + 1e-6)
+    sigma = torch.sqrt(var + 1e-6)                            # (B, 1)
+
+    return mu, sigma
+
+# ------------------------------------------------------------------
+# 5) Build DataLoader for training
+# ------------------------------------------------------------------
+dataset = TensorDataset(phi_all.cpu(), Q_raw_all.cpu())      # CPU tensors for loader
+loader  = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+# ------------------------------------------------------------------
+# 6) Define your regressor network fθ predicting normalized Q
+# ------------------------------------------------------------------
+model = nn.Sequential(
+    nn.Linear(phi_all.shape[1], 256),
+    nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256, 256),
+    nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256, 256),
+    nn.ReLU(), nn.Dropout(0.4),
+    nn.Linear(256,   1)
+).to(DEVICE)
+
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
+
+# ------------------------------------------------------------------
+# 7) Training loop: fit fθ(φ) ≈ (Q_raw - μ(φ)) / σ(φ)
+# ------------------------------------------------------------------
+for epoch in range(1, n_epochs + 1):
+    model.train()
+    running_loss = 0.0
+
+    for phi_batch_cpu, Q_raw_batch_cpu in loader:
+        # Move to DEVICE
+        phi_batch   = phi_batch_cpu.to(DEVICE)
+        Q_raw_batch = Q_raw_batch_cpu.to(DEVICE).view(-1, 1)
+
+        # Compute local normalization constants
+        mu_b, sigma_b = compute_mu_sigma(phi_batch, phi_all_t, Q_raw_all, h)
+
+        # Normalize targets
+        Q_norm = (Q_raw_batch - mu_b) / sigma_b
+
+        # Predict normalized Q
+        Q_pred_norm = model(phi_batch)
+
+        # Compute MSE loss on normalized space
+        loss = F.mse_loss(Q_pred_norm, Q_norm)
+        running_loss += loss.item() * phi_batch.size(0)
+
+        # Backpropagate
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    avg_loss = running_loss / len(loader.dataset)
+    print(f"Epoch {epoch:2d} | Avg Train Loss: {avg_loss:.6f}")
+
+# ------------------------------------------------------------------
+# 8) Save model and kernel references for later evaluation
+# ------------------------------------------------------------------
+torch.save({
+    'model_state': model.state_dict(),
+    'phi_ref':      phi_all.cpu(),    # reference features
+    'Q_ref':        Q_raw_all.cpu(),  # reference raw targets
+    'h':            h.cpu().item(),   # bandwidth scalar
+    'feat_mean':    feat_mean,        # for input z-scoring
+    'feat_std':     feat_std,
+}, 'kernel_norm_value_model.pth')
+
+# ------------------------------------------------------------------
+# 9) Inference example after loading
+# ------------------------------------------------------------------
+ckpt = torch.load('kernel_norm_value_model.pth', map_location=DEVICE)
+model.load_state_dict(ckpt['model_state'])
+phi_ref = ckpt['phi_ref'].to(DEVICE)
+Q_ref   = ckpt['Q_ref'].to(DEVICE)
+h_val   = torch.tensor(ckpt['h'], device=DEVICE)
+feat_mean = ckpt['feat_mean'].to(DEVICE)
+feat_std  = ckpt['feat_std'].to(DEVICE)
+
+model.eval()
+with torch.no_grad():
+    # Given a new state `s_new`
+    phi_new = (features(s_new) - feat_mean) / feat_std    # (input_dim,)
+    phi_new = phi_new.unsqueeze(0).to(DEVICE)             # (1, input_dim)
+
+    # Compute local μ and σ for this new point
+    mu_n, sigma_n = compute_mu_sigma(phi_new, phi_ref, Q_ref, h_val)
+
+    # Predict normalized Q and de-normalize
+    Q_norm_pred = model(phi_new)                         # (1,1)
+    Q_real_pred = Q_norm_pred * sigma_n + mu_n          # (1,1)
+    print("Predicted Q(s_new):", Q_real_pred.item())
