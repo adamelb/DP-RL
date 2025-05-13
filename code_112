@@ -1,0 +1,63 @@
+import torch
+import torch.nn as nn
+
+# ------------------------------------------------------------------
+# Dummy normalization model for iteration 0: μ=0, σ=1 everywhere
+# ------------------------------------------------------------------
+class ConstantGaussian(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        """
+        x:  (B, d) input features (ignored)
+        returns:
+          mu      of shape (B,1) all zeros
+          log_var of shape (B,1) all zeros  → σ²=exp(log_var)=1
+        """
+        B = x.size(0)
+        device = x.device
+        mu      = torch.zeros(B, 1, device=device)
+        log_var = torch.zeros(B, 1, device=device)
+        return mu, log_var
+
+
+# ------------------------------------------------------------------
+# Example usage in your training loop
+# ------------------------------------------------------------------
+
+# 0) At the very start, before you have any data‐driven model:
+norm_model = ConstantGaussian().to(DEVICE)
+
+# 1) Training loop for iteration 0
+for epoch in range(1, n_epochs+1):
+    norm_model.eval()   # it's constant, no training
+    V_net.train()       # your value‐network that fits normalized targets
+    for phi_batch, Q_raw_batch in loader:
+        phi = phi_batch.to(DEVICE)
+        Qr  = Q_raw_batch.unsqueeze(1).to(DEVICE)
+
+        # 1.1 Get μ=0, σ=1
+        with torch.no_grad():
+            mu0, log_var0 = norm_model(phi)
+            sigma0 = torch.exp(0.5 * log_var0)  # =1
+
+        # 1.2 Normalize (Q−μ)/σ = Q
+        Q_norm = (Qr - mu0) / sigma0  # since mu0=0, sigma0=1 it's just Qr
+
+        # 1.3 Fit your value‐network V_net on Q_norm
+        Q_pred_norm = V_net(phi)
+        loss = F.mse_loss(Q_pred_norm, Q_norm)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    print(f"[Iter 0 | Epoch {epoch}] loss={loss.item():.4f}")
+
+# 2) After iteration 0, replace norm_model with your learned
+#    GaussianNN or MDN (whichever predicts μ, log_var):
+norm_model = GaussianNN(input_dim).to(DEVICE)
+# load or train it here…
+
+# 3) Then in iteration 1+ you use exactly the same loop,
+#    but norm_model now gives data-driven μ(φ),σ(φ).
