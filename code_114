@@ -1,0 +1,64 @@
+import math, torch
+
+# ------------------------------------------------------------
+# Helper: U-shaped sampler (symmetric, more mass at 0 and 1)
+# ------------------------------------------------------------
+def ends_heavy(
+        n: int,
+        vmin: float,
+        vmax: float,
+        *,
+        device,
+        alpha: float = 0.4,      # α < 1  ⇒  more weight at both ends
+        log_scale: bool = False  # if True, symmetry is in log-space
+    ):
+    """
+    Return `n` samples in [vmin, vmax] with a U-shaped density:
+    -   Equal weight near vmin and vmax.
+    -   Few points in the centre.
+    
+    The density shape is controlled by `alpha`:
+        α = 1   ➜ flat (uniform)
+        α ↓     ➜ stronger peaks at both ends.
+    """
+    # 1. draw from Beta(α, α), which is symmetric & U-shaped for α < 1
+    u = torch.distributions.Beta(alpha, alpha).sample((n,)).to(device)
+
+    # 2. map to the target interval
+    if log_scale:
+        log_min, log_max = math.log(vmin), math.log(vmax)
+        return torch.exp(log_min + u * (log_max - log_min))
+    else:
+        return vmin + u * (vmax - vmin)
+
+# ------------------------------------------------------------
+# Main sampler
+# ------------------------------------------------------------
+def resample_dataset(
+        n=N_DATASET,
+        *,
+        device=DEVICE,
+        edge_alpha: float = 0.4,   # knob for “how spiky” the ends are
+        log_edges: bool = True     # True ⇒ symmetry in log-space
+    ):
+    # --- existing draws, typo-fixed ---------------------------------
+    imbalance1 = torch.rand(n, device=device) * 0.5
+    imbalance2 = torch.randn(n, device=device) * 0.5
+
+    p       = torch.rand(n, device=device)
+    alpha1  = torch.rand(n, device=device)
+    alpha2  = torch.rand(n, device=device)
+
+    # --- NEW: symmetric, ends-heavy draws for c and tl ---------------
+    c  = ends_heavy(n, CMIN,  CMAX,  device=device,
+                    alpha=edge_alpha, log_scale=log_edges)
+    tl = ends_heavy(n, tIMIN, tIMAX, device=device,
+                    alpha=edge_alpha, log_scale=log_edges)
+
+    # --- rest exactly as before --------------------------------------
+    rho1 = torch.rand(n, device=device) * (a1RHO_MAX - a1RHO_MIN) + a1RHO_MIN
+    rho2 = torch.rand(n, device=device) * (a2RHO_MAX - a2RHO_MIN) + a2RHO_MIN
+
+    return torch.stack(
+        [p, alpha1, alpha2, c, tl, rho1, rho2, imbalance1, imbalance2], dim=-1
+    )
