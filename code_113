@@ -1,0 +1,16 @@
+import torch
+
+# Example tensor of shape (180, 25)
+tensor = torch.randn(180, 25)  # Replace this with your actual tensor
+
+# Condition: 1st value between -2 and 2, and 24th value between -3 and 3
+condition = (tensor[:, 0] >= -2) & (tensor[:, 0] <= 2) & \
+            (tensor[:, 23] >= -3) & (tensor[:, 23] <= 3)
+
+# Get indices where condition is True
+matching_indices = torch.nonzero(condition, as_tuple=False).squeeze()
+
+# Convert to Python list if needed
+index_list = matching_indices.tolist()
+
+print("Matching indices:", index_list)
