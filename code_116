@@ -1,0 +1,131 @@
+import torch
+import numpy as np
+
+# --------------------------------------------------------
+# 1) Assume you have torch tensors:
+#    features: shape (N, 4) for [c, tℓ, ρ1, ρ2]
+#    targets:  shape (N,)   for your Q values
+# --------------------------------------------------------
+# If they’re on GPU, move to CPU first:
+features_t = features.cpu()  # (N,4)
+targets_t  = targets.cpu()   # (N,)
+
+# Convert to NumPy for binning & grid ops
+feat_np   = features_t.numpy()  # (N,4)
+target_np = targets_t.numpy()   # (N,)
+
+# --------------------------------------------------------
+# 2) Define 10 uniform bins per dimension over the data range
+# --------------------------------------------------------
+n_bins = 10
+mins = feat_np.min(axis=0)   # (4,)
+maxs = feat_np.max(axis=0)   # (4,)
+
+# Build bin edges: n_bins+1 edges from min to max
+bin_edges = [np.linspace(mins[d], maxs[d], n_bins+1) for d in range(4)]
+
+# --------------------------------------------------------
+# 3) Digitize each sample into its bin indices (0 to n_bins-1)
+# --------------------------------------------------------
+# idx[d] is an array of length N with bin index along dim d
+idx = []
+for d in range(4):
+    # np.digitize gives 1..n_bins, subtract 1 → 0..n_bins-1
+    i = np.digitize(feat_np[:, d], bin_edges[d]) - 1
+    # clip to valid range
+    i = np.clip(i, 0, n_bins-1)
+    idx.append(i)
+idx = np.stack(idx, axis=1)  # shape (N,4)
+
+# --------------------------------------------------------
+# 4) Accumulate sum, sum of squares, and counts in a 4D grid
+# --------------------------------------------------------
+grid_shape = (n_bins, n_bins, n_bins, n_bins)
+sum_grid    = np.zeros(grid_shape, dtype=np.float64)
+sum_sq_grid = np.zeros(grid_shape, dtype=np.float64)
+count_grid  = np.zeros(grid_shape, dtype=np.int32)
+
+# Loop over data once
+for (i0, i1, i2, i3), q in zip(idx, target_np):
+    sum_grid   [i0, i1, i2, i3] += q
+    sum_sq_grid[i0, i1, i2, i3] += q*q
+    count_grid [i0, i1, i2, i3] += 1
+
+# --------------------------------------------------------
+# 5) Compute per-bin mean and std (avoiding div by zero)
+# --------------------------------------------------------
+mean_grid = np.zeros_like(sum_grid)
+std_grid  = np.zeros_like(sum_grid)
+
+nonzero = count_grid > 0
+# mean = sum / count
+mean_grid[nonzero] = sum_grid[nonzero] / count_grid[nonzero]
+# var = (sum_sq / count) - mean^2
+var = np.zeros_like(sum_grid)
+var[nonzero] = sum_sq_grid[nonzero] / count_grid[nonzero] - mean_grid[nonzero]**2
+# std = sqrt(max(var, 0))
+std_grid[nonzero] = np.sqrt(np.maximum(var[nonzero], 0.0))
+
+# --------------------------------------------------------
+# 6) Define interpolation function over the 4D grid
+# --------------------------------------------------------
+def get_mean_std(query):
+    """
+    query: (M,4) array of [c, tℓ, ρ1, ρ2] values
+    returns:
+      means: (M,) array
+      stds:  (M,) array
+    """
+    q = np.asarray(query, dtype=np.float64)  # (M,4)
+    M = q.shape[0]
+
+    # 6.1) Compute fractional bin coords u in [0, n_bins-1]
+    u = (q - mins) / (maxs - mins) * (n_bins - 1)
+    u = np.clip(u, 0, n_bins-1)  # (M,4)
+
+    # 6.2) floor & weight along each dim
+    f = np.floor(u).astype(int)  # (M,4)
+    w = u - f                    # (M,4)
+
+    means = np.zeros(M, dtype=np.float64)
+    stds  = np.zeros(M, dtype=np.float64)
+
+    # 6.3) Iterate over the 2^4 = 16 corners of each hypercube
+    # Each corner is a binary mask of which dims use f vs. f+1
+    for mask in range(16):
+        # mask bits represent which dim to take f+1
+        # build corner indices and weights
+        idxs = np.empty_like(f)
+        weight = np.ones(M, dtype=np.float64)
+
+        for d in range(4):
+            if (mask >> d) & 1:
+                # use upper corner f+1, weight w[...,d]
+                idxs[:, d] = np.minimum(f[:, d] + 1, n_bins - 1)
+                weight    *= w[:, d]
+            else:
+                # use lower corner f, weight (1 - w[...,d])
+                idxs[:, d] = f[:, d]
+                weight    *= (1.0 - w[:, d])
+
+        # gather mean/std at these corner bins
+        m_corner = mean_grid[idxs[:,0], idxs[:,1], idxs[:,2], idxs[:,3]]
+        s_corner = std_grid [idxs[:,0], idxs[:,1], idxs[:,2], idxs[:,3]]
+
+        means += weight * m_corner
+        stds  += weight * s_corner
+
+    return means, stds
+
+# --------------------------------------------------------
+# 7) Example usage
+# --------------------------------------------------------
+# Pick some new points in torch, move to CPU numpy
+new_feats_t = torch.tensor([[c_val, tl_val, r1_val, r2_val],
+                            [ ... ],
+                            ], dtype=torch.float32)
+new_np = new_feats_t.cpu().numpy()  # (M,4)
+
+mean_vals, std_vals = get_mean_std(new_np)
+print("Predicted means:", mean_vals)
+print("Predicted stds:",  std_vals)
