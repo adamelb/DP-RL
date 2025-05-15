@@ -1,0 +1,141 @@
+import torch
+import numpy as np
+from torch.utils.data import TensorDataset, DataLoader
+import torch.nn as nn
+import torch.optim as optim
+
+# --------------------------------------------------------
+# 1) Assume you have NumPy arrays:
+#    features_np: shape (N,4) with columns [c, t_l, rho1, rho2]
+#    targets_np:  shape (N,)  with your raw target values
+# --------------------------------------------------------
+
+# --------------------------------------------------------
+# 2) Define 10 bins per dimension and compute per-bin stats
+# --------------------------------------------------------
+n_bins = 10
+mins = features_np.min(axis=0)   # (4,)
+maxs = features_np.max(axis=0)   # (4,)
+
+# Create bin edges and bin centers for each feature
+bin_edges   = [np.linspace(mins[d], maxs[d], n_bins+1) for d in range(4)]
+bin_centers = [(edges[:-1] + edges[1:]) / 2.0 for edges in bin_edges]
+
+# Digitize each sample into its 4D bin index (0..n_bins-1)
+indices = np.stack([
+    np.clip(np.digitize(features_np[:,d], bin_edges[d]) - 1, 0, n_bins-1)
+    for d in range(4)
+], axis=1)  # shape (N,4)
+
+# Initialize accumulation grids
+shape       = (n_bins,)*4
+sum_grid    = np.zeros(shape, dtype=np.float64)
+sum_sq_grid = np.zeros(shape, dtype=np.float64)
+count_grid  = np.zeros(shape, dtype=np.int32)
+
+# Accumulate sums, sums of squares, and counts
+for idx, q in zip(indices, targets_np):
+    i0,i1,i2,i3 = idx
+    sum_grid   [i0,i1,i2,i3] += q
+    sum_sq_grid[i0,i1,i2,i3] += q*q
+    count_grid [i0,i1,i2,i3] += 1
+
+# Compute per-bin mean and std
+mean_grid = np.zeros_like(sum_grid)
+std_grid  = np.zeros_like(sum_grid)
+mask = count_grid > 0
+mean_grid[mask] = sum_grid[mask] / count_grid[mask]
+var_grid = np.zeros_like(sum_grid)
+var_grid[mask] = sum_sq_grid[mask] / count_grid[mask] - mean_grid[mask]**2
+std_grid[mask] = np.sqrt(np.maximum(var_grid[mask], 0.0))
+
+# --------------------------------------------------------
+# 3) Build dataset of bin-centers and corresponding stats
+# --------------------------------------------------------
+# Create all bin-center coordinate combos: shape (n_bins^4, 4)
+coords = np.array(np.meshgrid(*bin_centers, indexing='ij')).reshape(4, -1).T
+mean_vals = mean_grid.reshape(-1)
+std_vals  = std_grid.reshape(-1)
+
+# Keep only bins that had data
+valid = count_grid.reshape(-1) > 0
+coords     = coords[valid]       # (M,4)
+mean_vals  = mean_vals[valid]    # (M,)
+std_vals   = std_vals[valid]     # (M,)
+
+# Convert to torch tensors
+coords_t    = torch.from_numpy(coords).float()
+mean_t      = torch.from_numpy(mean_vals).float().unsqueeze(1)
+log_std_t   = torch.log(torch.from_numpy(std_vals).float().unsqueeze(1) + 1e-6)
+
+dataset = TensorDataset(coords_t, mean_t, log_std_t)
+loader  = DataLoader(dataset, batch_size=256, shuffle=True)
+
+# --------------------------------------------------------
+# 4) Define MLP to interpolate mean and log-std
+# --------------------------------------------------------
+class BinInterpNet(nn.Module):
+    def __init__(self, input_dim=4, hidden_dim=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+        self.mean_head    = nn.Linear(hidden_dim, 1)
+        self.log_std_head = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x):
+        h = self.net(x)
+        return self.mean_head(h), self.log_std_head(h)
+
+device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model     = BinInterpNet().to(device)
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.MSELoss()
+
+# --------------------------------------------------------
+# 5) Train the interpolation network
+# --------------------------------------------------------
+n_epochs = 20
+for epoch in range(n_epochs):
+    model.train()
+    total_loss = 0.0
+    for x, mu_true, logstd_true in loader:
+        x            = x.to(device)
+        mu_true      = mu_true.to(device)
+        logstd_true  = logstd_true.to(device)
+
+        mu_pred, logstd_pred = model(x)
+        loss_mu  = criterion(mu_pred,     mu_true)
+        loss_std = criterion(logstd_pred, logstd_true)
+        loss = loss_mu + loss_std
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * x.size(0)
+
+    avg = total_loss / len(dataset)
+    print(f"Epoch {epoch+1}/{n_epochs}, Loss: {avg:.6f}")
+
+# --------------------------------------------------------
+# 6) Interpolation function
+# --------------------------------------------------------
+def interp_mean_std(query_np):
+    """
+    Given query_np of shape (M,4), returns:
+      means: (M,), stds: (M,)
+    """
+    model.eval()
+    q = torch.from_numpy(query_np.astype(np.float32)).to(device)
+    with torch.no_grad():
+        mu_pred, logstd_pred = model(q)
+        sigma_pred = torch.exp(logstd_pred)
+    return mu_pred.cpu().numpy().squeeze(), sigma_pred.cpu().numpy().squeeze()
+
+# Example usage:
+# new_feats = np.array([[c1, tl1, r1, r2], [c2, tl2, r1_2, r2_2]])
+# means, stds = interp_mean_std(new_feats)
+print("Example interpolation on first 5 bins:", interp_mean_std(coords[:5]))
