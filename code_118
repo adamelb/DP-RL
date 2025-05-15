@@ -1,0 +1,42 @@
+import numpy as np
+from scipy.interpolate import RegularGridInterpolator
+
+# 1) Suppose you already have:
+#    - bin_centers: a list [c_centers, tl_centers, rho1_centers, rho2_centers],
+#      each of length n_bins
+#    - mean_grid:   a NumPy array shape (n_bins,n_bins,n_bins,n_bins)
+#    - std_grid:    likewise
+
+# 2) Create interpolators (allows linear interp + constant‐extrapolate):
+mean_interp = RegularGridInterpolator(
+    points=bin_centers,
+    values=mean_grid,
+    method='linear',
+    bounds_error=False,
+    fill_value=None    # will extrapolate linearly
+)
+std_interp = RegularGridInterpolator(
+    points=bin_centers,
+    values=std_grid,
+    method='linear',
+    bounds_error=False,
+    fill_value=None
+)
+
+# 3) Define your function
+def get_mean_std_fast(q):
+    """
+    q: array of shape (M,4) with columns [c,tl,rho1,rho2]
+    returns: means (M,), stds (M,)
+    """
+    means = mean_interp(q)  # linear interpolated (M,)
+    stds  = std_interp(q)
+    # If you want to clamp extrapolated std to be ≥ 0:
+    stds = np.maximum(stds, 0.0)
+    return means, stds
+
+# 4) Example usage:
+#   new_points = np.array([[c1,tl1,r1_1,r2_1],
+#                           [c2,tl2,r1_2,r2_2],
+#                           ... ])
+means, stds = get_mean_std_fast(new_points)
