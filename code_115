@@ -1,0 +1,99 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+
+# -----------------------------
+# 0) Assume you have:
+# -----------------------------
+# features_raw:    (N,4) tensor of raw [c, tℓ, ρ₁, ρ₂]
+# phi_all:         (N,d) tensor of z-scored features (for the net)
+# Q_raw_all:       (N,) tensor of raw Bellman targets
+# feat_mean, feat_std for z-scoring phi_all
+# device, batch_size, n_epochs, lambda_boundary set
+
+# -----------------------------
+# 1) Compute c/tℓ min & max
+# -----------------------------
+c_vals  = features_raw[:,0]  # (N,)
+tl_vals = features_raw[:,1]  # (N,)
+
+c_min,  c_max  = c_vals.min(),  c_vals.max()
+tl_min, tl_max = tl_vals.min(), tl_vals.max()
+
+# -----------------------------
+# 2) Dataset & DataLoader
+# -----------------------------
+# We’ll need both phi and the raw [c,tℓ] in each batch
+dataset = TensorDataset(phi_all, Q_raw_all, features_raw[:,:2])
+loader  = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+# -----------------------------
+# 3) Gaussian‐NLL net (as before)
+# -----------------------------
+class GaussianNN(nn.Module):
+    def __init__(self, d, hidden=256):
+        super().__init__()
+        self.shared = nn.Sequential(
+            nn.Linear(d, hidden), nn.ReLU(), nn.Dropout(0.4),
+            nn.Linear(hidden, hidden), nn.ReLU(), nn.Dropout(0.4)
+        )
+        self.mean_head    = nn.Linear(hidden, 1)
+        self.log_var_head = nn.Linear(hidden, 1)
+    def forward(self, x):
+        h = self.shared(x)
+        return self.mean_head(h), self.log_var_head(h)
+
+def weighted_gaussian_nll(mu, log_var, y, w):
+    """
+    mu, log_var, y: all (B,1)
+    w:             (B,1) per-sample weights ≥ 0
+    """
+    inv_var = torch.exp(-log_var)    # (B,1)
+    se      = 0.5 * (y - mu).pow(2) * inv_var
+    reg     = 0.5 * log_var
+    per_sample = se + reg            # (B,1)
+    # weighted average
+    return (w * per_sample).sum() / (w.sum() + 1e-6)
+
+# -----------------------------
+# 4) Instantiate
+# -----------------------------
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model   = GaussianNN(phi_all.size(1)).to(device)
+optim_  = optim.Adam(model.parameters(), lr=1e-4)
+
+# -----------------------------
+# 5) Training loop with boundary weights
+# -----------------------------
+λ = 5.0  # how much extra weight for boundary points
+for epoch in range(1, n_epochs+1):
+    model.train()
+    tot_loss = 0.0
+    for phi_batch, Q_batch, raw_ct in loader:
+        # unpack
+        phi       = phi_batch.to(device)             # (B,d)
+        y         = Q_batch.unsqueeze(1).to(device)  # (B,1)
+        c_batch   = raw_ct[:,0].unsqueeze(1).to(device)  # (B,1)
+        tl_batch  = raw_ct[:,1].unsqueeze(1).to(device)  # (B,1)
+
+        # 5.1) compute boundary‐based weights w_i
+        #  scale c and tl to [−1,1] around center:
+        w_c  = torch.abs((c_batch - 0.5*(c_min+c_max)) / (0.5*(c_max-c_min)))
+        w_tl = torch.abs((tl_batch- 0.5*(tl_min+tl_max)) /(0.5*(tl_max-tl_min)))
+        w    = 1.0 + λ*(w_c + w_tl)  # (B,1)
+
+        # 5.2) forward
+        mu, log_var = model(phi)
+
+        # 5.3) weighted loss
+        loss = weighted_gaussian_nll(mu, log_var, y, w)
+
+        # 5.4) backward
+        optim_.zero_grad()
+        loss.backward()
+        optim_.step()
+
+        tot_loss += loss.item()*phi.size(0)
+
+    print(f"Epoch {epoch:2d} | Weighted NLL: {tot_loss/len(loader.dataset):.6f}")
