@@ -1,0 +1,174 @@
+import numpy as np
+from math import sqrt
+import time
+
+# ── 1) GLOBAL SETTINGS ─────────────────────────────────────────────────────────
+# dtype choice: float64 gives max precision,
+# float32 will halve your memory footprint.
+dtype = np.float32
+
+# model constants
+phi1, phi2 = 0.7, 0.5
+tl        = 0.1
+gamma     = 0.95
+
+# grids
+n_p    = 50
+n_a1   = 15
+n_a2   = 15
+n_i1   = 40
+n_i2   = 40
+n_x    = 25
+
+p_grid    = np.linspace(-5.0, 5.0, n_p, dtype=dtype)
+imb1_grid = np.linspace(-3.0, 3.0, n_i1, dtype=dtype)
+imb2_grid = np.linspace(-3.0, 3.0, n_i2, dtype=dtype)
+x_grid    = np.linspace(-2.0, 2.0, n_x, dtype=dtype)
+
+# AR(1) parameters
+rho1, sigma1 = 0.9, 1.0
+rho2, sigma2 = 0.8, 1.0
+
+# DP settings
+tol      = 1e-5
+max_iter = 500
+
+# ── 2) TAUCHEN DISCRETIZATION ─────────────────────────────────────────────────
+def tauchen(n, mu, rho, sigma, m=3.0):
+    """
+    Returns (y_grid, P) for y_{t+1} = rho*y_t + eps_t, eps~N(0,sigma^2),
+    using Tauchen(1986) with truncation ±m·std.
+    """
+    std_y = sigma / sqrt(1 - rho**2)
+    y_max = mu + m*std_y
+    y_min = mu - m*std_y
+    grid = np.linspace(y_min, y_max, n, dtype=dtype)
+    step = (y_max - y_min)/(n-1)
+
+    # vectorized normal CDF
+    def norm_cdf(x):
+        return 0.5*(1 + np.erf(x/np.sqrt(2)))
+
+    P = np.zeros((n,n), dtype=dtype)
+    for i in range(n):
+        for j in range(n):
+            z_low  = (grid[j] - rho*grid[i] - step/2)/sigma
+            z_high = (grid[j] - rho*grid[i] + step/2)/sigma
+            if j==0:
+                P[i,j] = norm_cdf(z_high)
+            elif j==n-1:
+                P[i,j] = 1 - norm_cdf(z_low)
+            else:
+                P[i,j] = norm_cdf(z_high) - norm_cdf(z_low)
+    return grid, P
+
+a1_grid, P1 = tauchen(n_a1, mu=0.0, rho=rho1, sigma=sigma1)
+a2_grid, P2 = tauchen(n_a2, mu=0.0, rho=rho2, sigma=sigma2)
+
+# ── 3) PRECOMPUTE NEXT‐STATE INDICES ────────────────────────────────────────────
+def nearest_idx(vals, grid):
+    # vals: (M,) ; grid: (N,) → returns (M,) of argmin
+    return np.abs(vals[:,None] - grid[None,:]).argmin(axis=1)
+
+# price next‐index for each (p_i, x_j)
+_p, _x = np.meshgrid(p_grid, x_grid, indexing='ij')
+p_plus = (_p + _x).ravel()
+p_idx  = nearest_idx(p_plus, p_grid).reshape(n_p, n_x)
+
+# imb1 next‐index for each (imb1_i, x_j)
+_i1, _x = np.meshgrid(imb1_grid, x_grid, indexing='ij')
+i1_plus = (phi1*_i1 + (1-phi1)*_x).ravel()
+i1_idx  = nearest_idx(i1_plus, imb1_grid).reshape(n_i1, n_x)
+
+# imb2 next‐index
+_i2, _x = np.meshgrid(imb2_grid, x_grid, indexing='ij')
+i2_plus = (phi2*_i2 + (1-phi2)*_x).ravel()
+i2_idx  = nearest_idx(i2_plus, imb2_grid).reshape(n_i2, n_x)
+
+# ── 4) VALUE ITERATION ─────────────────────────────────────────────────────────
+V      = np.zeros((n_p, n_a1, n_a2, n_i1, n_i2), dtype=dtype)
+policy = np.zeros_like(V)
+
+# tile for reward calculation
+P_t   = p_grid[:,None,None,None,None]
+A1_t  = a1_grid[None,:,None,None,None]
+A2_t  = a2_grid[None,None,:,None,None]
+I1_t  = imb1_grid[None,None,None,:,None]
+I2_t  = imb2_grid[None,None,None,None,:]
+
+start = time.time()
+for it in range(1, max_iter+1):
+    V_new = np.full_like(V, -np.inf)
+    # loop only over actions
+    for j, xj in enumerate(x_grid):
+        # 4.1) immediate reward r(s,xj)
+        R   = (A1_t + A2_t)*(P_t + xj)
+        cost = 0.5*tl*(phi1*I1_t + (1-phi1)*xj + phi2*I2_t + (1-phi2)*xj)*xj
+        pen  = 0.5*(P_t + xj)**2
+        rj   = R - cost - pen
+
+        # 4.2) gather V at next states
+        #    ip has shape (n_p,), i1_idx (n_i1,), i2_idx(n_i2,)
+        ip = p_idx[:, j][:,None,None]    # → (n_p,1,1)
+        i1 = i1_idx[:, j][None,:,None]    # → (1,n_i1,1)
+        i2 = i2_idx[:, j][None,None,:]    # → (1,1,n_i2)
+        # fancy‐index: V[ip, :, :, i1, i2] → (n_p,n_a1,n_a2,n_i1,n_i2)
+        Vn = V[ip, :, :, i1, i2]
+
+        # 4.3) expectation over both AR(1) shocks in one call
+        # EV[p,a1_cur,a2_cur,imb1,imb2]
+        EV = np.einsum('ab,cd,pbcde->pacde', P1, P2, Vn)
+
+        # 4.4) Bellman update
+        Q = rj + gamma*EV
+        mask = Q > V_new
+        V_new[mask]      = Q[mask]
+        policy[mask]     = xj
+
+    diff = np.max(np.abs(V_new - V))
+    V, V_new = V_new, V  # swap buffers
+    if diff < tol:
+        print(f"Converged in {it} iters; Δ={diff:.2e}")
+        break
+else:
+    print(f"WARNING: no convergence after {max_iter} iters; Δ={diff:.2e}")
+
+print("Value iteration took", time.time()-start, "seconds.")
+
+# ── 5) SIMULATION ───────────────────────────────────────────────────────────────
+def simulate(T):
+    """
+    Simulate one path of length T following the optimal policy.
+    Returns dict of 1D arrays of length T+1 (states) and T (actions).
+    """
+    p_path    = np.zeros(T+1, dtype=dtype)
+    a1_path   = np.zeros(T+1, dtype=dtype)
+    a2_path   = np.zeros(T+1, dtype=dtype)
+    i1_path   = np.zeros(T+1, dtype=dtype)
+    i2_path   = np.zeros(T+1, dtype=dtype)
+    x_path    = np.zeros(T,   dtype=dtype)
+
+    for t in range(T):
+        # find nearest‐grid indices
+        ip_ = np.abs(p_grid   - p_path[t]).argmin()
+        i1_ = np.abs(a1_grid  - a1_path[t]).argmin()
+        i2_ = np.abs(a2_grid  - a2_path[t]).argmin()
+        i3_ = np.abs(imb1_grid- i1_path[t]).argmin()
+        i4_ = np.abs(imb2_grid- i2_path[t]).argmin()
+
+        x = policy[ip_, i1_, i2_, i3_, i4_]
+        x_path[t] = x
+
+        # state updates
+        p_path[t+1]  = p_path[t]  + x
+        i1_path[t+1] = phi1*i1_path[t] + (1-phi1)*x
+        i2_path[t+1] = phi2*i2_path[t] + (1-phi2)*x
+        a1_path[t+1] = rho1*a1_path[t] + sqrt(1-rho1**2)*np.random.randn()
+        a2_path[t+1] = rho2*a2_path[t] + sqrt(1-rho2**2)*np.random.randn()
+
+    return dict(p=p_path, a1=a1_path, a2=a2_path,
+                imb1=i1_path, imb2=i2_path, x=x_path)
+
+# quick test
+sim = simulate(200)
+print("First 10 actions:", sim['x'][:10])
