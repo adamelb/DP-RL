@@ -1,0 +1,181 @@
+import numpy as np
+from math import sqrt, erf
+import time
+
+# ── 1) SETTINGS ────────────────────────────────────────────────────────────────
+dtype = np.float32   # or np.float64 if you need more precision
+
+# model constants
+phi1, phi2 = 0.7, 0.5
+tl         = 0.1
+gamma      = 0.95
+
+# AR(1) parameters
+rho1, sigma1 = 0.9, 1.0
+rho2, sigma2 = 0.8, 1.0
+
+# grid sizes
+n_p, n_a1, n_a2 = 50, 15, 15
+n_i1, n_i2, n_x = 40, 40, 25
+
+# grids
+p_grid    = np.linspace(-5, 5, n_p,   dtype=dtype)
+imb1_grid = np.linspace(-3, 3, n_i1,  dtype=dtype)
+imb2_grid = np.linspace(-3, 3, n_i2,  dtype=dtype)
+x_grid    = np.linspace(-2, 2, n_x,   dtype=dtype)
+
+# DP tolerance & max iters
+tol      = 1e-5
+max_iter = 500
+
+
+# ── 2) TAUCHEN DISCRETIZATION ─────────────────────────────────────────────────
+def tauchen(n, mu, rho, sigma, m=3.0):
+    """
+    Discretize y_{t+1} = rho*y_t + eps,  eps ~ N(0, sigma^2)
+    via Tauchen(1986).  Returns (grid, P) where
+      grid: (n,)
+      P:    (n,n) transition matrix
+    """
+    std_y = sigma / sqrt(1 - rho*rho)
+    y_max = mu + m*std_y
+    y_min = mu - m*std_y
+    grid  = np.linspace(y_min, y_max, n, dtype=dtype)
+    step  = (y_max - y_min) / (n - 1)
+
+    P = np.zeros((n,n), dtype=dtype)
+    for i in range(n):
+        for j in range(n):
+            lo = (grid[j] - rho*grid[i] - step/2) / sigma
+            hi = (grid[j] - rho*grid[i] + step/2) / sigma
+            cdf_lo = 0.5 * (1 + erf(lo/np.sqrt(2)))
+            cdf_hi = 0.5 * (1 + erf(hi/np.sqrt(2)))
+            if j == 0:
+                P[i,j] = cdf_hi
+            elif j == n-1:
+                P[i,j] = 1 - cdf_lo
+            else:
+                P[i,j] = cdf_hi - cdf_lo
+    return grid, P
+
+a1_grid, P1 = tauchen(n_a1, 0.0, rho1, sigma1)
+a2_grid, P2 = tauchen(n_a2, 0.0, rho2, sigma2)
+
+
+# ── 3) NEAREST-INDEX UTILITY ───────────────────────────────────────────────────
+def nearest_idx(vals, grid):
+    # for each val in vals (shape (M,)), find argmin_j |vals[i]-grid[j]|
+    # returns (M,) ints
+    return np.abs(vals[:,None] - grid[None,:]).argmin(axis=1)
+
+
+# ── 4) PRE-COMPUTE NEXT-PERIOD INDICES ────────────────────────────────────────
+# (p+x) → index in p_grid
+Pmat, Xmat = np.meshgrid(p_grid, x_grid, indexing='ij')  # both (n_p,n_x)
+p_plus = (Pmat + Xmat).ravel()                           # (n_p*n_x,)
+p_idx  = nearest_idx(p_plus, p_grid).reshape(n_p, n_x)   # (n_p,n_x)
+
+# imb1' = phi1*imb1 + (1-phi1)*x
+I1mat, Xmat = np.meshgrid(imb1_grid, x_grid, indexing='ij')
+i1_plus = (phi1*I1mat + (1-phi1)*Xmat).ravel()
+i1_idx  = nearest_idx(i1_plus, imb1_grid).reshape(n_i1, n_x)
+
+# imb2'
+I2mat, Xmat = np.meshgrid(imb2_grid, x_grid, indexing='ij')
+i2_plus = (phi2*I2mat + (1-phi2)*Xmat).ravel()
+i2_idx  = nearest_idx(i2_plus, imb2_grid).reshape(n_i2, n_x)
+
+
+# ── 5) TILE ARRAYS FOR REWARD CALC ─────────────────────────────────────────────
+# We'll broadcast these to shape (n_p,n_a1,n_a2,n_i1,n_i2)
+P_t  = p_grid   [:,None,None,None,None]   # (p,1,1,1,1)
+A1_t = a1_grid  [None,:,None,None,None]   # (1,a1,1,1,1)
+A2_t = a2_grid  [None,None,:,None,None]   # (1,1,a2,1,1)
+I1_t = imb1_grid[None,None,None,:,None]   # (1,1,1,i1,1)
+I2_t = imb2_grid[None,None,None,None,:]   # (1,1,1,1,i2)
+
+
+# ── 6) INITIALIZE V AND POLICY ────────────────────────────────────────────────
+V      = np.zeros((n_p,n_a1,n_a2,n_i1,n_i2), dtype=dtype)
+policy = np.zeros_like(V)
+
+
+# ── 7) VALUE ITERATION ────────────────────────────────────────────────────────
+t0 = time.time()
+for it in range(1, max_iter+1):
+    V_new = np.full_like(V, -np.inf)
+
+    # loop only over the 1-D action grid
+    for j, xj in enumerate(x_grid):
+        # 7.1) immediate reward r_j(s)
+        R    = (A1_t + A2_t) * (P_t + xj)
+        cost = 0.5*tl*(phi1*I1_t + (1-phi1)*xj + phi2*I2_t + (1-phi2)*xj) * xj
+        pen  = 0.5*(P_t + xj)**2
+        rj   = R - cost - pen  # shape (n_p,n_a1,n_a2,n_i1,n_i2)
+
+        # 7.2) gather V at next (p',a1',a2',i1',i2')
+        #    via three np.take calls:
+
+        #  - first along axis=0 (p)
+        V1 = V[p_idx[:,j], :, :, :, :]    # → (n_p,n_a1,n_a2,n_i1,n_i2)
+        #  - then along axis=3 (imb1)
+        V2 = np.take(V1, i1_idx[:,j], axis=3)
+        #  - then along axis=4 (imb2)
+        V3 = np.take(V2, i2_idx[:,j], axis=4)
+        # now V3.shape == (n_p,n_a1,n_a2,n_i1,n_i2)
+        # and V3[p,a1',a2',i1',i2'] is V at next‐period state
+
+        # 7.3) expectation over a1' & a2' in one einsum
+        # P1[s,q], P2[t,r], V3[p,q,r,i,j] → EV[p,s,t,i,j]
+        EV = np.einsum('sq,tr,pqrij->pstij', P1, P2, V3)
+
+        # 7.4) Bellman max
+        Q    = rj + gamma * EV
+        mask = Q > V_new
+        V_new[mask]      = Q[mask]
+        policy[mask]     = xj
+
+    diff = np.max(np.abs(V_new - V))
+    V[:] = V_new
+    if diff < tol:
+        print(f"Converged in {it} iters  Δ={diff:.2e}")
+        break
+else:
+    print(f"⚠️  No convergence in {max_iter} iters, Δ={diff:.2e}")
+
+print("DP took", round(time.time()-t0,2), "seconds.")
+
+
+# ── 8) SIMULATION ──────────────────────────────────────────────────────────────
+def simulate(T):
+    p_path    = np.zeros(T+1, dtype=dtype)
+    a1_path   = np.zeros(T+1, dtype=dtype)
+    a2_path   = np.zeros(T+1, dtype=dtype)
+    i1_path   = np.zeros(T+1, dtype=dtype)
+    i2_path   = np.zeros(T+1, dtype=dtype)
+    x_path    = np.zeros(T,   dtype=dtype)
+
+    for t in range(T):
+        # find nearest indices for current state
+        i_p  = np.abs(p_grid   - p_path[t]).argmin()
+        i_a1 = np.abs(a1_grid  - a1_path[t]).argmin()
+        i_a2 = np.abs(a2_grid  - a2_path[t]).argmin()
+        i_i1 = np.abs(imb1_grid- i1_path[t]).argmin()
+        i_i2 = np.abs(imb2_grid- i2_path[t]).argmin()
+
+        x = policy[i_p, i_a1, i_a2, i_i1, i_i2]
+        x_path[t] = x
+
+        # state updates
+        p_path[t+1]  = p_path[t]  + x
+        i1_path[t+1] = phi1*i1_path[t] + (1-phi1)*x
+        i2_path[t+1] = phi2*i2_path[t] + (1-phi2)*x
+        a1_path[t+1] = rho1*a1_path[t] + sqrt(1-rho1**2)*np.random.randn()
+        a2_path[t+1] = rho2*a2_path[t] + sqrt(1-rho2**2)*np.random.randn()
+
+    return dict(p=p_path, a1=a1_path, a2=a2_path,
+                imb1=i1_path, imb2=i2_path, x=x_path)
+
+# quick test
+sim = simulate(200)
+print("First 10 simulated x:", sim['x'][:10])
