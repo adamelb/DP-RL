@@ -1,0 +1,32 @@
+## Estimating the Optimal \(\lambda\)
+
+To choose \(\lambda\), we maximize the profile log-likelihood of the transformed targets under a normality assumption, while accounting for the Jacobian of the transformation.
+
+For a sample \(y_1,\dots,y_n\), let
+\[
+\tilde y_i = t_\lambda(y_i)
+\quad\text{and}\quad
+\overline{\tilde y} = \frac1n\sum_{i=1}^n \tilde y_i.
+\]
+The profile log-likelihood is
+\[
+\ell(\lambda)
+= -\frac{n}{2}\,\ln\!\Bigl(\frac{1}{n}\sum_{i=1}^n (\tilde y_i - \overline{\tilde y})^2\Bigr)
+\;+\;\sum_{i=1}^n \ln\Bigl|\tfrac{\partial t_\lambda(y_i)}{\partial y_i}\Bigr|.
+\]
+The Jacobian term is
+\[
+\frac{\partial t_\lambda(y)}{\partial y}
+=
+\begin{cases}
+(y+1)^{\lambda-1}, 
+&y\ge0,\ \lambda\neq0,\\[0.5em]
+\dfrac1{y+1}, 
+&y\ge0,\ \lambda=0,\\[0.75em]
+(-y+1)^{-\lambda-1}, 
+&y<0,\ \lambda\neq2,\\[0.5em]
+\dfrac1{-y+1}, 
+&y<0,\ \lambda=2.
+\end{cases}
+\]
+In practice, \(\hat\lambda\) is found by numerical optimization (e.g.\ Brent’s method) over a bounded interval (typically \([-5,5]\)), and then used to transform (and later inverse-transform) your data.
