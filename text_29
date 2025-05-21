@@ -1,0 +1,59 @@
+## Yeo–Johnson Transformation of Target \(y\)
+
+Let \(\tilde y\) denote the Yeo–Johnson–transformed version of the original target \(y\).  For a given parameter \(\lambda\in\mathbb{R}\), the forward transform is
+
+\[
+\tilde y \;=\;
+\begin{cases}
+\dfrac{(y + 1)^\lambda \;-\; 1}{\lambda}, 
+& y \ge 0,\ \lambda \neq 0, \\[1em]
+\ln(y + 1), 
+& y \ge 0,\ \lambda = 0, \\[1em]
+-\,\dfrac{(-y + 1)^{\,2-\lambda}\;-\;1}{2-\lambda}, 
+& y < 0,\ \lambda \neq 2, \\[1em]
+-\,\ln\bigl(-y + 1\bigr), 
+& y < 0,\ \lambda = 2.
+\end{cases}
+\]
+
+---
+
+### Inverse Transform (Recovering \(y\) from \(\tilde y\))
+
+\[
+y \;=\;
+\begin{cases}
+\bigl(\lambda\,\tilde y + 1\bigr)^{\tfrac1\lambda} \;-\; 1, 
+& \tilde y \ge 0,\ \lambda \neq 0, \\[1em]
+\exp(\tilde y)\;-\;1, 
+& \tilde y \ge 0,\ \lambda = 0, \\[1em]
+1 \;-\;\bigl[-(2-\lambda)\,\tilde y + 1\bigr]^{\tfrac1{2-\lambda}}, 
+& \tilde y < 0,\ \lambda \neq 2, \\[1em]
+1 \;-\;\exp(-\tilde y), 
+& \tilde y < 0,\ \lambda = 2.
+\end{cases}
+\]
+
+---
+
+### Notes
+
+1. **Variable naming**  
+   - \(y\) is your original target.  
+   - \(\tilde y\) is the transformed target.
+
+2. **Special cases**  
+   - When \(\lambda=0\), the \(\,y \ge 0\) branch becomes a log transform: \(\ln(y+1)\).  
+   - When \(\lambda=2\), the \(y<0\) branch becomes \(-\ln(1 - y)\).  
+
+3. **Continuity**  
+   - Both the function and its first derivative are continuous at \(\lambda=0\) and \(\lambda=2\).
+
+4. **Standardization (optional)**  
+   After computing \(\tilde y\), you may standardize:
+   \[
+     z = \frac{\tilde y - \overline{\tilde y}}{\mathrm{std}(\tilde y)},
+   \]
+   and later invert by
+   \(\;\tilde y = z \times \mathrm{std} + \overline{\tilde y}\)
+   before applying the piecewise inverse above.
