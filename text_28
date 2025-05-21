@@ -1,0 +1,62 @@
+## Yeo–Johnson Power Transformation
+
+The Yeo–Johnson transformation \(\;t_\lambda(x)\;\) of a real variable \(x\) with parameter \(\lambda\in\mathbb R\) is defined piecewise as follows:
+
+\[
+t_\lambda(x)\;=\;
+\begin{cases}
+\dfrac{(x + 1)^\lambda \;-\; 1}{\lambda}, 
+& x \ge 0,\;\lambda \neq 0, \\[1em]
+\ln(x + 1), 
+& x \ge 0,\;\lambda = 0, \\[1em]
+-\,\dfrac{(-x + 1)^{\,2-\lambda}\;-\;1}{2-\lambda}, 
+& x < 0,\;\lambda \neq 2, \\[1em]
+-\,\ln\bigl(-x + 1\bigr), 
+& x < 0,\;\lambda = 2.
+\end{cases}
+\]
+
+### Inverse Transformation
+
+Because the forward map is monotonic in each region, the inverse has closed form:
+
+\[
+x \;=\;
+\begin{cases}
+\bigl(\lambda\,y + 1\bigr)^{1/\lambda} \;-\; 1, 
+& y \ge 0,\;\lambda \neq 0, \\[1em]
+\exp(y)\;-\;1, 
+& y \ge 0,\;\lambda = 0, \\[1em]
+1 \;-\;\bigl[-(2-\lambda)\,y + 1\bigr]^{1/(2-\lambda)}, 
+& y < 0,\;\lambda \neq 2, \\[1em]
+1 \;-\;\exp(-y), 
+& y < 0,\;\lambda = 2.
+\end{cases}
+\]
+
+---
+
+### Explanatory Notes
+
+1. **Why Yeo–Johnson?**  
+   - Extends Box–Cox to allow negative values of \(x\).  
+   - Seeks to stabilize variance and make data more Gaussian-like.
+
+2. **Continuity and Special Cases**  
+   - At \(\lambda=0\), the positive branch is the log transform \(\ln(x+1)\).  
+   - At \(\lambda=2\), the negative branch is the negative log transform \(-\ln(1 - x)\).  
+   - Both ensure the function and its first derivative are continuous in \(\lambda\).
+
+3. **Parameter Fitting**  
+   - Typical implementations (e.g.\ `sklearn.preprocessing.PowerTransformer`) choose \(\lambda\) by maximizing a log-likelihood under a normality assumption on the transformed data.
+
+4. **Standardization (optional)**  
+   After applying \(t_\lambda\), features are often zero-mean/unit-variance standardized:
+   \[
+     z = \frac{t_\lambda(x) - \overline{t_\lambda(x)}}{\mathrm{std}(t_\lambda(x))}.
+   \]
+   Inverse standardization then follows \(t_\lambda(x) = z \cdot \mathrm{std} + \overline{t_\lambda(x)}\) before applying the inverse piecewise formulas above.
+
+---
+
+Copy all of the above into a Markdown cell in your notebook to get beautifully rendered math plus detailed commentary.
