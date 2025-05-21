@@ -1,0 +1,73 @@
+## Gaussian Negative Log-Likelihood (NLL) Loss for Predicting Mean and Variance
+
+When your network outputs both a mean \(\mu(x)\) and a variance \(\sigma^2(x)\) for each input \(x\), you can train it by maximizing the likelihood of the observed targets \(y\) under a Gaussian model. Equivalently, you minimize the *negative* log-likelihood:
+
+---
+
+### 1. Model Assumption
+
+We assume
+\[
+y \,\bigl|\, x \;\sim\; \mathcal{N}\bigl(\mu(x),\,\sigma^2(x)\bigr),
+\]
+where  
+- \(\mu(x)\) is the network’s predicted mean,  
+- \(\sigma^2(x)\) is the network’s predicted variance (must be \(>0\)).  
+
+---
+
+### 2. Negative Log-Likelihood for One Sample
+
+For a single example \((x,\,y)\), the log-likelihood is
+\[
+\ln p(y \mid x)
+= -\tfrac12\ln\bigl(2\pi\,\sigma^2(x)\bigr) \;-\; \frac{\bigl(y - \mu(x)\bigr)^2}{2\,\sigma^2(x)}.
+\]
+Hence the *negative* log-likelihood (to turn maximization into minimization) is
+\[
+\mathcal{L}(y,\,\mu,\sigma^2)
+= \; \tfrac12\,\ln\bigl(2\pi\,\sigma^2(x)\bigr)
+\;+\;
+\frac{\bigl(y - \mu(x)\bigr)^2}{2\,\sigma^2(x)}.
+\]
+
+---
+
+### 3. Batch Loss
+
+Over a batch of \(N\) samples \(\{(x_i,y_i)\}\), you typically take the average:
+\[
+\mathcal{L}_{\text{batch}}
+= \frac{1}{N}\sum_{i=1}^N
+\Biggl[\,
+\tfrac12\ln\bigl(2\pi\,\sigma^2(x_i)\bigr)
+\;+\;
+\frac{\bigl(y_i - \mu(x_i)\bigr)^2}{2\,\sigma^2(x_i)}
+\Biggr].
+\]
+
+---
+
+### 4. Practical Considerations
+
+1. **Stabilizing \(\sigma^2\) Predictions**  
+   - Instead of predicting \(\sigma^2(x)\) directly, predict \(s(x)=\ln \sigma^2(x)\).  
+   - Then \(\sigma^2(x)=\exp(s(x))\) ensures positivity and avoids numerical issues.  
+   - The loss becomes
+     \[
+     \mathcal{L}
+     = \tfrac12\,\bigl(s(x) + \ln 2\pi\bigr)
+       \;+\;
+       \frac{\bigl(y - \mu(x)\bigr)^2}{2\,\exp\bigl(s(x)\bigr)}.
+     \]
+
+2. **Trade-off Between Mean and Variance**  
+   - Minimizing NLL encourages the network to increase \(\sigma^2\) where errors \((y-\mu)^2\) are large, trading off sharpness and accuracy.  
+   - It automatically balances fitting the mean and modeling uncertainty.
+
+3. **Implementation Tip**  
+   ```python
+   # network outputs: mu = net_mu(x), log_var = net_logvar(x)
+   var = torch.exp(log_var)
+   loss = 0.5*(log_var + torch.log(2*math.pi)) + 0.5*(y - mu)**2 / var
+   loss = loss.mean()
