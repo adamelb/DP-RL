@@ -1,0 +1,537 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from tqdm import tqdm
+
+# --- Hyperparams & Globals ------------------------------------------------
+DEVICE        = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+gamma         = 0.99
+INTERCEPT_STD = 1.0   # à ajuster selon tes normalisations
+SLOPE_STD     = 1.0
+
+# ACTIONS : tensor 1D des actions échantillonnées sur [-1,1]
+# PHI1, PHI2 : constantes pour reward / prochaine dynamique
+# À définir avant d'appeler create_q
+
+# ---------------------------------------------------------------------------
+# 1) Network: renvoie f1..f4 pour Q(s,x) = f1 x^2 + f2 |x| + f3 x + f4
+# ---------------------------------------------------------------------------
+def _make_f(g_s, g_neg_s, idx, even=True, neg_constraint=False):
+    if even:
+        base = 0.5 * (g_s[:, idx] + g_neg_s[:, idx])
+    else:
+        base = 0.5 * (g_s[:, idx] - g_neg_s[:, idx])
+    if neg_constraint:
+        return -F.softplus(base)
+    return base
+
+class QNetwork(nn.Module):
+    def __init__(self, state_dim, hidden_dim=128):
+        super().__init__()
+        self.backbone = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 4)
+        )
+
+    def forward(self, s):
+        g_s   = self.backbone(s)
+        g_neg = self.backbone(-s)
+        f1 = _make_f(g_s, g_neg, idx=0, even=True,  neg_constraint=True)
+        f2 = _make_f(g_s, g_neg, idx=1, even=True,  neg_constraint=True)
+        f3 = _make_f(g_s, g_neg, idx=2, even=False, neg_constraint=False)
+        f4 = _make_f(g_s, g_neg, idx=3, even=True,  neg_constraint=False)
+        return torch.stack([f1, f2, f3, f4], dim=-1)
+
+# calcule Q(s,x) vectorisé
+def compute_Q(f, x):
+    # f: [batch,4], x: [batch] ou [batch,]
+    f1, f2, f3, f4 = f.unbind(dim=-1)
+    return f1 * x**2 + f2 * x.abs() + f3 * x + f4
+
+# ---------------------------------------------------------------------------
+# 2) Fonction create_q: construit features et targets Q pour chaque (s,a)
+# ---------------------------------------------------------------------------
+def create_q(target_model,
+             sigma_old, mu_old,
+             BATCH_SIZE, M_SAMPLES,
+             PHI1, PHI2,
+             ACTIONS, n=int(1e5)):
+    """
+    - resample dataset de taille n
+    - pour chaque état s et chaque action candidate a:
+        * calcule reward R(s,a)
+        * simule M_SAMPLES transitions s' ~ P(s'|s,a)
+        * évalue v_target(s') et moyenne
+        * Q_target = R + gamma * v_avg
+    - renvoie:
+        feats: [n * N_A, state_dim]
+        targets: [n * N_A]
+    """
+    target_model.eval()
+    # 1) sampler états
+    data    = resample_dataset(n)  # shape (n, dim_data)
+    batches = create_batches(data, BATCH_SIZE)
+    feats_list   = []
+    targets_list = []
+
+    for batch in tqdm(batches):
+        # décoder variables d'état
+        P, alpha1, alpha2, c, t1, rho1, rho2, imbalance1, imbalance2 = \
+            decode_dataset(batch[:,0], batch[:,1], batch[:,2], batch[:,3],
+                           batch[:,4], batch[:,5], batch[:,6], batch[:,7], batch[:,8])
+
+        B = P.size(0)
+        N_A = ACTIONS.size(0)
+
+        # actions mises à l'échelle selon ton intercept/slope
+        a = ACTIONS.view(1, N_A, 1).to(DEVICE)
+        scale = torch.clamp((INTERCEPT_STD + (SLOPE_STD / t1).unsqueeze(1)), -1, 1)
+        actions_scaled = scale.unsqueeze(-1) * a      # [B, N_A, 1]
+
+        # reward vectorisé: [B, N_A]
+        R = reward(alpha1.unsqueeze(1), alpha2.unsqueeze(1),
+                   c.unsqueeze(1), t1.unsqueeze(1),
+                   rho1.unsqueeze(1), rho2.unsqueeze(1),
+                   imbalance1.unsqueeze(1), imbalance2.unsqueeze(1),
+                   actions_scaled.squeeze(-1), PHI1, PHI2)
+
+        # simuler transitions stochastiques
+        eps = torch.randn(B, M_SAMPLES, device=DEVICE)
+        # calculer next-state variables -> P_next etc. shape [B, N_A, M_SAMPLES]
+        # exemple pour alpha1:
+        alpha1_next = alpha1.unsqueeze(1).unsqueeze(2) * rho1.unsqueeze(1).unsqueeze(2) \
+            + (1-rho1).unsqueeze(1).unsqueeze(2) * actions_scaled * eps.unsqueeze(1)
+        # ... même principe pour alpha2_next, c_next, t1_next, rho2_next, imbalance...
+        # On flatte pour évaluer target_model
+        P_next_flat  = P_next.reshape(-1)
+        a_next_flat  = actions_scaled.reshape(-1)
+        # etc. pour toutes les variables -> utiliser encode_dataset
+        feat_next = features(*encode_dataset(
+            P_next_flat, alpha1_next_flat, alpha2_next_flat,
+            c_next_flat, t1_next_flat, rho1_next_flat,
+            rho2_next_flat, imbalance1_next_flat,
+            imbalance2_next_flat
+        ))
+        with torch.no_grad():
+            f2 = target_model(feat_next)
+        v2 = compute_Q(f2, a_next_flat.squeeze(-1))
+        v2 = v2.view(B, N_A, M_SAMPLES)
+        v_avg = v2.mean(dim=2)               # [B, N_A]
+
+        # Bellman Q-target
+        Q_target = R + gamma * v_avg        # [B, N_A]
+
+        # préparer features courantes (état seul), à répéter N_A fois
+        feat_cur = features(P, alpha1, alpha2, c, t1, rho1, rho2,
+                            imbalance1, imbalance2)  # [B, feat_dim]
+        feat_rep = feat_cur.unsqueeze(1).expand(-1, N_A, -1)  # [B, N_A, feat_dim]
+
+        feats_list.append(feat_rep.reshape(-1, feat_rep.size(-1)))
+        targets_list.append(Q_target.reshape(-1))
+
+        torch.cuda.empty_cache()
+
+    feats   = torch.cat(feats_list, dim=0)
+    targets = torch.cat(targets_list, dim=0)
+    return feats, targets
+
+# ---------------------------------------------------------------------------
+# 3) Boucle d'entraînement (outer itérations + fitting interne)
+# ---------------------------------------------------------------------------
+
+def train_q(N_OUTER_ITERS,
+            MAX_EPOCHS, ACC_STEPS, BATCH_ACC,
+            state_dim, LR,
+            sigma_init, mu_init,
+            BATCH_SIZE, M_SAMPLES,
+            PHI1, PHI2,
+            ACTIONS):
+    best_paths = []
+    for outer in range(N_OUTER_ITERS):
+        # 1) préparer target_model
+        if outer == 0:
+            target_model = QNetwork(state_dim).to(DEVICE)
+        else:
+            ckpt = torch.load(f'model_it_best_{outer-1}.pth')
+            target_model = QNetwork(state_dim).to(DEVICE)
+            target_model.load_state_dict(ckpt['model'])
+        target_model.eval()
+        for p in target_model.parameters(): p.requires_grad = False
+
+        # 2) initialiser modèle courant
+        model = QNetwork(state_dim).to(DEVICE)
+        optimizer = optim.Adam(model.parameters(), lr=LR)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+
+        # 3) créer features et targets Q
+        feats, targets = create_q(
+            target_model, sigma_init, mu_init,
+            BATCH_SIZE, M_SAMPLES,
+            PHI1, PHI2, ACTIONS
+        )
+        N_DATASET = targets.size(0)
+
+        # 4) fit interne
+        best_loss = float('inf')
+        for epoch in range(1, MAX_EPOCHS+1):
+            epoch_loss = 0.0
+            for _ in range(ACC_STEPS):
+                optimizer.zero_grad()
+                idx = torch.randint(0, N_DATASET, (BATCH_ACC,), device=DEVICE)
+                f_batch = feats[idx].to(DEVICE)
+                a_batch = ACTIONS[idx % ACTIONS.size(0)].to(DEVICE)  # align action par flatten
+                f_out = model(f_batch)
+                Q_pred = compute_Q(f_out, a_batch)
+                loss = F.mse_loss(Q_pred, targets[idx].to(DEVICE).detach())
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+            epoch_loss /= ACC_STEPS
+            scheduler.step(epoch_loss)
+            print(f"Outer {outer:02d}, Epoch {epoch:03d}, Loss {epoch_loss:.6f}, LR {scheduler._last_lr[0]:.1e}")
+            if epoch_loss < best_loss:
+                best_loss = epoch_loss
+                torch.save({'model': model.state_dict()}, f'model_it_best_{outer}.pth')
+                print(f"--> nouveau best: {best_loss:.6f}")
+        best_paths.append(f'model_it_best_{outer}.pth')
+    return best_paths
+
+# ---------------------------------------------------------------------------
+# FIN du script
+# ---------------------------------------------------------------------------
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from tqdm import tqdm
+
+# --- Hyperparams & Globals ------------------------------------------------
+DEVICE        = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+gamma         = 0.99
+INTERCEPT_STD = 1.0   # à ajuster selon tes normalisations
+SLOPE_STD     = 1.0
+
+# ACTIONS : tensor 1D des actions échantillonnées sur [-1,1]
+# PHI1, PHI2 : constantes pour reward / prochaine dynamique
+# À définir avant d'appeler create_q
+
+# ---------------------------------------------------------------------------
+# 1) Network: renvoie f1..f4 pour Q(s,x) = f1 x^2 + f2 |x| + f3 x + f4
+# ---------------------------------------------------------------------------
+def _make_f(g_s, g_neg_s, idx, even=True, neg_constraint=False):
+    if even:
+        base = 0.5 * (g_s[:, idx] + g_neg_s[:, idx])
+    else:
+        base = 0.5 * (g_s[:, idx] - g_neg_s[:, idx])
+    if neg_constraint:
+        return -F.softplus(base)
+    return base
+
+class QNetwork(nn.Module):
+    def __init__(self, state_dim, hidden_dim=128):
+        super().__init__()
+        self.backbone = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 4)
+        )
+
+    def forward(self, s):
+        g_s   = self.backbone(s)
+        g_neg = self.backbone(-s)
+        f1 = _make_f(g_s, g_neg, idx=0, even=True,  neg_constraint=True)
+        f2 = _make_f(g_s, g_neg, idx=1, even=True,  neg_constraint=True)
+        f3 = _make_f(g_s, g_neg, idx=2, even=False, neg_constraint=False)
+        f4 = _make_f(g_s, g_neg, idx=3, even=True,  neg_constraint=False)
+        return torch.stack([f1, f2, f3, f4], dim=-1)
+
+# calcule Q(s,x) vectorisé
+def compute_Q(f, x):
+    # f: [batch,4], x: [batch] ou [batch,]
+    f1, f2, f3, f4 = f.unbind(dim=-1)
+    return f1 * x**2 + f2 * x.abs() + f3 * x + f4
+
+# ---------------------------------------------------------------------------
+# 2) Fonction create_q: construit features et targets Q pour chaque (s,a)
+# ---------------------------------------------------------------------------
+def create_q(target_model,
+             sigma_old, mu_old,
+             BATCH_SIZE, M_SAMPLES,
+             PHI1, PHI2,
+             ACTIONS, n=int(1e5)):
+    """
+    - resample dataset de taille n
+    - pour chaque état s et chaque action candidate a:
+        * calcule reward R(s,a)
+        * simule M_SAMPLES transitions s' ~ P(s'|s,a)
+        * évalue v_target(s') et moyenne
+        * Q_target = R + gamma * v_avg
+    - renvoie:
+        feats: [n * N_A, state_dim]
+        targets: [n * N_A]
+    """
+    target_model.eval()
+    # 1) sampler états
+    data    = resample_dataset(n)  # shape (n, dim_data)
+    batches = create_batches(data, BATCH_SIZE)
+    feats_list   = []
+    targets_list = []
+
+    for batch in tqdm(batches):
+        # décoder variables d'état
+        P, alpha1, alpha2, c, t1, rho1, rho2, imbalance1, imbalance2 = \
+            decode_dataset(batch[:,0], batch[:,1], batch[:,2], batch[:,3],
+                           batch[:,4], batch[:,5], batch[:,6], batch[:,7], batch[:,8])
+
+        B = P.size(0)
+        N_A = ACTIONS.size(0)
+
+        # actions mises à l'échelle selon ton intercept/slope
+        a = ACTIONS.view(1, N_A, 1).to(DEVICE)
+        scale = torch.clamp((INTERCEPT_STD + (SLOPE_STD / t1).unsqueeze(1)), -1, 1)
+        actions_scaled = scale.unsqueeze(-1) * a      # [B, N_A, 1]
+
+        # reward vectorisé: [B, N_A]
+        R = reward(alpha1.unsqueeze(1), alpha2.unsqueeze(1),
+                   c.unsqueeze(1), t1.unsqueeze(1),
+                   rho1.unsqueeze(1), rho2.unsqueeze(1),
+                   imbalance1.unsqueeze(1), imbalance2.unsqueeze(1),
+                   actions_scaled.squeeze(-1), PHI1, PHI2)
+
+        # simuler transitions stochastiques
+        eps = torch.randn(B, M_SAMPLES, device=DEVICE)
+        # calculer next-state variables -> P_next etc. shape [B, N_A, M_SAMPLES]
+        # exemple pour alpha1:
+        alpha1_next = alpha1.unsqueeze(1).unsqueeze(2) * rho1.unsqueeze(1).unsqueeze(2) \
+            + (1-rho1).unsqueeze(1).unsqueeze(2) * actions_scaled * eps.unsqueeze(1)
+        # ... même principe pour alpha2_next, c_next, t1_next, rho2_next, imbalance...
+        # On flatte pour évaluer target_model
+        P_next_flat  = P_next.reshape(-1)
+        a_next_flat  = actions_scaled.reshape(-1)
+        # etc. pour toutes les variables -> utiliser encode_dataset
+        feat_next = features(*encode_dataset(
+            P_next_flat, alpha1_next_flat, alpha2_next_flat,
+            c_next_flat, t1_next_flat, rho1_next_flat,
+            rho2_next_flat, imbalance1_next_flat,
+            imbalance2_next_flat
+        ))
+        with torch.no_grad():
+            f2 = target_model(feat_next)
+        v2 = compute_Q(f2, a_next_flat.squeeze(-1))
+        v2 = v2.view(B, N_A, M_SAMPLES)
+        v_avg = v2.mean(dim=2)               # [B, N_A]
+
+        # Bellman Q-target
+        Q_target = R + gamma * v_avg        # [B, N_A]
+
+        # préparer features courantes (état seul), à répéter N_A fois
+        feat_cur = features(P, alpha1, alpha2, c, t1, rho1, rho2,
+                            imbalance1, imbalance2)  # [B, feat_dim]
+        feat_rep = feat_cur.unsqueeze(1).expand(-1, N_A, -1)  # [B, N_A, feat_dim]
+
+        feats_list.append(feat_rep.reshape(-1, feat_rep.size(-1)))
+        targets_list.append(Q_target.reshape(-1))
+
+        torch.cuda.empty_cache()
+
+    feats   = torch.cat(feats_list, dim=0)
+    targets = torch.cat(targets_list, dim=0)
+    return feats, targets
+
+# ---------------------------------------------------------------------------
+# 3) Boucle d'entraînement (outer itérations + fitting interne)
+# ---------------------------------------------------------------------------
+
+def train_q(N_OUTER_ITERS,
+            MAX_EPOCHS, ACC_STEPS, BATCH_ACC,
+            state_dim, LR,
+            sigma_init, mu_init,
+            BATCH_SIZE, M_SAMPLES,
+            PHI1, PHI2,
+            ACTIONS):
+    best_paths = []
+    for outer in range(N_OUTER_ITERS):
+        # 1) préparer target_model
+        if outer == 0:
+            target_model = QNetwork(state_dim).to(DEVICE)
+        else:
+            ckpt = torch.load(f'model_it_best_{outer-1}.pth')
+            target_model = QNetwork(state_dim).to(DEVICE)
+            target_model.load_state_dict(ckpt['model'])
+        target_model.eval()
+        for p in target_model.parameters(): p.requires_grad = False
+
+        # 2) initialiser modèle courant
+        model = QNetwork(state_dim).to(DEVICE)
+        optimizer = optim.Adam(model.parameters(), lr=LR)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+
+        # 3) créer features et targets Q
+        feats, targets = create_q(
+            target_model, sigma_init, mu_init,
+            BATCH_SIZE, M_SAMPLES,
+            PHI1, PHI2, ACTIONS
+        )
+        N_DATASET = targets.size(0)
+
+        # 4) fit interne
+        best_loss = float('inf')
+        for epoch in range(1, MAX_EPOCHS+1):
+            epoch_loss = 0.0
+            for _ in range(ACC_STEPS):
+                optimizer.zero_grad()
+                idx = torch.randint(0, N_DATASET, (BATCH_ACC,), device=DEVICE)
+                f_batch = feats[idx].to(DEVICE)
+                a_batch = ACTIONS[idx % ACTIONS.size(0)].to(DEVICE)  # align action par flatten
+                f_out = model(f_batch)
+                Q_pred = compute_Q(f_out, a_batch)
+                loss = F.mse_loss(Q_pred, targets[idx].to(DEVICE).detach())
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+            epoch_loss /= ACC_STEPS
+            scheduler.step(epoch_loss)
+            print(f"Outer {outer:02d}, Epoch {epoch:03d}, Loss {epoch_loss:.6f}, LR {scheduler._last_lr[0]:.1e}")
+            if epoch_loss < best_loss:
+                best_loss = epoch_loss
+                torch.save({'model': model.state_dict()}, f'model_it_best_{outer}.pth')
+                print(f"--> nouveau best: {best_loss:.6f}")
+        best_paths.append(f'model_it_best_{outer}.pth')
+    return best_paths
+
+# ---------------------------------------------------------------------------
+# FIN du script
+# ---------------------------------------------------------------------------
+
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from tqdm import tqdm
+
+# --- Hyperparams & Globals ------------------------------------------------
+DEVICE        = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+gamma         = 0.99
+INTERCEPT_STD = 1.0   # à ajuster selon tes normalisations
+SLOPE_STD     = 1.0
+
+# ACTIONS : tensor 1D des actions échantillonnées sur [-1,1]
+# PHI1, PHI2 : constantes pour reward / prochaine dynamique
+# À définir avant d'appeler create_q
+
+# ---------------------------------------------------------------------------
+# 2) Fonction create_q: construit features et targets Q pour chaque (s,a)
+# ---------------------------------------------------------------------------
+def argmax_x(f):
+    """Renvoie x^* pour chaque batch via formule analytique pour max_x Q(s,x)"""
+    f1, f2, f3, _ = f.unbind(dim=-1)
+    # candidats: x>=0 et x<0
+    x1 = -(f2 + f3) / (2 * f1)
+    x2 =  (f2 - f3) / (2 * f1)
+    x1c = torch.clamp(x1, min=0)
+    x2c = torch.clamp(x2, max=0)
+    zero = torch.zeros_like(x1c)
+    # évaluer Q en ces points
+    Qs = torch.stack([
+        compute_Q(f, x1c),
+        compute_Q(f, x2c),
+        compute_Q(f, zero)
+    ], dim=-1)
+    idx = Qs.argmax(dim=-1)
+    choices = torch.stack([x1c, x2c, zero], dim=-1)
+    return choices.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
+
+
+def create_q(target_model,
+             sigma_old, mu_old,
+             BATCH_SIZE, M_SAMPLES,
+             PHI1, PHI2,
+             ACTIONS, n=int(1e5)):
+    """
+    Génère dataset de tuples (features, Q_target) :
+    - échantillonne n états
+    - pour chaque état s et action a dans ACTIONS:
+        * calcule reward R(s,a)
+        * simule M_SAMPLES transitions stochastiques
+        * trouve x^*(s') par argmax analytique et Q_target(s',x^*)
+        * v_avg = moyenne sur M_SAMPLES de Q_target(s',x^*)
+        * Q_target = R + gamma * v_avg
+    - renvoie:
+        feats: [n * N_A, feat_dim]
+        targets: [n * N_A]
+    """
+    target_model.eval()
+    data    = resample_dataset(n)
+    batches = create_batches(data, BATCH_SIZE)
+    feats_list, targets_list = [], []
+
+    for batch in tqdm(batches):
+        # décoder état
+        P, alpha1, alpha2, c, t1, rho1, rho2, imb1, imb2 = \
+            decode_dataset(*[batch[:,i] for i in range(batch.size(1))])
+        B = P.size(0)
+        N_A = ACTIONS.size(0)
+
+        # scale actions
+        a = ACTIONS.view(1, N_A, 1).to(DEVICE)
+        scale = torch.clamp((INTERCEPT_STD + (SLOPE_STD / t1).unsqueeze(1)), -1, 1)
+        actions_scaled = scale.unsqueeze(-1) * a  # [B, N_A,1]
+
+        # reward [B, N_A]
+        R = reward(alpha1.unsqueeze(1), alpha2.unsqueeze(1),
+                   c.unsqueeze(1), t1.unsqueeze(1),
+                   rho1.unsqueeze(1), rho2.unsqueeze(1),
+                   imb1.unsqueeze(1), imb2.unsqueeze(1),
+                   actions_scaled.squeeze(-1), PHI1, PHI2)
+
+        # transitions: on génère M_SAMPLES par action
+        # dims: [B, N_A, M_SAMPLES]
+        eps = torch.randn(B, N_A, M_SAMPLES, device=DEVICE)
+        # exemple pour alpha1_next
+        alpha1_next = alpha1.unsqueeze(1).unsqueeze(2)*rho1.unsqueeze(1).unsqueeze(2) \
+                    + (1-rho1).unsqueeze(1).unsqueeze(2)*actions_scaled*eps
+        # idem alpha2_next, c_next, t1_next, rho2_next, imb1_next, imb2_next
+        # on flatten: [B*N_A*M_SAMPLES]
+        def flat(x): return x.reshape(-1)
+        Pn  = flat(P.unsqueeze(1).unsqueeze(2).expand(-1,N_A,M_SAMPLES))
+        a_n = flat(actions_scaled.expand(-1,-1,M_SAMPLES))
+        a1n = flat(alpha1_next)
+        # ... mêmes flat pour toutes variables next
+
+        feat_next = features(*encode_dataset(Pn, a1n, /*... autres ...*/, ))
+        with torch.no_grad():
+            f2 = target_model(feat_next)
+        # Q pour chaque sample
+        Q2 = compute_Q(f2, a_n.squeeze(-1))
+        # argmax analytique par sample
+        x_star = argmax_x(f2)
+        # Q* = compute_Q(f2, x_star)
+        Q_star = compute_Q(f2, x_star)
+        # reshape en [B, N_A, M_SAMPLES]
+        Qsamp = Q_star.view(B, N_A, M_SAMPLES)
+        v_avg = Qsamp.mean(dim=-1)  # [B, N_A]
+
+        Q_target = R + gamma * v_avg  # [B,N_A]
+
+        # features courant
+        feat_cur = features(P, alpha1, alpha2, c, t1, rho1, rho2, imb1, imb2)
+        feat_rep = feat_cur.unsqueeze(1).expand(-1,N_A,-1)
+
+        feats_list.append(feat_rep.reshape(-1, feat_rep.size(-1)))
+        targets_list.append(Q_target.reshape(-1))
+
+        torch.cuda.empty_cache()
+
+    feats   = torch.cat(feats_list)
+    targets = torch.cat(targets_list)
+    return feats, targets
+
+# ---------------------------------------------------------------------------
