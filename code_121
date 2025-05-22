@@ -1,0 +1,58 @@
+import torch
+
+# ─── 1) REAL-WORLD constants (fill in your actual values) ──────────────────────
+TL_MIN, TL_MAX = tLMIN, tLMAX
+INTERCEPT_IMB1, SLOPE_INV_TL_IMB1, SLOPE_RHO1_IMB1, SLOPE_RHO2_IMB1 = (
+    INTERCEPT_imb1, slope_inv_tl_imb1, slope_rho1_imb1, slope_rho2_imb1
+)
+INTERCEPT_IMB2, SLOPE_INV_TL_IMB2, SLOPE_RHO1_IMB2, SLOPE_RHO2_IMB2 = (
+    INTERCEPT_imb2, slope_inv_tl_imb2, slope_rho1_imb2, slope_rho2_imb2
+)
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ─── 2) SAMPLER: always N(0,1) for every raw variable ─────────────────────────
+def resample_dataset(n):
+    # returns 9 standard‐normal vectors on DEVICE
+    return [torch.randn(n, device=DEVICE) for _ in range(9)]
+    # order: p_n, alpha1_n, alpha2_n, c_n, tl_n, rho1_n, rho2_n, imb1_n, imb2_n
+
+# ─── 3) BIJECTION: normalized → real-world ────────────────────────────────────
+def decode_tl(z_tl):
+    half = (TL_MAX - TL_MIN) / 2.0
+    return (z_tl * half + (TL_MAX + TL_MIN) / 2.0).clamp(TL_MIN, TL_MAX)
+
+def decode_p(z_p, tl_r, rho1_r):
+    scale = torch.clamp(20 * rho1_r.pow(7) / torch.sqrt(tl_r), 0.03, 1.2)
+    return z_p * scale
+
+def decode_imb(z, tl_r, rho1_r, rho2_r, I0, I1, I2, I3):
+    raw = 2 * (I0 + I1 / tl_r) + I2 * rho1_r + I3 * rho2_r
+    return z * torch.clamp(raw, 0.0, 1.0)
+
+# ─── 4) CREATE: sample, decode inside reward/Q, feed ONLY normalized to NN ────
+def create(target_model, BATCH_SIZE, M_SAMPLES, PHI1, PHI2, ACTIONS,
+           n=N_DATASET):
+    target_model.eval()
+    # 4.1) draw z ∼ N(0,1)
+    p_n, a1, a2, c_n, tl_n, r1, r2, i1_n, i2_n = resample_dataset(n)
+
+    # 4.2) bijectively decode to real
+    tl_r = decode_tl(tl_n)
+    p_r  = decode_p(p_n, tl_r, r1)
+    i1_r = decode_imb(i1_n, tl_r, r1, r2,
+                     INTERCEPT_IMB1, SLOPE_INV_TL_IMB1,
+                     SLOPE_RHO1_IMB1, SLOPE_RHO2_IMB1)
+    i2_r = decode_imb(i2_n, tl_r, r1, r2,
+                     INTERCEPT_IMB2, SLOPE_INV_TL_IMB2,
+                     SLOPE_RHO1_IMB2, SLOPE_RHO2_IMB2)
+
+    # 4.3) build normalized‐only features for the NN
+    feat = features(p_n, a1, a2, c_n, tl_n, r1, r2, i1_n, i2_n, PHI1, PHI2)
+
+    # 4.4) compute reward/Q‐target using REAL decoded (p_r, tl_r, i1_r, i2_r, …)
+    R = reward(a1, a2, p_r, actions_scaled, c_n, tl_r, i1_r, i2_r, PHI1, PHI2)
+    # … rest of your Bellman backup (simulate next‐state with p_r, tl_r, …,
+    # build Q_target, Q_best exactly as before) …
+
+    return feat, Q_best  # feat is purely Gaussian inputs, Q_best is real‐scale target
