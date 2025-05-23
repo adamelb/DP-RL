@@ -25,3 +25,27 @@ def argmax_x(f):
     # override : si f1 ~ 0, on renvoie 0
     x_star = torch.where(mask_zero, zero, x_star)
     return x_star
+
+
+ class QNetwork(nn.Module):
+-   def __init__(self, state_dim, hidden_dim=128):
++   def __init__(self, state_dim, hidden_dim=128, sym_dim=5):
+         super().__init__()
++        self.sym_dim = sym_dim   # nombre de dimensions sur lesquelles on impose la symétrie
+         self.backbone = nn.Sequential(
+             nn.Linear(state_dim, hidden_dim),
+             nn.ReLU(),
+             …  
+         )
+ 
+     def forward(self, s):
+-        # flip complet de s pour appliquer symétrie
+-        s_neg = -s
++        # flip PARTIEL de s : on ne renverse que les sym_dim premières dimensions
++        s_neg = s.clone()
++        s_neg[:, :self.sym_dim] = -s_neg[:, :self.sym_dim]
+ 
+         g_s   = self.backbone(s)
+         g_neg = self.backbone(s_neg)
+         …
+
