@@ -1,0 +1,27 @@
+def argmax_x(f):
+    # f1..f4 = coefficients de Q(s,x)
+    f1, f2, f3, _ = f.unbind(dim=-1)
+    # masque où f1 ~ 0
+    eps = 1e-6
+    mask_zero = f1.abs() < eps
+
+    # candidats analytiques
+    x1 = -(f2 + f3) / (2 * f1)
+    x2 =  (f2 - f3) / (2 * f1)
+    x1c = torch.clamp(x1, min=0)
+    x2c = torch.clamp(x2, max=0)
+    zero = torch.zeros_like(x1c)
+
+    # évaluer Q en chaque candidat
+    Qs = torch.stack([
+        compute_Q(f, x1c),
+        compute_Q(f, x2c),
+        compute_Q(f, zero)
+    ], dim=-1)
+    idx = Qs.argmax(dim=-1)
+    choices = torch.stack([x1c, x2c, zero], dim=-1)
+    x_star = choices.gather(-1, idx.unsqueeze(-1)).squeeze(-1)
+
+    # override : si f1 ~ 0, on renvoie 0
+    x_star = torch.where(mask_zero, zero, x_star)
+    return x_star
