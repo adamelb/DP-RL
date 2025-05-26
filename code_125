@@ -1,0 +1,47 @@
+import torch
+
+def argmax_x(f, eps: float = 1e-6):
+    """
+    f: Tensor[N,4] with columns [f1, f2, f3, f4]
+    Returns x* of shape [N] that maximizes Q(s,x) = f1 x^2 + f2|x| + f3 x + f4.
+    """
+    # Split coefficients
+    f1, f2, f3, _ = f.unbind(dim=-1)      # each is shape [N]
+
+    # 1) Identify “flat” cases where f1 ~ 0
+    flat = f1.abs() < eps                 # boolean mask [N]
+
+    # 2) Analytic candidates when f1 != 0
+    x1 = -(f2 + f3) / (2 * f1)            # unconstrained quadratic optimum
+    x2 =  (f2 - f3) / (2 * f1)
+    x1c = torch.clamp(x1, min=0.0)        # force x>=0
+    x2c = torch.clamp(x2, max=0.0)        # force x<=0
+    zero = torch.zeros_like(x1c)
+
+    # 3) Compute Q at each candidate
+    def Q_at(x):
+        # x: [N], f: [N,4]
+        return f1 * x.pow(2) + f2 * x.abs() + f3 * x + f[:,3]
+
+    Q1 = Q_at(x1c)
+    Q2 = Q_at(x2c)
+    Q0 = Q_at(zero)
+
+    # 4) Stack and pick best among {x1c, x2c, 0}
+    Qs = torch.stack([Q1, Q2, Q0], dim=1)         # [N,3]
+    idx = Qs.argmax(dim=1)                        # [N] in {0,1,2}
+    choices = torch.stack([x1c, x2c, zero], dim=1) # [N,3]
+    x_star = choices.gather(1, idx.unsqueeze(1)).squeeze(1)  # [N]
+
+    # 5) For “flat” rows, compare Q(1) vs Q(-1)
+    if flat.any():
+        Qp = Q_at(torch.ones_like(x_star))
+        Qm = Q_at(-torch.ones_like(x_star))
+        # choose +1 if Qp>=Qm else -1
+        x_pm = torch.where(Qp >= Qm,
+                           torch.ones_like(x_star),
+                           -torch.ones_like(x_star))
+        # override x_star on flat entries
+        x_star = torch.where(flat, x_pm, x_star)
+
+    return x_star
