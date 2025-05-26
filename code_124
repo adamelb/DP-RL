@@ -1,0 +1,201 @@
+## Two‐Step Bellman Backup: \(Q_0\to Q_1 \to Q_2\)
+
+We work in the 4-dimensional state \(s=(p,i,a_1,a_2)^\top\) (you can trivially extend to 5D) with dynamics
+\[
+s' = F\,s + G\,x + \Sigma^{1/2}\,\varepsilon,
+\quad \varepsilon\sim\mathcal N(0,I),
+\]
+and one-step reward in *canonical quadratic* form
+\[
+r(s,x)
+=-\tfrac12\,s^\top Q\,s
+\;-\;s^\top N\,x
+\;-\;\tfrac12\,R\,x^2.
+\]
+
+---
+
+### \(Q_0\) – initialisation  
+By definition
+\[
+Q_0(s,x)\;=\;0.
+\]
+
+### \(Q_1\) – first backup  
+\[
+\boxed{
+Q_1(s,x)
+\;=\;
+r(s,x).
+}
+\]
+
+### \(Q_2\) – second backup  
+\[
+\begin{aligned}
+Q_2(s,x)
+&=\;
+r(s,x)
+\;+\;
+\gamma\,\E_{\,s'}\!\Bigl[\;\max_{u}\,Q_1(s',u)\Bigr]
+\\[6pt]
+&=\;
+r(s,x)
+\;+\;
+\gamma\,\E\!\Bigl[\;\max_{u}\,r(s',u)\Bigr].
+\end{aligned}
+\]
+Because \(r(s',u)\) is a concave quadratic in \(u\), its maximiser and maximised value admit \emph{closed-form} expressions:
+
+1. **Myopic optimal action**  
+   \[
+     u^*(s')
+     = \arg\max_u\,r(s',u)
+     = -\,\frac{N^\top s'}{R}.
+   \]
+
+2. **Maximised immediate reward**  
+   \[
+     \max_u\,r(s',u)
+     = r\bigl(s',\,u^*(s')\bigr)
+     = -\tfrac12\,{s'}^\top Q\,s'
+       + \frac{\bigl(N^\top s'\bigr)^2}{2\,R}.
+   \]
+
+Hence the expectation term is
+\[
+\begin{aligned}
+\E\!\bigl[\max_u\,r(s',u)\bigr]
+&=
+-\,\tfrac12\,\E[s'^\top Q\,s']
+\;+\;
+\frac{1}{2R}\,\E\bigl[(N^\top s')^2\bigr]
+\\[6pt]
+&=
+-\,\tfrac12\bigl(\mu^\top Q\,\mu + \mathrm{tr}(Q\,\Sigma)\bigr)
+\;+\;
+\frac{1}{2R}\bigl((N^\top\mu)^2 + N^\top\,\Sigma\,N\bigr),
+\end{aligned}
+\]
+where
+\(\mu = F\,s + G\,x,\;\Sigma=\Sigma^{1/2}\,\Sigma^{1/2\top}.\)
+
+Putting it all together:
+
+\[
+\boxed{
+Q_2(s,x)
+= r(s,x)
+\;+\;
+\gamma\;\Biggl[
+  -\tfrac12\,\bigl(\mu^\top Q\,\mu + \mathrm{tr}(Q\,\Sigma)\bigr)
+  +\frac{(N^\top\mu)^2}{2R}
+  +\frac{N^\top\Sigma\,N}{2R}
+\Biggr]
+},
+\]
+with \(\mu=F\,s + G\,x\).
+
+---
+
+### Vectorized NumPy implementation
+
+```python
+import numpy as np
+
+def compute_Q2(
+    s: np.ndarray,
+    x_grid: np.ndarray,
+    F: np.ndarray,
+    G: np.ndarray,
+    Q_mat: np.ndarray,
+    N: np.ndarray,
+    R: float,
+    Sigma_half: np.ndarray,
+    gamma: float
+) -> np.ndarray:
+    """
+    Compute Q2(s,x) = r(s,x) + γ E[ max_u r(s',u) ] analytically (no MC).
+
+    Parameters
+    ----------
+    s           : state vector, shape (n,)
+    x_grid      : candidate actions, shape (K,)
+    F, G        : dynamics matrices, shapes (n,n), (n,)
+    Q_mat       : state‐quadratic in r, shape (n,n)
+    N           : cross‐term vector in r, shape (n,)
+    R           : scalar control cost
+    Sigma_half  : noise matrix, shape (n,m)
+    gamma       : discount factor < 1
+
+    Returns
+    -------
+    Q2_vals     : array of Q2(s,x) for each x in x_grid, shape (K,)
+    """
+    # unpack dimensions
+    n, K = s.size, x_grid.size
+
+    # 1) immediate reward r(s,x)
+    p, i, a1, a2 = s[0], s[1], s[2], s[3]   # adjust for n=4 or n=5
+    # broadcast to (K,)
+    X = x_grid
+    pnl  = (a1 + a2) * (p + X)
+    imp  = 0.5 * tau_L * (phi * i + (1 - phi) * X) * X
+    risk = 0.5 * (p + X)**2
+    r1   = pnl - imp - risk                # shape (K,)
+
+    # 2) next‐state mean μ = F s + G x, shape (n,K)
+    mu = (F @ s[:, None]) + G[:, None] * X[None, :]  # (n,K)
+
+    # 3) noise covariance Σ
+    Sigma = Sigma_half @ Sigma_half.T              # (n,n)
+    trace_QSigma = np.trace(Q_mat @ Sigma)         # scalar
+    N_Sigma_N   = float(N.T @ Sigma @ N)           # scalar
+
+    # 4) terms depending on μ:
+    #    a) -½ μᵀ Q μ  for each column k
+    muQ   = mu.T @ Q_mat                           # (K,n)
+    quad1 = -0.5 * np.einsum('ki,ki->k', muQ, mu.T)  # (K,)
+
+    #    b)  (Nᵀ μ)²/(2R)
+    Nm    = (N.T @ mu)                             # (1,K)
+    quad2 = (Nm.flatten()**2) / (2 * R)            # (K,)
+
+    # 5) assemble expectation E[max r(s',u)]
+    E_max = quad1 + quad2 \
+            - 0.5 * trace_QSigma \
+            + 0.5 * (N_Sigma_N / R)
+
+    # 6) Bellman backup
+    Q2_vals = r1 + gamma * E_max
+
+    return Q2_vals
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Example usage in your notebook
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    # parameters (set these above)
+    tau_L, phi, gamma = 1000.0, np.exp(-1/15), 0.99
+
+    # state & action grid
+    s       = np.array([0., 0., 0.5, -0.3])      # n=4 example
+    x_grid  = np.linspace(-1.0, 1.0, 101)
+
+    # dynamics & cost matrices (define above)
+    F       = np.diag([1, phi, rho1, rho2])
+    G       = np.array([1, 1-phi, 0, 0])
+    Q_mat   = np.array([[.5,0,-.5,-.5],
+                        [0,0,0,0],
+                        [-.5,0,0,0],
+                        [-.5,0,0,0]])
+    N       = np.array([1, 0.5*tau_L*phi, -1, -1])
+    R       = 1 + tau_L*(1-phi)
+    Sigma_half = np.zeros((4,2))
+    Sigma_half[2,0] = np.sqrt(1-rho1**2)
+    Sigma_half[3,1] = np.sqrt(1-rho2**2)
+
+    Q2 = compute_Q2(s, x_grid, F, G, Q_mat, N, R, Sigma_half, gamma)
+    x_star = x_grid[np.argmax(Q2)]
+    print("Optimal x under Q2:", x_star)
