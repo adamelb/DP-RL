@@ -1,0 +1,76 @@
+import numpy as np
+from scipy.stats import norm
+
+def compute_Q2_closed_abs_5d(
+    s: np.ndarray,            # state vector shape (5,)
+    x_grid: np.ndarray,       # action grid shape (K,)
+    F: np.ndarray,            # (5,5)
+    G: np.ndarray,            # (5,) or (5,1)
+    Q_mat: np.ndarray,        # (5,5)
+    N: np.ndarray,            # (5,)
+    R: float,                 # scalar
+    c: float,                 # absolute‐penalty coefficient
+    Sigma_half: np.ndarray,   # (5,m)
+    gamma: float
+) -> np.ndarray:
+    """
+    Compute Q2(s,x) = r(s,x) + gamma * E[max_u r(s',u)] exactly (no MC),
+    for a 5‐dimensional state and reward including -c*|x|.
+    """
+    # ensure shapes
+    s = s.reshape(5,)
+    X = x_grid.reshape(-1)           # (K,)
+    K = X.size
+
+    # 1) immediate reward r(s,x)
+    # r(s,x) = -1/2 s^T Q s  - (N^T s)*x - 1/2 R x^2  - c*|x|
+    sQs = 0.5 * float(s @ (Q_mat @ s))       # scalar
+    Ns  = float(N @ s)                       # scalar
+    r_sx = ( -sQs
+             - Ns * X
+             - 0.5 * R * X**2
+             - c * np.abs(X)
+           )                                 # shape (K,)
+
+    # 2) next‐state mean μ(x) = F s + G x
+    # G may be (5,1) or (5,)
+    Gv = G.reshape(5,)
+    mu = (F @ s[:, None]) + Gv[:, None] * X[None, :]   # (5,K)
+
+    # 3) noise covariance Σ and its statistics
+    Sigma = Sigma_half @ Sigma_half.T                  # (5,5)
+    tr_QSigma = np.trace(Q_mat @ Sigma)                # scalar
+    nu        = float(N @ (Sigma @ N))                 # scalar
+    sigma     = np.sqrt(nu)                            # scalar
+
+    # 4) compute quadratic form μ^T Q μ for each x
+    muQ   = Q_mat @ mu                                  # (5,K)
+    muQmu = np.sum(mu * muQ, axis=0)                    # (K,)
+
+    # 5) compute E[max_u f(u)] terms
+    alpha = (N @ mu).flatten()                          # (K,)
+    delta_p = (alpha + c) / sigma
+    delta_m = (c - alpha) / sigma
+
+    # partial expectations
+    Ep = ((alpha + c)**2 + nu) * norm.cdf(delta_p) \
+         + sigma * (alpha + c) * norm.pdf(delta_p)
+    Em = ((c - alpha)**2 + nu) * norm.cdf(delta_m) \
+         + sigma * (c - alpha) * norm.pdf(delta_m)
+
+    # 6) assemble expectation term
+    # E[max_u r(s',u)] = -1/2 E[s'^T Q s'] + (E_p + E_m)/(2R)
+    # with E[s'^T Q s'] = muQmu + tr_QSigma
+    E_term = -0.5 * (muQmu + tr_QSigma) + (Ep + Em) / (2 * R)  # (K,)
+
+    # 7) final second‐step Bellman Q2
+    Q2 = r_sx + gamma * E_term                                # (K,)
+    return Q2
+
+# Example of how to call:
+if __name__ == "__main__":
+    # assume F,G,Q_mat,N,R,c,Sigma_half,gamma are already defined
+    # and s (shape 5) and X (1D grid) are set
+    Q2_vals = compute_Q2_closed_abs_5d(s, X, F, G, Q_mat, N, R, c, Sigma_half, gamma)
+    x_star  = X[np.argmax(Q2_vals)]
+    print("Q2 maximizer x* =", x_star)
