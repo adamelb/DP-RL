@@ -1,0 +1,85 @@
+import numpy as np
+from scipy.stats import norm
+
+def compute_Q2_closed(
+    s: np.ndarray,
+    x_grid: np.ndarray,
+    F: np.ndarray,
+    G: np.ndarray,
+    Q_mat: np.ndarray,
+    N: np.ndarray,
+    R: float,
+    c: float,
+    Sigma_half: np.ndarray,
+    gamma: float
+) -> np.ndarray:
+    """
+    Compute Q2(s,x) = r(s,x) + γ E[max_u r(s',u)] exactly (no MC),
+    with r(s,x) including -c*|x|.
+    """
+    # precompute
+    Sigma = Sigma_half @ Sigma_half.T
+    tr_QSigma = np.trace(Q_mat @ Sigma)
+
+    # immediate reward r(s,x)
+    sQs = float(s @ (Q_mat @ s)) * 0.5
+    N_s = float(N.T @ s)
+    X = x_grid
+    r_sx = (-sQs
+            - N_s * X
+            - 0.5 * R * X**2
+            - c * np.abs(X))                         # shape (K,)
+
+    # next-state mean μ = F s + G x
+    mu = (F @ s[:, None]) + G * X[None, :]           # (n, K)
+
+    # build α = Nᵀ μ, ν = Nᵀ Σ N
+    alpha = (N.T @ mu).flatten()                     # (K,)
+    nu    = float(N.T @ Sigma @ N)
+    sigma = np.sqrt(nu)
+
+    # standardized shifts
+    delta_p = (alpha + c) / sigma
+    delta_m = (c - alpha) / sigma
+
+    # expectations for the two regions
+    E_p = ((alpha + c)**2 + nu) * norm.cdf(delta_p) \
+          + sigma * (alpha + c) * norm.pdf(delta_p)
+    E_m = ((c - alpha)**2 + nu) * norm.cdf(delta_m) \
+          + sigma * (c - alpha) * norm.pdf(delta_m)
+
+    # total expectation
+    E_max = E_p + E_m                                 # shape (K,)
+
+    # assemble Q2
+    Q2 = r_sx + gamma * (-0.5 * tr_QSigma + E_max / (2 * R))
+
+    return Q2
+
+# ──────────────── Example usage ─────────────────────────────────────────
+if __name__=="__main__":
+    # your model parameters
+    tau_L, rho1, rho2 = 1000.0, 0.9, 0.6
+    tau, phi = 15.0, np.exp(-1/15)
+    gamma, c = 0.99, 0.1
+
+    # matrices (n=4 example)
+    F = np.diag([1, phi, rho1, rho2])
+    G = np.array([1, 1-phi, 0, 0])[:,None]
+    Q_mat = np.array([[.5,0,-.5,-.5],
+                      [0,0,0,0],
+                      [-.5,0,0,0],
+                      [-.5,0,0,0]])
+    N = np.array([1, 0.5*tau_L*phi, -1, -1])
+    R = 1 + tau_L*(1-phi)
+    Sigma_half = np.zeros((4,2))
+    Sigma_half[2,0] = np.sqrt(1-rho1**2)
+    Sigma_half[3,1] = np.sqrt(1-rho2**2)
+
+    # state and action grid
+    s = np.array([0.,0.,0.5,-0.3])
+    X = np.linspace(-1,1,101)
+
+    Q2 = compute_Q2_closed(s, X, F, G, Q_mat, N, R, c, Sigma_half, gamma)
+    x_star = X[np.argmax(Q2)]
+    print("Q2 maximiser x* =", x_star)
