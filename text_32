@@ -1,0 +1,80 @@
+## Third‐Step Bellman Backup: \(Q_3(s,x)\)
+
+We extend the two‐step result  
+\[
+Q_2(s,x)
+= r(s,x)
++\;\gamma\,\E\!\Bigl[\max_{u}r(s',u)\Bigr]
+\]
+to the third backup  
+\[
+Q_3(s,x)
+= r(s,x)
++\;\gamma\,\E\!\Bigl[\max_{u}Q_2(s',u)\Bigr].
+\]
+
+Recall  
+\[
+r(s,x)
+=-\tfrac12\,s^\top Q\,s
+\;-\;s^\top N\,x
+\;-\;\tfrac12\,R\,x^2,
+\qquad
+s' = F\,s + G\,x + \Sigma^{1/2}\,\varepsilon.
+\]
+From the two‐step case one shows that
+\[
+\max_u\,Q_2(s',u)
+= \max_u\Bigl[r(s',u)
++\gamma\,\E\!\bigl[\max_v\,r(s'',v)\bigr]\Bigr]
+\]
+is again a concave quadratic in \(u\).  Writing
+\[
+\alpha(s',x') \;=\; F\,s' + G\,x', 
+\quad
+u^*(s',x')
+=-\frac{N^\top\,\alpha(s',x')}{R},
+\]
+one finds closed‐form
+\[
+\max_u\,Q_2(s',u)
+= r\bigl(s',u^*(s',x')\bigr)
++\gamma\Bigl[
+  -\tfrac12\,\alpha(s',u^*)^\top Q\,\alpha(s',u^*)
+  +\frac{\bigl(N^\top\alpha(s',u^*)\bigr)^2}{2R}
+  -\tfrac12\tr\!(Q\Sigma)
+  +\frac{N^\top\Sigma\,N}{2R}
+\Bigr].
+\]
+Taking expectation over \(\varepsilon\) (Gaussian) and using  
+\(\E[s'']=\alpha(s',u^*)\), \(\Cov(s'')=\Sigma\), yields  
+\[
+\boxed{
+Q_3(s,x)
+= r(s,x)
++\;\gamma\,E_1(s,x)
++\;\gamma^2\,E_2(s,x),
+}
+\]
+where
+\[
+E_1(s,x)
+= -\tfrac12\,\alpha(s,x)^\top Q\,\alpha(s,x)
+  +\frac{\bigl(N^\top\alpha(s,x)\bigr)^2}{2R}
+  -\tfrac12\tr\!(Q\Sigma)
+  +\frac{N^\top\Sigma\,N}{2R},
+\]
+\[
+u^*(s,x)=-\frac{N^\top\alpha(s,x)}{R},
+\quad
+\beta(s,x)=\alpha\bigl(s,u^*(s,x)\bigr)
+=F\,\alpha(s,x)+G\,u^*(s,x),
+\]
+\[
+E_2(s,x)
+= -\tfrac12\,\beta(s,x)^\top Q\,\beta(s,x)
+  +\frac{\bigl(N^\top\beta(s,x)\bigr)^2}{2R}
+  -\tfrac12\tr\!(Q\Sigma)
+  +\frac{N^\top\Sigma\,N}{2R}.
+\]
+Hence every term is a quadratic form in \(s\) and \(x\), and no Monte Carlo is needed.
