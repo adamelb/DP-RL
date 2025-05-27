@@ -1,0 +1,88 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SpecializedQNetwork(nn.Module):
+    def __init__(self,
+                 state_dim: int,
+                 hidden_dim: int,
+                 c_idx: int,
+                 f1_c0_fn,
+                 sym_indices: list = None,
+                 normalize: bool = False):
+        """
+        state_dim   : dimension de s (ex : 25)
+        hidden_dim  : taille des couches cachées
+        c_idx       : index de la feature c dans s (ex : -5)
+        f1_c0_fn    : callable(s) -> tensor [B] qui renvoie f1_c0(s)
+        sym_indices : liste des indices de s à inverser pour la parité
+                      (ex : [0,1,2,3,4,-1])
+        normalize   : si True, renvoie [g1, f2/f1_c0, f3/f1_c0, f4/f1_c0]
+        """
+        super().__init__()
+        self.c_idx       = c_idx
+        self.f1_c0_fn    = f1_c0_fn
+        self.normalize   = normalize
+
+        # indices à symétriser (convertis en positifs)
+        if sym_indices is None:
+            self.sym_idx = []
+        else:
+            # normaliser -1 -> state_dim-1, etc.
+            self.sym_idx = [i if i >= 0 else state_dim + i
+                            for i in sym_indices]
+
+        # réseau brut à 4 sorties
+        self.backbone = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 4)
+        )
+
+    def forward(self, s: torch.Tensor):
+        """
+        s : [B, state_dim]
+        renvoie [B,4] = [f1, f2, f3, f4]
+        """
+        # 1) construire s_neg en inversant QUE les dims symétriques
+        s_neg = s.clone()
+        if self.sym_idx:
+            s_neg[:, self.sym_idx] *= -1
+
+        # 2) passe avant sur s et s_neg
+        g_s    = self.backbone(s)      # [B,4]
+        g_neg  = self.backbone(s_neg)  # [B,4]
+
+        # 3) combinaisons paire/impair sur raw outputs
+        # idx 0 -> raw_g1, idx1 -> raw_g2, idx2 -> raw_g3, idx3 -> raw_g4
+        raw_g1 = 0.5 * (g_s[:,0] + g_neg[:,0])   # symétrique
+        raw_g2 = 0.5 * (g_s[:,1] + g_neg[:,1])   # symétrique
+        raw_g3 = 0.5 * (g_s[:,2] - g_neg[:,2])   # antisymétrique
+        raw_g4 = 0.5 * (g_s[:,3] + g_neg[:,3])   # symétrique
+
+        # 4) non-linéarités
+        g1 = -F.softplus(raw_g1)     # <= 0 pour concavité
+        g2 =  F.softplus(raw_g2)     # >= 0
+
+        # 5) récupère c(s)
+        c = s[:, self.c_idx]
+
+        # 6) calcul externe f1_c0(s)
+        f1_c0 = self.f1_c0_fn(s)
+
+        # 7) définitions finales
+        f1 = f1_c0 * g1                    # <= 0
+        f2 = -(1.0 + g2) * c
+        f3 = raw_g3
+        f4 = raw_g4
+
+        if self.normalize:
+            inv = 1.0 / (f1_c0 + 1e-8)
+            f1 = g1                        # f1/f1_c0 = g1
+            f2 = f2 * inv
+            f3 = f3 * inv
+            f4 = f4 * inv
+
+        return torch.stack([f1, f2, f3, f4], dim=-1)
