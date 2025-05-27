@@ -1,0 +1,74 @@
+## Second‐Step Q‐Function with an \(-c\,|x|\) Penalty
+
+We now include a linear absolute penalty \(-c\,|x|\) in the per‐period reward:
+$$
+r(s,x)
+=-\tfrac12\,s^\top Q\,s
+\;-\;s^\top N\,x
+\;-\;\tfrac12\,R\,x^2
+\;-\;c\,\lvert x\rvert.
+$$
+
+### 1 Definitions
+Let  
+- \(s' = F\,s + G\,x + \Sigma^{1/2}\,\varepsilon\),  
+- \(\displaystyle r_1(s,x)=r(s,x)\),  
+- \(\displaystyle Q_1(s,x)=r_1(s,x)\).  
+
+Then the **second‐step** Bellman backup is
+$$
+Q_2(s,x)
+=r_1(s,x)
+\;+\;
+\gamma\;\E_{\varepsilon}\Bigl[\;\max_{u\in\mathbb R}\,r_1\bigl(s',u\bigr)\Bigr].
+$$
+
+### 2 Inner maximisation \(\max_u\,r_1(s',u)\)
+For a fixed \(s'\), define
+\[
+f(u)=r_1(s',u)
+=-\tfrac12\,R\,u^2 \;-\;\bigl(N^\top s'\bigr)\,u
+\;-\;c\,|u|\;+\;\underbrace{\bigl[-\tfrac12\,{s'}^\top Q\,s'\bigr]}_{\text{constant in }u}.
+\]
+Since \(f(u)\) is concave “quadratic minus \(|u|\)”, its maximiser lies among
+the three candidates:
+1. \(u_+>0\) solving \(f'(u_+)=0\) for \(u>0\):  
+   $$2\Bigl(-\tfrac12R\Bigr)u_+ - N^\top s' - c =0
+     \quad\Longrightarrow\quad
+     u_+ = \frac{-\,N^\top s' - c}{-R}
+           = \frac{N^\top s' + c}{R}.$$
+2. \(u_-<0\) solving \(f'(u_-)=0\) for \(u<0\):  
+   $$2\Bigl(-\tfrac12R\Bigr)u_- - N^\top s' + c =0
+     \quad\Longrightarrow\quad
+     u_- = \frac{-\,N^\top s' + c}{R}.$$
+3. \(u_0=0\).
+
+We then take
+\[
+\max_{u}f(u)
+=\max\!\bigl\{\,f(u_+),\,f(u_-),\,f(0)\bigr\}
+\]
+with
+\[
+f(0)=-\tfrac12\,{s'}^\top Q\,s'.
+\]
+
+### 3 Putting it all together
+Hence
+$$
+Q_2(s,x)
+=r_1(s,x)
+\;+\;
+\gamma\;
+\E\Bigl[\,
+   \max\{f(u_+),\,f(u_-),\,f(0)\}
+\Bigr],
+\quad
+f(u) = r_1(s',u).
+$$
+
+No Monte Carlo is needed in principle if one can integrate the resulting piecewise‐polynomial exactly, but in practice we approximate the expectation by a *vectorized* Monte Carlo over \(\varepsilon\).
+
+---
+
+Paste the following Python cell below to compute \(Q_2(s,x)\) on a grid of \(x\) values in one shot.
