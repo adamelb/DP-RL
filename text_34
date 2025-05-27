@@ -1,0 +1,111 @@
+## \(Q_2(s,x)\) with \(-c\,\lvert x\rvert\) penalty — closed‐form expectation
+
+We start from
+\[
+Q_2(s,x)
+=
+r(s,x)
+\;+\;
+\gamma\;\E_{\,\varepsilon}\Bigl[\max_{u}r(s',u)\Bigr],
+\]
+with
+\[
+r(s,x)
+=-\tfrac12\,s^\top Q\,s
+\;-\;s^\top N\,x
+\;-\;\tfrac12\,R\,x^2
+\;-\;c\,|x|,
+\qquad
+s' = F\,s + G\,x + \Sigma^{1/2}\,\varepsilon,
+\quad \varepsilon\sim\mathcal N(0,I).
+\]
+
+---
+
+### 1 Inner maximisation \(\max_{u}r(s',u)\)
+
+Define for any \(s'\):
+\[
+f(u)=r(s',u)
+=-\tfrac12\,R\,u^2\;-\;(N^\top s')\,u\;-\;c\,\lvert u\rvert
+\;+\;\underbrace{\bigl[-\tfrac12\,{s'}^\top Q\,s'\bigr]\!}_{\text{const}}.
+\]
+Concavity and the \(\lvert u\rvert\) term imply the maximum lies among
+\[
+u_+=\frac{N^\top s' + c}{R},\quad
+u_-=\frac{-N^\top s' + c}{R},\quad
+u_0=0.
+\]
+One checks
+\[
+\max_u f(u)
+=
+-\tfrac12\,{s'}^\top Q\,s'
+\;+\;\frac{\max\bigl\{(N^\top s'+c)^2,\;(c-N^\top s')^2\bigr\}}{2\,R}.
+\]
+
+---
+
+### 2 Expectation over \(s'\)
+
+Let
+\[
+\mu(x)=F\,s + G\,x,
+\qquad
+\Sigma=\Sigma^{1/2}\,\Sigma^{1/2\top},
+\]
+and denote
+\(\alpha=N^\top\mu\), \(\nu=N^\top\Sigma\,N\).  Then
+\(\;N^\top s'\sim\mathcal N(\alpha,\nu)\).  The expectation
+\(\E\!\bigl[\max\{(\alpha'+c)^2,(c-\alpha')^2\}\bigr]\), with
+\(\alpha'\sim N(\alpha,\nu)\), can be written in closed‐form:
+
+Let \(\sigma=\sqrt{\nu}\), 
+\(\delta_+=(\alpha+c)/\sigma\), \(\delta_-=(c-\alpha)/\sigma\), and
+\(\Phi,\varphi\) the standard Normal CDF/PDF.  Then
+
+\[
+\begin{aligned}
+\E\bigl[(\alpha'+c)^2\,1_{\alpha'\ge0}\bigr]
+&=
+\bigl((\alpha+c)^2+\nu\bigr)\,\Phi(\delta_+)
+\;+\;\sigma\,(\alpha+c)\,\varphi(\delta_+),\\
+\E\bigl[(c-\alpha')^2\,1_{\alpha'<0}\bigr]
+&=
+\bigl((c-\alpha)^2+\nu\bigr)\,\Phi(\delta_-)
+\;+\;\sigma\,(c-\alpha)\,\varphi(\delta_-).
+\end{aligned}
+\]
+Hence
+\[
+\E\!\bigl[\max\{(\alpha'+c)^2,\,(c-\alpha')^2\}\bigr]
+=
+\E\bigl[(\alpha'+c)^2\,1_{\alpha'\ge0}\bigr]
++
+\E\bigl[(c-\alpha')^2\,1_{\alpha'<0}\bigr].
+\]
+
+---
+
+### 3 Final formula for \(Q_2(s,x)\)
+
+Putting all pieces together:
+
+\[
+\boxed{
+Q_2(s,x)
+=
+r(s,x)
+\;+\;
+\gamma\!\Biggl[
+  -\tfrac12\bigl(\mu^\top Q\,\mu + \mathrm{tr}(Q\,\Sigma)\bigr)
+  \;+\;\frac{1}{2R}\,
+    \E\!\bigl[\max\{(\alpha'+c)^2,\,(c-\alpha')^2\}\bigr]
+\Biggr]
+},
+\]
+where \(\mu=F\,s+G\,x\), \(\alpha=N^\top\mu\), \(\nu=N^\top\Sigma\,N\).
+
+---
+
+The Python implementation below computes this **without any Monte Carlo**.
