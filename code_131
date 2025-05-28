@@ -1,0 +1,86 @@
+import numpy as np
+
+def solve_1(c, lam, tol=1e-8):
+    """
+    Solve max_x [ x - 2*c*|x| - lam*x^2 ] analytically.
+    Returns list of all maximizers and the maximum value.
+    """
+    candidates = []
+    # stationary in x >= 0 region
+    x_pos = (1 - 2*c) / (2 * lam)
+    if x_pos >= 0:
+        f_pos = x_pos - 2*c*abs(x_pos) - lam * x_pos**2
+        candidates.append((x_pos, f_pos))
+    # boundary at x = 0
+    candidates.append((0.0, 0.0))
+    # find maximum
+    max_f = max(f for x, f in candidates)
+    # collect all x that achieve the maximum (within tol)
+    xs = [x for x, f in candidates if abs(f - max_f) <= tol]
+    return xs, max_f
+
+def solve_2(c, lam, tol=1e-8):
+    """
+    Solve max_{x1,x2} [ x1 + x2 
+                        - c*(|x1| + |x2| + |x1 - x2|)
+                        - (lam/2)*(x1^2 + x2^2) ]
+    analytically by enumerating sign regions and boundaries.
+    Returns list of all maximizers (x1,x2) and the maximum value.
+    """
+    candidates = []
+    # interior of the 8 sign regions
+    for s1 in (+1, -1):
+        for s2 in (+1, -1):
+            for s12 in (+1, -1):
+                x1 = (1 - c*(s1 + s12)) / lam
+                x2 = (1 - c*(s2 - s12)) / lam
+                if s1*x1 >= -tol and s2*x2 >= -tol and s12*(x1 - x2) >= -tol:
+                    g = (x1 + x2
+                         - c*(abs(x1) + abs(x2) + abs(x1 - x2))
+                         - (lam/2)*(x1**2 + x2**2))
+                    candidates.append(((x1, x2), g))
+    # boundary x1 = 0
+    x2b = (1 - 2*c) / lam
+    if x2b >= 0:
+        g = (0 + x2b
+             - c*(0 + abs(x2b) + abs(0 - x2b))
+             - (lam/2)*(0 + x2b**2))
+        candidates.append(((0.0, x2b), g))
+    # boundary x2 = 0
+    x1b = (1 - 2*c) / lam
+    if x1b >= 0:
+        g = (x1b + 0
+             - c*(abs(x1b) + 0 + abs(x1b - 0))
+             - (lam/2)*(x1b**2 + 0))
+        candidates.append(((x1b, 0.0), g))
+    # boundary x1 = x2
+    y = (1 - c) / lam
+    if y >= 0:
+        g = (2*y
+             - c*(abs(y) + abs(y) + 0)
+             - (lam/2)*(y**2 + y**2))
+        candidates.append(((y, y), g))
+    # trivial candidate
+    candidates.append(((0.0, 0.0), 0.0))
+    # deduplicate by rounding
+    unique = {}
+    for (pt, val) in candidates:
+        key = (round(pt[0], 8), round(pt[1], 8))
+        if key not in unique or val > unique[key]:
+            unique[key] = val
+    candidates = [((k[0], k[1]), v) for k, v in unique.items()]
+    # find maximum
+    max_g = max(v for _, v in candidates)
+    sols = [pt for pt, v in candidates if abs(v - max_g) <= tol]
+    return sols, max_g
+
+if __name__ == '__main__':
+    # Example usage: replace c and lam with your parameters
+    c = 1.0
+    lam = 0.5
+
+    xs, f_max = solve_1(c, lam)
+    print("Problem 1 – solutions x:", xs, "max f =", f_max)
+
+    sols2, g_max = solve_2(c, lam)
+    print("Problem 2 – solutions (x1, x2):", sols2, "max g =", g_max)
