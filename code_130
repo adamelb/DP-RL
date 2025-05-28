@@ -1,0 +1,41 @@
+import numpy as np
+from scipy.optimize import minimize
+
+def solve_1(c, lam):
+    """
+    Solve max_x [ x - 2*c*|x| - lam*x^2 ] using SciPy.
+    Returns optimal x and the maximum value.
+    """
+    # Define objective as negative for minimization
+    obj = lambda x: -(x[0] - 2*c*abs(x[0]) - lam*(x[0]**2))
+    res = minimize(obj, x0=[0.0], method='Nelder-Mead')
+    x_opt = res.x[0]
+    return x_opt, -(res.fun)
+
+def solve_2(c, lam):
+    """
+    Solve max_{x1, x2} [ x1 + x2 - c*(|x1| + |x2| + |x1 - x2|)
+                         - (lam/2)*(x1^2 + x2^2) ] using SciPy.
+    Returns optimal x1, x2 and the maximum value.
+    """
+    def obj2(v):
+        x1, x2 = v
+        return -(
+            x1 + x2
+            - c*(abs(x1) + abs(x2) + abs(x1 - x2))
+            - (lam/2)*(x1**2 + x2**2)
+        )
+    res2 = minimize(obj2, x0=[0.0, 0.0], method='Nelder-Mead')
+    x1_opt, x2_opt = res2.x
+    return x1_opt, x2_opt, -(res2.fun)
+
+if __name__ == '__main__':
+    # Example parameters; replace with your own values
+    c = 1.0
+    lam = 0.5
+
+    x_opt, f1_max = solve_1(c, lam)
+    x1_opt, x2_opt, f2_max = solve_2(c, lam)
+
+    print(f"Problem 1: optimal x = {x_opt:.6f}, maximum value = {f1_max:.6f}")
+    print(f"Problem 2: optimal x1 = {x1_opt:.6f}, x2 = {x2_opt:.6f}, maximum value = {f2_max:.6f}")
