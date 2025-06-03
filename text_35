@@ -1,0 +1,113 @@
+### Why the \(\lvert x\rvert\)-coefficient in \(Q(s,x)\) is always \(-c\)
+
+We consider the trading-inventory problem with  
+\[
+R(s_t,x_t)=
+-c\lvert x_t\rvert
++(\alpha^{(1)}_t+\alpha^{(2)}_t)(p_t+x_t)
+-\frac{\tau_\lambda}{2}
+      \bigl[\phi_1\,\mathrm{imb}^{(1)}_t+\phi_2\,\mathrm{imb}^{(2)}_t
+            +(2-\phi_1-\phi_2)x_t\bigr]x_t
+-\frac12\,(p_t+x_t)^2.
+\]
+
+*Inventory/impact* updates (linear in \(x_t\)):
+\[
+\begin{aligned}
+p_{t+1} &= p_t+x_t,\\
+\mathrm{imb}^{(i)}_{t+1} &= \phi_i\,\mathrm{imb}^{(i)}_t+(1-\phi_i)\,x_t.
+\end{aligned}
+\]
+
+*Alpha* signals follow AR(1):
+\[
+\alpha^{(i)}_{t+1}=\rho_i\,\alpha^{(i)}_t+3\varepsilon^{(i)}_t,
+\qquad
+\varepsilon^{(i)}_t\sim\mathcal N(0,1),\; i=1,2.
+\]
+
+---
+
+#### 1 Decomposition of the reward  
+
+Apart from the trading fee, \(R\) is a degree-2 polynomial in \(x_t\):
+\[
+R(s_t,x_t)=q_R(s_t,x_t)\;-\;c\lvert x_t\rvert,
+\]
+with \(q_R\) quadratic.
+
+---
+
+#### 2 Bellman operator  
+
+Let  
+\[
+(TQ)(s,x) \;=\;
+R(s,x)+\gamma\,\mathbb E\Bigl[\underbrace{\max_{a}Q(s',a)}_{:=V_Q(s')}\Bigm|s,x\Bigr],
+\]
+where \(s'\) is obtained from \((s,x)\) by the linear rules above.
+
+---
+
+#### 3 Structure preserved by one Bellman step  
+
+*Induction hypothesis.* For some \(k\),
+\[
+Q_k(s,a)=q_k(s,a)-c\lvert a\rvert,
+\]
+with \(q_k\) quadratic in \(a\).
+
+*Maximisation.* Fix \(s\).  The map \(a\mapsto q_k(s,a)-c|a|\) is concave; its maximal
+value
+\[
+V_{Q_k}(s)=\max_a\bigl[q_k(s,a)-c|a|\bigr]
+\]
+is a *number* that contains no \(|a|\).
+
+*Expectation.* Because \(s'\) depends *linearly* on \(x\) and
+\(V_{Q_k}\) is polynomial in \(s'\), the conditional expectation
+\(\mathbb E[V_{Q_k}(s')\mid s,x]\) is a quadratic polynomial in \(x\).
+
+*Update.*
+\[
+\begin{aligned}
+Q_{k+1}(s,x)
+&=R(s,x)+\gamma\,\mathbb E[V_{Q_k}(s')\mid s,x] \\[2mm]
+&=[\,q_R(s,x)+\gamma\Pi_k(s,x)\,]\;-\;c\lvert x\rvert,
+\end{aligned}
+\]
+where \(\Pi_k\) is quadratic in \(x\).
+
+Hence the decomposition with the *same* \(-c|x|\) term is preserved.
+
+---
+
+#### 4 Induction to the fixed-point  
+
+Starting from \(Q_0\equiv0\) and iterating \(T\), we obtain for every \(k\)
+\[
+Q_k(s,x)=f_{1,k}(s)x^2 - c\lvert x\rvert + f_{3,k}(s)x + f_{4,k}(s).
+\]
+Taking the limit \(k\to\infty\) (contraction mapping theorem) yields the value
+function
+\[
+\boxed{Q^\star(s,x)=f_1(s)x^2\;-\;c\lvert x\rvert\;+\;f_3(s)x+f_4(s).}
+\]
+
+---
+
+#### 5 Uniqueness of the \(|x|\) coefficient  
+
+The four basis functions \(\{x^2,\lvert x\rvert,x,1\}\) are linearly
+independent on \(\mathbb R\).  
+Therefore the coefficient multiplying \(\lvert x\rvert\) is uniquely
+determined and must equal the trading-fee slope:
+
+\[
+\boxed{f_2(s)\equiv -c \quad\forall\,s.}
+\]
+
+*Implication.* In a neural parametrisation
+\(Q_\theta(s,x)=f_1(s)x^2+f_2(s)|x|+f_3(s)x+f_4(s)\),
+\(f_2\) should be **hard-wired** to \(-c\); learning it adds no
+flexibility and wastes capacity.
