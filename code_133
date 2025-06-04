@@ -1,0 +1,137 @@
+import numpy as np
+from scipy.optimize import nnls
+
+# ---------------------------------------------
+# 1. Simulate a normalized AR(1) trajectory X_t with rho = 0.7
+# ---------------------------------------------
+def simulate_ar1(rho, sigma_noise, N, burn_in=500):
+    """
+    Simulate AR(1): X_{t+1} = rho * X_t + noise_t, noise_t ~ N(0, sigma_noise^2).
+    Returns array of length N (after discarding burn-in).
+    """
+    x = np.zeros(N + burn_in)
+    for t in range(1, N + burn_in):
+        x[t] = rho * x[t - 1] + sigma_noise * np.random.randn()
+    return x[burn_in:]
+
+# Set parameters for the target AR(0.7)
+rho_target = 0.7
+sigma_target = np.sqrt(1 - rho_target**2)  # ensures Var(X) = 1
+N = 10000
+
+# Simulate X
+X = simulate_ar1(rho=rho_target, sigma_noise=sigma_target, N=N)
+
+# ---------------------------------------------
+# 2. Build the theoretical PSD for AR(0.7)
+# ---------------------------------------------
+def theoretical_psd_ar1(rho, sigma_noise, omega):
+    """
+    Compute the theoretical one‐sided PSD of a stationary AR(1) process:
+        PSD_X(omega) = |sigma_noise / (1 - rho e^{-i omega})|^2
+    Since sigma_noise^2 = 1 - rho^2 for unit‐variance AR(1), we can write:
+        PSD_X(omega) = (1 - rho^2) / (1 - 2 rho cos(omega) + rho^2).
+    omega is a numpy array of frequencies in [0, pi].
+    """
+    return (sigma_noise**2) / (1 - 2 * rho * np.cos(omega) + rho**2)
+
+# Frequency grid: M points evenly spaced in [0, pi].
+M = 200
+omega = np.linspace(0, np.pi, M)
+
+# Compute target PSD values b_j = S_X(omega_j)
+b = theoretical_psd_ar1(rho=rho_target, sigma_noise=sigma_target, omega=omega)
+
+# ---------------------------------------------
+# 3. Build the basis PSD matrix A_{j,i} for rho_i in {0,0.44,0.85,0.95}
+# ---------------------------------------------
+rhos = np.array([0.0, 0.44, 0.85, 0.95])
+
+# Each column i of A corresponds to a_i(omega_j) = 1 / (1 - 2 rho_i cos(omega_j) + rho_i^2)
+A = np.zeros((M, 4))
+for i, rho_i in enumerate(rhos):
+    A[:, i] = 1.0 / (1 - 2 * rho_i * np.cos(omega) + rho_i**2)
+
+# ---------------------------------------------
+# 4. Solve the nonnegative least‐squares problem: A w ≈ b, w_i >= 0
+#    We interpret w_i = sigma_i^2 for each AR(rho_i) “component”.
+# ---------------------------------------------
+# Use scipy.optimize.nnls to solve min || A w - b ||_2  subject to w >= 0
+w, residual_norm = nnls(A, b)
+
+# Print the found noise‐variances w_i
+print("Noise variances (sigma_i^2) for each AR(rho_i) component:")
+for i in range(4):
+    print(f"  rho_{i+1} = {rhos[i]:.2f}  ->  sigma_{i+1}^2 = {w[i]:.6f}")
+
+# ---------------------------------------------
+# 5. Simulate four AR(1) processes Y^{(i)}_t with rho_i and noise‐variance sigma_i^2
+# ---------------------------------------------
+def simulate_ar1_fixed_noise(rho, sigma_noise, N, burn_in=500):
+    """
+    Simulate AR(1): Y_{t+1} = rho * Y_t + noise_t, noise_t ~ N(0, sigma_noise^2).
+    Returns array of length N (after discarding burn-in).
+    """
+    y = np.zeros(N + burn_in)
+    for t in range(1, N + burn_in):
+        y[t] = rho * y[t - 1] + sigma_noise * np.random.randn()
+    return y[burn_in:]
+
+# Generate each Y^{(i)}
+Y = np.zeros((4, N))
+for i in range(4):
+    sigma_i = np.sqrt(w[i])
+    Y[i, :] = simulate_ar1_fixed_noise(rho=rhos[i], sigma_noise=sigma_i, N=N)
+
+# Form the approximate reconstruction of X:
+X_approx = Y.sum(axis=0)
+
+# ---------------------------------------------
+# 6. Functions to compute sample ACF
+# ---------------------------------------------
+def sample_acf(x, maxlag):
+    """
+    Compute the sample autocorrelation function of x up to lag = maxlag.
+    Returns an array of length (maxlag+1).
+    """
+    n = len(x)
+    x_mean = np.mean(x)
+    denom = np.sum((x - x_mean) ** 2)
+    acfs = np.zeros(maxlag + 1)
+    for h in range(maxlag + 1):
+        num = np.sum((x[h:] - x_mean) * (x[:n - h] - x_mean))
+        acfs[h] = num / denom
+    return acfs
+
+# ---------------------------------------------
+# 7. Verify variances and autocorrelations
+# ---------------------------------------------
+# (a) Variances
+print("\nEmpirical variances:")
+print(f"  Var(X) ≈ {np.var(X):.4f}   (target = 1.0000)")
+print(f"  Var(X_approx) ≈ {np.var(X_approx):.4f}")
+
+for i in range(4):
+    var_Yi = np.var(Y[i, :])
+    # Theoretical Var(Y_i) = sigma_i^2 / (1 - rho_i^2) = w[i] / (1 - rhos[i]^2)
+    var_Yi_theoretical = w[i] / (1 - rhos[i]**2) if (1 - rhos[i]**2) > 0 else np.nan
+    print(f"  Var(Y_{i+1}) ≈ {var_Yi:.4f}   (theoretical = {var_Yi_theoretical:.4f})")
+
+# (b) Sample ACFs up to lag 20
+maxlag = 20
+acf_X = sample_acf(X, maxlag)
+acf_X_approx = sample_acf(X_approx, maxlag)
+
+print("\nSample ACF of X (true AR(0.7)):")
+for h in range(maxlag + 1):
+    print(f"  lag {h:2d}: {acf_X[h]:.4f}   (theoretical = {rho_target**h:.4f})")
+
+print("\nSample ACF of X_approx = sum of Y_i:")
+for h in range(maxlag + 1):
+    print(f"  lag {h:2d}: {acf_X_approx[h]:.4f}   (theoretical = {rho_target**h:.4f})")
+
+for i in range(4):
+    acf_Yi = sample_acf(Y[i, :], maxlag)
+    print(f"\nSample ACF of Y_{i+1} (rho = {rhos[i]:.2f}):")
+    for h in range(maxlag + 1):
+        print(f"  lag {h:2d}: {acf_Yi[h]:.4f}   (theoretical = {rhos[i]**h:.4f})")
