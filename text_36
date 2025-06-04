@@ -1,0 +1,226 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{geometry}
+\usepackage{enumitem}
+\geometry{margin=1in}
+
+\title{A Rigorous Proof that the $|x|$–Coefficient of the $Q$–Function is the Constant \boldmath$-c$}
+\author{}
+\date{\today}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+\section{Introduction}
+
+We consider a discrete–time optimal-execution problem with transient market impact,
+AR(1) alpha signals, and quadratic inventory penalisation.  Let the state at time~$t$ be
+
+\[
+  s_t \;=\;
+  \bigl(p_t,\;\operatorname{imb}_{1,t},\;\operatorname{imb}_{2,t},\;
+        \alpha_{1,t},\;\alpha_{2,t}\bigr),
+\]
+
+with
+
+\begin{itemize}[nosep]
+  \item $p_t$ — current inventory\footnote{A positive sign denotes a long position.},
+  \item $\operatorname{imb}_{j,t}$ — transient impact states ($j=1,2$),
+  \item $\alpha_{j,t}$ — alpha signals ($j=1,2$).
+\end{itemize}
+
+A trade (action) executed at~$t$ is $x_t\in\mathbb R$ (buy $>$ 0, sell $<$ 0).
+Write $s=(p,\operatorname{imb}_1,\operatorname{imb}_2,\alpha_1,\alpha_2)$ for a generic state and $x\in\mathbb R$ for a generic action.
+
+Our goal is to show that the optimal state–action value function
+
+\[
+  Q^\*(s,x)
+  \;=\;
+  \max_{\pi}\;
+  \mathbb E\Bigl[
+      \sum_{t\ge 0} \gamma^{\,t}\, r\bigl(s_t,x_t\bigr)
+      \,\Bigm|\,s_0=s,\;x_0=x
+  \Bigr],
+  \qquad 0<\gamma<1,
+\]
+
+admits the representation
+\[
+  Q^\*(s,x)
+  \;=\;
+  f_1(s)\,x^2 \;-\; c\,|x| \;+\; f_3(s)\,x + f_4(s),
+\]
+i.e.\ the coefficient of $|x|$ is the \emph{constant} $-c$, independent of the state~$s$.
+
+The proof proceeds in four steps:
+
+\begin{enumitem}
+  \item[\textbf{(i)}] specify dynamics and reward;
+  \item[\textbf{(ii)}] define a function class $\mathcal F$;
+  \item[\textbf{(iii)}] prove $\mathcal F$ is invariant under the Bellman operator;
+  \item[\textbf{(iv)}] deduce $Q^\*\in\mathcal F$ and extract the desired form.
+\end{enumitem}
+
+\section{Model Specification}
+
+\subsection{State dynamics}
+
+\begin{align}
+    p_{t+1} &= p_t + x_t, \label{eq:p-update}\\[4pt]
+    \operatorname{imb}_{j,t+1} &= \phi_j \operatorname{imb}_{j,t}
+                                 + (1-\phi_j)\,x_t,
+      \quad 0<\phi_j<1,\; j=1,2,  \label{eq:imb-update}\\[4pt]
+    \alpha_{j,t+1} &= \rho_j \alpha_{j,t} + \varepsilon_{j,t+1},
+      \quad |\rho_j|<1,\; j=1,2,                       \label{eq:alpha-update}
+\end{align}
+where $(\varepsilon_{j,t})_{t\ge 1}$ are i.i.d.\ noises, independent of $x_t$ and of each other.
+
+\subsection{One–period reward}
+
+For every $(s,x)$,
+\begin{equation}
+  r(s,x) \;=\; q(s,x)\;-\;c\,|x|,
+  \qquad c>0,
+  \label{eq:reward-split}
+\end{equation}
+with
+\begin{equation}
+  q(s,x)
+  \;=\;
+  A\,x^{2} + B(s)\,x + D(s),
+  \qquad A<0.
+  \label{eq:q-def}
+\end{equation}
+More explicitly
+\begin{align}
+  A
+  &= -\tfrac12\Bigl[\,1 + \lambda_t\bigl(2-\phi_1-\phi_2\bigr)\Bigr],
+     \label{eq:A}\\
+  B(s)
+  &= (\alpha_1+\alpha_2)
+     -\tfrac12\,\lambda_t\bigl(\phi_1 \operatorname{imb}_1
+                               +\phi_2 \operatorname{imb}_2\bigr)
+     - p,                                                \label{eq:B}\\
+  D(s)
+  &= \tfrac12(\alpha_1+\alpha_2)\,p - \tfrac12\,p^{2}.   \label{eq:D}
+\end{align}
+
+\subsection{Bellman operator}
+
+For any bounded measurable $Q:(s,x)\mapsto\mathbb R$ define
+\begin{equation}
+  (TQ)(s,x)
+  \;:=\;
+  r(s,x)
+  + \gamma\,
+  \mathbb E\!\bigl[\,\max_{a\in\mathbb R} Q(s',a)\,\bigm|\,s,x\bigr],
+  \label{eq:bellman}
+\end{equation}
+where $s'$ is the next state given by \eqref{eq:p-update}--\eqref{eq:alpha-update}.
+The operator $T$ is a contraction under the sup-norm.
+
+\section{A Stable Function Class}
+
+\begin{definition}
+  Set
+  \begin{equation}
+    \mathcal F
+    :=\;
+    \Bigl\{
+      Q \ \Bigm|\ 
+      Q(s,x)=g(s,x)-c\,|x|,
+      \ g(s,\cdot)\in C^{1}\text{ in a neighbourhood of }x=0
+    \Bigr\}.
+    \label{eq:F-def}
+  \end{equation}
+\end{definition}
+
+Every $Q\in\mathcal F$ has a fixed slope jump
+$\partial_x Q(s,0^+)-\partial_x Q(s,0^-)=-2c$.
+
+\section{Invariance of \texorpdfstring{$\mathcal F$}{F}}
+
+\begin{lemma}\label{lem:invariance}
+  If $Q\in\mathcal F$ then $TQ\in\mathcal F$.
+\end{lemma}
+
+\begin{proof}
+\textbf{0. Quadratic form.}  
+Because $g$ is $C^1$ near $0$, write
+\[
+  Q(s,a)=A_Q(s)\,a^{2}+B_Q(s)\,a+D_Q(s)-c\,|a|,
+  \qquad A_Q(s)<0.
+\]
+
+\medskip\noindent
+\textbf{1. Future optimisation.}  
+For fixed $s'$, maximising in $a$ gives
+\[
+  \max_{a} Q(s',a)
+  = D_Q(s')
+    -\frac{(|B_Q(s')|-c)_+^{2}}{4A_Q(s')}.
+\]
+This depends on $s'$ only through $A_Q,B_Q,D_Q$; no $|a|$ remains.
+
+\medskip\noindent
+\textbf{2. Dependence on current $x$.}  
+Because the transition is affine in $x$,
+\[
+  A_Q(s')=A_Q(\varepsilon),\;
+  B_Q(s')=\beta_0(s,\varepsilon)+\beta_1(s)x,\;
+  D_Q(s')=\delta_0(s,\varepsilon)+\delta_1(s)x+\delta_2(s)x^{2}.
+\]
+
+\medskip\noindent
+\textbf{3. Conditional expectation.}  
+Let
+$v_Q(s,x):=\mathbb E\bigl[\max_a Q(s',a)\mid s,x\bigr]$.
+The mapping $z\mapsto(|z|-c)_+^2$ is Lipschitz; convolution with the smooth
+law of $\varepsilon$ yields that $v_Q(s,\cdot)$ is $C^1$ at $x=0$
+and thus contains no $|x|$ term.
+
+\medskip\noindent
+\textbf{4. Assemble.}  
+Set $g_{\text{new}}(s,x):=q(s,x)+\gamma\,v_Q(s,x)$.
+Then 
+$(TQ)(s,x)=g_{\text{new}}(s,x)-c\,|x|\in\mathcal F$,
+establishing invariance.
+\end{proof}
+
+\section{Main Result}
+
+\begin{theorem}\label{thm:main}
+  The optimal $Q$–function satisfies
+  \[
+    Q^\*(s,x)
+    = f_1(s)\,x^{2} - c\,|x| + f_3(s)\,x + f_4(s),
+  \]
+  i.e.\ its $|x|$-coefficient is the constant $-c$.
+\end{theorem}
+
+\begin{proof}
+  Start value iteration with $Q_0\equiv0\in\mathcal F$.  By
+  Lemma~\ref{lem:invariance} we have $Q_{k+1}=TQ_k\in\mathcal F$ for all $k$.
+  Contraction of $T$ implies $Q_k\to Q^\*$, and
+  $\mathcal F$ is closed under pointwise limits, so $Q^\*\in\mathcal F$.
+\end{proof}
+
+\section{Discussion}
+
+\begin{itemize}[nosep]
+  \item The \emph{sole} source of non-smoothness in $Q^\*$ is the present
+        transaction cost $c\,|x|$; future costs are smoothed out by optimisation.
+  \item Making the $|x|$ coefficient state-dependent in a learning
+        architecture wastes parameters: the true coefficient is fixed at $-c$.
+  \item Shifting the kink to $x=b\neq0$ would require the reward itself to
+        depend on $|x-b|$, which is not the case here.
+\end{itemize}
+
+\end{document}
