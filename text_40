@@ -1,0 +1,286 @@
+## Alternative “Four‐component” approximation via spectral (Fourier) matching
+
+Below is a sketch of how one might **approximate** a stationary AR(0.7) process by the **sum** of four AR\((\rho_i)\) processes 
+\[
+Y^{(i)}_t\;=\;\rho_i\,Y^{(i)}_{t-1} \;+\;\varepsilon^{(i)}_t,
+\qquad i=1,2,3,4,
+\]
+with fixed
+\[
+\rho_1 = 0,\quad \rho_2 = 0.44,\quad \rho_3 = 0.85,\quad \rho_4 = 0.95,
+\]
+but now **allowing each** \(\{\varepsilon^{(i)}_t\}\sim \mathcal{N}(0,\sigma_i^2)\) to have an arbitrary variance \(\sigma_i^2\).  Instead of forcing exact matching of covariances at a few lags (which, as we saw, leads to negative “weights”), we shall match the **entire power‐spectral density** of AR(0.7) in a least‐squares sense.  Equivalently, we will choose \(\{\sigma_i^2\}\) so that
+\[
+X_t \;=\;\sum_{i=1}^4 Y^{(i)}_t
+\]
+has a power spectrum as close as possible (in \(L^2\)) to that of an AR(0.7).  This yields a nonnegative‐least‐squares problem in the frequency domain.
+
+---
+
+### 1. Review: PSD of a unit‐variance AR(0.7) process
+
+The stationary AR(1) defined by
+\[
+X_{t+1} \;=\; 0.7\,X_t \;+\;\underbrace{\sqrt{\,1 - 0.7^2\,}}_{=\,\sigma_X}\;\eta_{t+1},
+\quad \eta_{t}\overset{\text{i.i.d.}}{\sim}\mathcal{N}(0,1),
+\]
+has  
+\[
+\mathrm{Var}(X_t) \;=\;1,\quad 
+\mathrm{Cov}(X_t,X_{t-h}) \;=\;(0.7)^{\,|h|}, 
+\quad h\in\mathbb{Z}.
+\]
+Its one‐sided (discrete‐time) transfer function from the white‐noise input \(\eta_t\) to \(X_t\) is
+\[
+H_X(e^{i\omega}) 
+\;=\; \frac{\sigma_X}{\,1 - 0.7\,e^{-i\omega}\,}
+\;=\;\frac{\sqrt{\,1 - 0.7^2\,}}{\,1 - 0.7\,e^{-i\omega}\,}.
+\]
+Hence the **power‐spectral density** (PSD) of \(\{X_t\}\) is
+\[
+S_X(\omega)
+\;=\;\bigl\lvert H_X(e^{i\omega}) \bigr\rvert^2
+\;=\;\frac{\,1 - 0.7^2\,}{\,\lvert\,1 - 0.7\,e^{-i\omega}\rvert^2\,}
+\;=\;\frac{0.51}{\,1 - 2\cdot 0.7\cos(\omega) + 0.7^2\,}, 
+\quad \omega\in[-\pi,\pi].
+\]
+In particular, \(S_X(\omega)\) is symmetric in \(\omega\).  Equivalently, for \(\omega\in[0,\pi]\),
+\[
+S_X(\omega)
+=\frac{0.51}{\,1 - 1.4\cos(\omega) + 0.49\,}.
+\]
+
+---
+
+### 2. PSD of each AR\((\rho_i)\) “component”
+
+For \(i=1,\dots,4\), define
+\[
+Y^{(i)}_{t+1} \;=\;\rho_i\,Y^{(i)}_{t} \;+\;\varepsilon^{(i)}_{t+1}, 
+\qquad \mathrm{Var}\bigl(\varepsilon^{(i)}_{t}\bigr)=\sigma_i^2.
+\]
+Then \(\{Y^{(i)}_t\}\) is stationary with variance 
+\(\mathrm{Var}(Y^{(i)}) = \frac{\sigma_i^2}{\,1 - \rho_i^2\,}\) and one‐sided transfer function
+\[
+H_i(e^{i\omega}) \;=\;\frac{\sigma_i}{\,1 - \rho_i\,e^{-i\omega}\,}.
+\]
+Hence its PSD is
+\[
+S_i(\omega)
+\;=\;\bigl\lvert H_i(e^{i\omega})\bigr\rvert^2
+\;=\;\frac{\sigma_i^2}{\,\lvert\,1 - \rho_i\,e^{-i\omega}\rvert^2\,}
+\;=\;\frac{\sigma_i^2}{\,1 - 2\rho_i\cos(\omega) + \rho_i^2\,}.
+\]
+In particular:
+- If \(\rho_i = 0\), then \(S_1(\omega) = \sigma_1^2\) (white‐noise component),
+- If \(\rho_i = 0.44\), then \(S_2(\omega) = \sigma_2^2 / \bigl[1 - 0.88\cos(\omega) + 0.44^2\bigr]\),
+- If \(\rho_i = 0.85\), then \(S_3(\omega) = \sigma_3^2 / \bigl[1 - 1.7\cos(\omega) + 0.85^2\bigr]\),
+- If \(\rho_i = 0.95\), then \(S_4(\omega) = \sigma_4^2 / \bigl[1 - 1.9\cos(\omega) + 0.95^2\bigr].\)
+
+---
+
+### 3. Summing four PSDs to approximate \(S_X(\omega)\)
+
+Since we plan to take
+\[
+X_t \;=\;\sum_{i=1}^4 Y^{(i)}_t
+\]
+and the noises \(\{\varepsilon^{(i)}_t\}\) are independent of each other, the **PSD of \(X\)** will be
+\[
+S_{\text{sum}}(\omega)
+\;=\;\sum_{i=1}^4 S_i(\omega)
+\;=\;\sum_{i=1}^4 \frac{\sigma_i^2}{\,\lvert\,1 - \rho_i\,e^{-i\omega}\rvert^2\,}.
+\]
+Our goal is to choose \(\sigma_1^2,\sigma_2^2,\sigma_3^2,\sigma_4^2 \ge0\) so that \(S_{\text{sum}}(\omega)\) is (in an \(L^2\)‐sense) as close as possible to the target \(S_X(\omega)\).  Equivalently, we solve the nonnegative least‐squares problem:
+\[
+\min_{\,\sigma_i^2 \ge 0\,}
+\quad
+\int_{0}^{\pi} \Bigl[
+\,S_X(\omega) \;-\;\sum_{i=1}^4 S_i(\omega)\Bigr]^2 \,d\omega.
+\]
+Because each \(S_i(\omega)\) depends on \(\sigma_i^2\) **linearly**, we can re‐parametrize:
+\[
+w_i \;:=\;\sigma_i^2,\qquad i=1,\dots,4,
+\]
+so that
+\[
+S_{\text{sum}}(\omega)
+=\sum_{i=1}^4 w_i\,\frac{1}{\,1 - 2\rho_i\cos(\omega) + \rho_i^2\,}.
+\]
+Call
+\[
+a_i(\omega) \;:=\;\frac{1}{\,1 - 2\rho_i\cos(\omega) + \rho_i^2\,}, 
+\quad i=1,2,3,4,
+\]
+and
+\[
+b(\omega) \;:=\; \frac{\,1 - 0.7^2\,}{\,1 - 2\cdot 0.7 \cos(\omega) + 0.7^2\,} \;=\;\frac{0.51}{\,1 - 1.4\cos(\omega) + 0.49\,}.
+\]
+Then our approximation problem becomes:
+\[
+\min_{\,w_i \ge0\,}
+\quad
+\int_{0}^{\pi} 
+\Bigl[b(\omega)\;-\;\sum_{i=1}^4 w_i\,a_i(\omega)\Bigr]^2
+\,d\omega.
+\]
+Because the integrand is nonnegative for each \(\omega\), the minimizing \(\{w_i\}\) solve a convex quadratic‐program in \(\mathbb{R}^4_{+}\).  In practice one discretizes \(\omega\) on a fine grid \(\{\omega_j\}_{j=1}^M\subset[0,\pi]\).  For each \(\omega_j\), define
+\[
+A_{j,i} \;:=\; a_i(\omega_j)
+\;=\;\frac{1}{\,1 \;-\;2\rho_i\cos(\omega_j)\;+\;\rho_i^2\,}, 
+\quad
+b_j \;:=\; b(\omega_j),
+\]
+and solve the finite‐dimensional nonnegative least‐squares:
+\[
+\min_{\,w_i \ge 0\,}
+\quad
+\sum_{j=1}^M 
+\Bigl[\,b_j - (A_{j,1}w_1 + A_{j,2}w_2 + A_{j,3}w_3 + A_{j,4}w_4)\Bigr]^2.
+\]
+Because \(M\gg 4\), this is an overdetermined system that yields a **unique** \(\{w_i\}_{i=1}^4\) (in a least‐squares sense) subject to \(w_i\ge0\).  Once the numerical solver (e.g.\ a nonnegative‐least‐squares routine) produces
+\[
+\bigl(w_1,w_2,w_3,w_4\bigr),
+\]
+we set
+\[
+\sigma_i^2 = w_i,\qquad
+Y_{t+1}^{(i)}
+= \rho_i\,Y_{t}^{(i)} \;+\;\varepsilon_{t+1}^{(i)},
+\quad
+\mathrm{Var}\bigl(\varepsilon_{t}^{(i)}\bigr)=w_i,
+\]
+and finally define
+\[
+X_t \;=\;\sum_{i=1}^4 Y_t^{(i)}.
+\]
+By construction,
+\[
+S_{X}(\omega) \approx \sum_{i=1}^4 S_i(\omega)
+\]
+in the sense of minimizing \(\int_0^\pi [\,S_X(\omega) - \sum_i S_i(\omega)\,]^2\,d\omega\).  
+Because we forced \(w_i\ge0\), each \(\sigma_i^2\ge0\) and every \(\{Y^{(i)}\}\) is a legitimate AR process.  In practice one finds that:
+
+- **None** of the four basis AR(ρᵢ) must match exactly \(\rho=0.7\).  
+- The optimized \(\{w_i\}\) are all nonnegative (unlike the negative “weights” from matching lags 0–3).
+- The resulting \(\sum_i Y^{(i)}\) has a PSD that is very close to that of AR(0.7) at **all frequencies** (not just a few lags).
+
+In other words, the **Fourier–least‐squares** approach yields a practical way to build four AR(ρᵢ) components whose sum is an excellent approximation to the target AR(0.7).
+
+---
+
+### 4. (Optional) Using a Kalman‐filter / state‐space view
+
+One can also view the problem in a state‐space or Kalman‐filter framework.  For example:
+
+1.  **Latent “mixture” state.**  Introduce a 4‐dimensional latent state
+    \[
+    \mathbf{Y}_t \;=\;\bigl(Y_t^{(1)},\,Y_t^{(2)},\,Y_t^{(3)},\,Y_t^{(4)}\bigr)^\top.
+    \]
+    Each coordinate evolves as
+    \[
+    Y_{t+1}^{(i)} = \rho_i\,Y_t^{(i)} + \varepsilon_{t+1}^{(i)}, 
+    \quad 
+    \varepsilon_{t+1}^{(i)} \sim \mathcal{N}(0,\,w_i),
+    \]
+    so in vector form,
+    \[
+    \mathbf{Y}_{t+1} 
+    = 
+    \underbrace{\begin{pmatrix}
+    \rho_1 & 0 & 0 & 0\\
+    0 & \rho_2 & 0 & 0\\
+    0 & 0 & \rho_3 & 0\\
+    0 & 0 & 0 & \rho_4
+    \end{pmatrix}}_{=:F} \,\mathbf{Y}_t 
+    \;+\; \boldsymbol{\varepsilon}_{t+1}, 
+    \quad 
+    \boldsymbol{\varepsilon}_{t+1} \sim \mathcal{N}\bigl(\mathbf{0},\,Q\bigr),
+    \]
+    where \(Q = \mathrm{diag}(w_1,w_2,w_3,w_4)\).  
+
+2.  **Observation equation.**  We observe
+    \[
+    X_t \;=\; [\,1,\,1,\,1,\,1\,]\,\mathbf{Y}_t \;+\; 0,
+    \]
+    i.e.\ \(X_t = \mathbf{1}^\top\,\mathbf{Y}_t\).  There is no extra measurement noise (or, if you prefer, set measurement noise variance \(R=0\)).  
+
+3.  **Design goal.**  We want the one‐step‐ahead covariance of \(X_t\) to match that of AR(0.7).  Equivalently, we choose \(Q=\mathrm{diag}(w_1,\dots,w_4)\) so that the stationary covariance of the 4‐dimensional state \(\mathbf{Y}_t\) yields \(\mathrm{Cov}(X_t,X_{t-h})=(0.7)^h\).  
+
+4.  **Stationary covariance of \(\mathbf{Y}_t\).**  Because each coordinate is independent, at stationarity
+    \[
+    \mathrm{Var}\bigl(Y^{(i)}_t\bigr) 
+    = \frac{w_i}{\,1 - \rho_i^2\,}, 
+    \quad
+    \mathrm{Cov}\bigl(Y^{(i)}_t,\,Y^{(i)}_{t-h}\bigr)
+    = \frac{w_i}{\,1 - \rho_i^2\,}\,\rho_i^{\,|h|}.
+    \]
+    Hence
+    \[
+    \mathrm{Cov}\bigl(X_t,\,X_{t-h}\bigr)
+    = \sum_{i=1}^4 \frac{w_i}{\,1 - \rho_i^2\,}\,\rho_i^{\,|h|}.
+    \]
+    Imposing \(\mathrm{Cov}(X_t,X_{t-h}) = 0.7^{\,|h|}\) for \(h=0,1,2,\dots\) leads back to the same system  
+    \[
+    \sum_{i=1}^4 \frac{w_i}{\,1 - \rho_i^2\,}\,\rho_i^{\,h}
+    \;=\;0.7^h,\quad h=0,1,2,\dots\,,
+    \]
+    which we already saw has no exact nonnegative solution for all \(h\).  Instead, one may choose \(Q\) (equivalently \(\{w_i\}\)) to **minimize** a suitable norm of the difference
+    \(\bigl\{\mathrm{Cov}(X_t,X_{t-h}) - 0.7^h\bigr\}_{h=0}^H\) for some finite horizon \(H\), or (more generally) to minimize a spectral‐norm error.  In either case, one ends up with a small‐dimensional convex optimization in \(\{w_i\}\ge0\).  
+
+5.  **Kalman‐filter viewpoint.**  Once \(Q=\mathrm{diag}(w_1,\dots,w_4)\) is fixed, the 4‐dimensional state‐space model
+    \[
+    \begin{cases}
+    \mathbf{Y}_{t+1} = F\,\mathbf{Y}_t + \boldsymbol{\varepsilon}_{t+1},\quad \boldsymbol{\varepsilon}_{t+1}\sim \mathcal{N}(0,Q),\\
+    X_t = \mathbf{1}^\top\,\mathbf{Y}_t,
+    \end{cases}
+    \]
+    is linear and Gaussian.  One can run a Kalman smoother on actual data from an AR(0.7) to \emph{estimate} an optimal \(\{w_i\}\) by maximum‐likelihood (or EM).  In effect, you treat \(\bigl(Y^{(1)}_t,\dots,Y^{(4)}_t\bigr)\) as latent AR(ρᵢ) states, “observe” their sum \(X_t\), and adjust \(Q\) until the implied one‐step prediction error for \(X_t\) behaves like \(\sqrt{1 - 0.7^2}\,\eta_t\).  Concretely:
+    - Initialize guesses \(w_i^{(0)}\).  
+    - Run the Kalman filter/smoother to compute the smoothed state covariance \(\widehat{\mathrm{Cov}}(X_t,X_{t-1})\), \(\widehat{\mathrm{Cov}}(X_t,X_{t-2})\), etc., and the innovation variance.  
+    - Update \(w_i\) (e.g.\ via EM or via minimizing the difference between predicted and actual AR(0.7) covariances).  
+    - Iterate until convergence.  
+
+   This yields a data‐driven, maximum‐likelihood estimate of \(\{w_i\}\).  In effect, you are forcing the \emph{filtered} sum of four AR(ρᵢ) latents to track AR(0.7).
+
+---
+
+### 5. Summary of “more elaborate” approaches
+
+1.  **Spectral (Fourier) least‐squares**  
+    - Write the target PSD \(S_X(\omega)\) of AR(0.7).  
+    - Write each basis PSD \(S_i(\omega) = w_i/|\,1 - \rho_i e^{-i\omega}|^2\,\).  
+    - Choose nonnegative scalars \(w_i\) to minimize  
+      \(\displaystyle \int_{0}^{\pi}\bigl[S_X(\omega) - \sum_{i=1}^4 S_i(\omega)\bigr]^2\,d\omega.\)  
+    - This yields a convex problem in \((w_1,\dots,w_4)\ge0\).  The resulting \(\{w_i\}\) produce four AR(ρᵢ) processes whose sum has a PSD that is “as close as possible” (in \(L^2\)) to the exact AR(0.7) PSD.  
+
+2.  **Kalman‐filter / EM approach**  
+    - Build a 4‐dimensional state‐space model where each latent coordinate is AR(ρᵢ) driven by independent variance‐\(w_i\) noise.  
+    - Observe only \(X_t = \sum_{i=1}^4 Y_t^{(i)}\).  
+    - Use likelihood maximization (via Kalman filter + EM) on a simulated or real AR(0.7) time series to “learn” \(\{w_i\}\ge0\).  
+    - The end result is again four AR(ρᵢ) components whose sum reproduces (again in a least‐squares or ML sense) the covariance/innovation behavior of AR(0.7).  
+
+Either approach avoids the impossibility of matching an infinite‐dimensional ACF by simply matching the entire spectrum or by maximum‐likelihood fitting in state‐space.  In practice, you would:
+
+- **Step 1:** Choose a fine grid \(\{\omega_j\}_{j=1}^M\subset[0,\pi]\).  
+- **Step 2:** Compute the target spectrum \(b_j = (0.51)/(1 - 1.4\cos(\omega_j) + 0.49)\).  
+- **Step 3:** For \(i=1,..,4\), compute \(A_{j,i} = 1/[\,1 - 2\rho_i\cos(\omega_j) + \rho_i^2\,]\).  
+- **Step 4:** Solve the nonnegative least‐squares 
+  \(\min_{w_i\ge0}\sum_{j=1}^M \bigl[b_j - \sum_{i=1}^4 A_{j,i} w_i\bigr]^2\).  
+- **Step 5:** Set \(\sigma_i^2 = w_i\).  Then each \(Y_t^{(i)}\) is AR(ρᵢ) with \(\mathrm{Var}(\varepsilon_t^{(i)}) = w_i\).  
+- **Step 6:** Finally, define \(X_t = \sum_{i=1}^4 Y_t^{(i)}\).  
+
+This yields a \emph{valid} decomposition (all \(\sigma_i^2 \ge0\)) that—though not exact in the time‐domain ACF for every lag—matches the entire PSD of AR(0.7) as closely as possible with only four poles \(\{\rho_i\}\).  
+
+---
+
+**Conclusion.**  
+- If you **require exact** decomposition of an AR(0.7) into four AR(ρᵢ) with \(\rho_i\neq0.7\), you will inevitably need negative variances (impossible).  
+- By switching to a **spectral (Fourier) matching** or a **Kalman/EM** approach, you can find nonnegative \(\{\sigma_i^2\}\) such that 
+  \[
+  X_t \;=\; \sum_{i=1}^4 Y^{(i)}_t
+  \]
+  yields a process whose spectrum (hence approximate covariance for all lags) is “as close as possible” to AR(0.7).  
+- In practice, one discretizes \(\omega\), solves a nonnegative‐least‐squares for \(\{w_i\}\), and then builds four AR(ρᵢ) processes with \(\mathrm{Var}(\varepsilon^{(i)}) = w_i\).  
+
+You can copy–paste this entire block into a Markdown cell. It outlines two more “elaborate” recipes—Fourier‐based or Kalman/EM‐based—that produce a valid 4‐component decomposition without forcing any negative variances.
