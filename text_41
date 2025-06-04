@@ -1,0 +1,155 @@
+### Lemma 1 (Invariance of \(\mathcal F\) under \(T\))  
+If \(Q\in\mathcal F\) then \(TQ\in\mathcal F\).
+
+#### Proof
+
+**Step 0. Quadratic representation of \(Q\in\mathcal F\).**  
+By definition of \(\mathcal F\), we have
+\[
+Q(s,a) \;=\; g(s,a)\;-\;c\,|a|,
+\]
+and \(g(s,\cdot)\) is \(C^1\) in a neighbourhood of \(a=0\).  Therefore, a Taylor expansion (or simply the fact that any \(C^1\) function can be written locally as a quadratic plus higher–order terms) shows that for each fixed state \(s\) one can write
+\[
+Q(s,a)
+\;=\;
+A_Q(s)\,a^{2} \;+\; B_Q(s)\,a \;+\; D_Q(s)\;-\; c\,|a|,
+\tag{5}
+\]
+where \(A_Q(s)<0\) (concavity in \(a\) is inherited from the Bellman recursion—see the base case \(A<0\) in equation \((2)\) of the main text).  In particular, the only non-\(C^1\) part in \(a\) is \(-\,c\,|a|\).
+
+---
+
+**Step 1. Optimise over the next trade.**  
+Fix a next-state \(s'\).  We must solve the one-dimensional concave maximisation
+\[
+\max_{a\in\mathbb R}\;\Bigl[A_Q(s')\,a^{2} \;+\; B_Q(s')\,a \;-\; c\,|a|\Bigr].
+\]
+The standard “soft-threshold’’ solution (e.g.\ as in Almgren–Chriss) is
+\[
+a^*(s')
+=
+\begin{cases}
+\dfrac{c - B_Q(s')}{2\,A_Q(s')}, 
+& B_Q(s') > c, \\[6pt]
+0, 
+& |\,B_Q(s')\,|\;\le\;c, \\[6pt]
+\dfrac{-\,c - B_Q(s')}{2\,A_Q(s')}, 
+& B_Q(s') < -\,c.
+\end{cases}
+\tag{6}
+\]
+Substituting \(a^*(s')\) back into the objective yields
+\[
+V_Q(s')
+\;:=\;
+\max_{a} Q(s',a)
+\;=\;
+D_Q(s')
+\;-\;\frac{\bigl(|\,B_Q(s')\,| - c\bigr)_{+}^{2}}{4\,A_Q(s')},
+\tag{7}
+\]
+where \((x)_+ := \max\{\,x,0\}\).  Notice that \(V_Q(s')\) depends on \(s'\) only through the triple \(\bigl(A_Q(s'),\,B_Q(s'),\,D_Q(s')\bigr)\).  In particular, no \(|a|\)-term remains in \(V_Q(s')\).
+
+---
+
+**Step 2. How the current trade \(x\) enters \(V_Q(s')\).**  
+Recall that the next state \(s' = (p',\,\mathrm{imb}'_1,\,\mathrm{imb}'_2,\,\alpha'_1,\,\alpha'_2)\) is an affine function of the current trade \(x\).  Concretely:
+\[
+\begin{aligned}
+p' &= p + x,\\[4pt]
+\mathrm{imb}'_j &= \phi_j\,\mathrm{imb}_j \;+\;(1 - \phi_j)\,x,
+\quad j=1,2,\\[4pt]
+\alpha'_j &= \rho_j\,\alpha_j + \varepsilon_j,\quad
+j=1,2,
+\end{aligned}
+\]
+where \(\varepsilon=(\varepsilon_1,\varepsilon_2)\) are the new i.i.d.\ shocks, independent of \(x\).  Because \(A_Q(\cdot)\), \(B_Q(\cdot)\), and \(D_Q(\cdot)\) are functions of \(s'\), we deduce:
+
+- \(A_Q(s')\) depends only on the “noise” part of \(s'\) (the \(\alpha'\)-coordinates).  In particular, **\(A_Q(s')\) is independent of \(x\).**  
+- \(B_Q(s')\) is \emph{affine} in \(x\).  Equivalently, there exist deterministic functions \(\beta_0(s,\varepsilon)\) and \(\beta_1(s)\neq 0\) such that
+  \[
+  B_Q(s') \;=\; \beta_0(s,\varepsilon)\;+\;\beta_1(s)\,x.
+  \]
+- \(D_Q(s')\) is \emph{quadratic} in \(x\).  Equivalently, there exist (random) coefficients \(\delta_0(s,\varepsilon)\), \(\delta_1(s)\), \(\delta_2(s)\) such that
+  \[
+  D_Q(s') \;=\; \delta_0(s,\varepsilon)\;+\;\delta_1(s)\,x\;+\;\delta_2(s)\,x^{2}.
+  \]
+Putting these remarks together:
+\[
+\begin{aligned}
+A_Q(s') &= A_Q\bigl(\text{noise only}\bigr)\quad (\text{independent of }x),\\[4pt]
+B_Q(s') &= \beta_0(s,\varepsilon)\;+\;\beta_1(s)\,x,\\[4pt]
+D_Q(s') &= \delta_0(s,\varepsilon)\;+\;\delta_1(s)\,x\;+\;\delta_2(s)\,x^2.
+\end{aligned}
+\tag{8}
+\]
+
+---
+
+**Step 3. Conditional expectation adds no kink at \(x=0\).**  
+Define
+\[
+v_Q(s,x) 
+\;:=\; 
+\mathbb E\bigl[V_Q(s') \,\bigm|\, s,x\bigr].
+\]
+From \((7)\) and \((8)\), we see that for each fixed realisation of the noise \(\varepsilon\),
+\[
+V_Q(s')
+\;=\;
+\delta_0(s,\varepsilon)\;+\;\delta_1(s)\,x\;+\;\delta_2(s)\,x^{2}
+\;-\;
+\frac{\bigl(\bigl|\beta_0(s,\varepsilon)+\beta_1(s)\,x\bigr|-c\bigr)_+^{2}}{4\,A_Q(s')}.
+\]
+The only potential non-\(C^1\) behaviour (a “kink”) in the variable \(x\) arises from the map
+\[
+z \;\longmapsto\; (\,|z| - c\,)_+^{2}
+\quad
+\text{evaluated at } z = \beta_0(s,\varepsilon) + \beta_1(s)\,x.
+\]
+Because \(x\mapsto\beta_0+\beta_1\,x\) is affine, this kink occurs only when \(\beta_0(s,\varepsilon) + \beta_1(s)\,x = \pm\,c\).  Equivalently,
+\[
+x \;=\; x_{\pm}(\varepsilon)
+\;=\;
+\frac{\pm c - \beta_0(s,\varepsilon)}{\beta_1(s)}.
+\]
+Since \(\beta_0(s,\varepsilon)\) is a nondegenerate continuous random variable (a linear combination of Gaussian shocks \(\varepsilon\)), one has
+\[
+\mathbb P\bigl(\beta_0(s,\varepsilon) = \pm\,c\bigr) \;=\; 0.
+\]
+Thus, \emph{almost surely}, the kinks in the “inside” function
+\(\bigl(|\beta_0+\beta_1 x| - c\bigr)_+^{2}\) occur at points \(x_{\pm}(\varepsilon)\neq 0\).  When we take the conditional expectation over \(\varepsilon\), these random kink locations get “averaged out,” producing a function
+\[
+v_Q(s,x)
+=
+\mathbb E_\varepsilon\Bigl[
+\delta_0(s,\varepsilon)+\delta_1(s)\,x+\delta_2(s)\,x^{2}
+-\frac{\bigl(|\beta_0(s,\varepsilon)+\beta_1(s)\,x|-c\bigr)_+^{2}}{4\,A_Q(s')}
+\Bigr]
+\]
+that is \(C^1\) at \(x=0\).  In particular, \(v_Q(s,x)\) has no term proportional to \(|x|\).
+
+---
+
+**Step 4. Reassemble the Bellman operator.**  
+Recall
+\[
+(TQ)(s,x)
+\;=\; r(s,x) \;+\; \gamma\,v_Q(s,x).
+\]
+Since \(r(s,x)=q(s,x)-c\,|x|\) and \(q(s,x)\) is a smooth quadratic in \(x\), we can write
+\[
+(TQ)(s,x)
+=
+\underbrace{\bigl[q(s,x) + \gamma\,v_Q(s,x)\bigr]}_{g_{\text{new}}(s,x)\text{, }C^1\text{ near }x=0}
+\;-\; c\,|x|.
+\]
+Because \(v_Q(s,x)\) is \(C^1\) at \(x=0\), the bracketed term is \(C^1\) around \(x=0\).  Consequently,
+\[
+(TQ)(s,x)
+= g_{\text{new}}(s,x) \;-\; c\,|x|,
+\]
+with \(g_{\text{new}}(s,\cdot)\) again \(C^1\) near 0.  In other words, \(TQ\) lies in \(\mathcal F\).
+
+\(\boxed{\;TQ\in\mathcal F\;}\)  
+This completes the proof of Lemma 1.  
