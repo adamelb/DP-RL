@@ -1,0 +1,53 @@
+import numpy as np
+
+# Function to compute sample autocorrelation up to maxlag
+def sample_acf(x, maxlag):
+    n = len(x)
+    x_mean = np.mean(x)
+    denom = np.sum((x - x_mean)**2)
+    acfs = []
+    for h in range(maxlag + 1):
+        num = np.sum((x[h:] - x_mean) * (x[:n - h] - x_mean))
+        acfs.append(num / denom)
+    return np.array(acfs)
+
+# 1. Simulation parameters
+N = 10000
+rhos = [0.0, 0.44, 0.85, 0.95]
+
+# 2. Weights chosen to match lag-1 autocorrelation (0.7) for X = Y3 + Y4
+#    w1 = w2 = 0, w3 = 0.8235294, w4 = 0.1764706
+w = [0.0, 0.0, 0.8235294, 0.1764706]
+
+# 3. Compute noise standard deviations for each Y^{(i)}
+#    Var(Y_i) = w_i, and Var(Y_i) = sigma_i^2 / (1 - rho_i^2)  =>  sigma_i^2 = w_i * (1 - rho_i^2)
+sigmas = [np.sqrt(w[i] * (1 - rhos[i]**2)) for i in range(4)]
+
+# 4. Simulate each Y^{(i)} as AR(1) with given rho_i and noise variance sigmas[i]^2
+Y = np.zeros((4, N))
+for i in range(4):
+    for t in range(1, N):
+        Y[i, t] = rhos[i] * Y[i, t - 1] + sigmas[i] * np.random.randn()
+
+# 5. Form X_t as the sum of the 4 components
+X = Y.sum(axis=0)
+
+# 6. Display variances
+print(f"Var(X) ≈ {np.var(X):.4f}   (target = 1)")
+for i in range(4):
+    var_Yi_empirical = np.var(Y[i])
+    var_Yi_theoretical = w[i]
+    print(f"Var(Y{i+1}) ≈ {var_Yi_empirical:.4f}   (theoretical = {var_Yi_theoretical:.4f})")
+
+# 7. Compute and display sample autocorrelations up to lag 5
+maxlag = 5
+acf_X = sample_acf(X, maxlag)
+print("\nSample ACF of X:")
+for h in range(maxlag + 1):
+    print(f"  lag {h}: {acf_X[h]:.4f}   (target lag-{h} = {0.7**h:.4f})")
+
+for i in range(4):
+    acf_Yi = sample_acf(Y[i], maxlag)
+    print(f"\nSample ACF of Y{i+1} (rho = {rhos[i]}):")
+    for h in range(maxlag + 1):
+        print(f"  lag {h}: {acf_Yi[h]:.4f}   (target rho^{h} = {rhos[i]**h:.4f})")
