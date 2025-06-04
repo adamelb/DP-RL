@@ -1,0 +1,100 @@
+import numpy as np
+
+# 1. Simulate AR(1): X[t] = rho_target * X[t-1] + sigma_target * noise
+def simulate_ar1(rho, sigma_noise, N):
+    x = np.zeros(N)
+    for t in range(1, N):
+        x[t] = rho * x[t - 1] + sigma_noise * np.random.randn()
+    return x
+
+# 2. Decompose X into four AR(ρ_i) components via FFT projection
+def decompose_ar_components(X, rhos):
+    """
+    Given a real-valued time series X of length N, decompose it exactly into
+    sum of AR(ρ_i) outputs Y_i via frequency-domain projection.
+
+    Returns an array Y of shape (4, N) where each Y[i] satisfies an AR(1) recursion
+      Y_i[t+1] = rho_i * Y_i[t] + e_i[t+1].
+    """
+    N = len(X)
+    # 2a. Compute FFT of X
+    Xf = np.fft.fft(X)
+
+    # 2b. Compute H_i(omega_k) = 1 / (1 - rho_i * e^{-i*omega_k}) for each i, k
+    #     where omega_k = 2*pi * k / N
+    H = np.zeros((4, N), dtype=np.complex128)
+    omega = 2 * np.pi * np.arange(N) / N
+    for i, rho_i in enumerate(rhos):
+        H[i, :] = 1.0 / (1 - rho_i * np.exp(-1j * omega))
+
+    # 2c. Denominator at each frequency bin: sum_i |H_i(omega_k)|^2
+    denom = np.sum(np.abs(H) ** 2, axis=0)  # shape (N,)
+
+    # 2d. Compute E_i(omega_k) = conj(H_i) * Xf / denom
+    E_f = np.zeros_like(H)
+    for i in range(4):
+        E_f[i, :] = np.conjugate(H[i, :]) * Xf / denom
+
+    # 2e. Compute Yf[i, k] = H_i(omega_k) * E_i(omega_k)
+    Yf = H * E_f  # shape (4, N)
+
+    # 2f. Inverse FFT to get Y_i(t)
+    Y = np.real(np.fft.ifft(Yf, axis=1))
+    return Y
+
+# 3. Sample ACF function
+def sample_acf(x, maxlag):
+    """
+    Compute the sample autocorrelation function of x up to lag = maxlag.
+    Returns an array of length (maxlag+1).
+    """
+    n = len(x)
+    x_mean = np.mean(x)
+    denom = np.sum((x - x_mean) ** 2)
+    acf_vals = np.zeros(maxlag + 1)
+    for h in range(maxlag + 1):
+        num = np.sum((x[h:] - x_mean) * (x[:n - h] - x_mean))
+        acf_vals[h] = num / denom
+    return acf_vals
+
+# -----------------------------
+# MAIN SCRIPT
+# -----------------------------
+if __name__ == "__main__":
+    # (a) Simulate a “true” AR(0.7) trajectory
+    rho_target = 0.7
+    sigma_target = np.sqrt(1 - rho_target**2)  # ensures Var(X)=1
+    N = 4096  # length of the time series (power of 2 for FFT speed)
+
+    X = simulate_ar1(rho=rho_target, sigma_noise=sigma_target, N=N)
+
+    # (b) Decompose X into four AR(ρ_i) components
+    rhos = [0.0, 0.44, 0.85, 0.95]
+    Y = decompose_ar_components(X, rhos)  # shape (4, N)
+
+    # (c) Verify exact reconstruction: X_reconstructed = sum_i Y[i]
+    X_reconstructed = np.sum(Y, axis=0)
+    reconstruction_error = np.max(np.abs(X - X_reconstructed))
+    print("Max absolute error in reconstruction ||X - sum(Y_i)||_∞ =", reconstruction_error)
+
+    # (d) Print sample variances
+    print("\nSample variances:")
+    print(f"  Var(X) = {np.var(X):.6f}")
+    for i in range(4):
+        var_Yi = np.var(Y[i, :])
+        print(f"  Var(Y_{i+1}) = {var_Yi:.6f}   (rho_i = {rhos[i]:.2f})")
+
+    # (e) Compute and display sample ACFs up to lag 10
+    maxlag = 10
+    acf_X = sample_acf(X, maxlag)
+    acf_X_rec = sample_acf(X_reconstructed, maxlag)
+    print("\nSample ACF of original X (AR(0.7)) vs. reconstructed sum:")
+    for h in range(maxlag + 1):
+        print(f"  lag {h:2d}: ACF(X) = {acf_X[h]:.4f}, "
+              f"ACF(X_rec) = {acf_X_rec[h]:.4f}, target = {rho_target**h:.4f}")
+
+    for i in range(4):
+        acf_Yi = sample_acf(Y[i, :], maxlag)
+        print(f"\nSample ACF of Y_{i+1} (rho = {rhos[i]:.2f}):")
+        for h in range(maxlag + 1):
+            print(f"  lag {h:2d}: {acf_Yi[h]:.4f}   (target = {rhos[i]**h:.4f})")
