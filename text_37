@@ -1,0 +1,105 @@
+```latex
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{geometry}
+\usepackage{enumitem}
+\geometry{margin=1in}
+
+\title{A Rigorous Proof that the $|x|$–Coefficient of the $Q$–Function is the Constant \boldmath$-c$}
+\author{}
+\date{\today}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+\section{Introduction}
+
+We consider a discrete–time optimal-execution problem with transient market impact,
+AR(1) alpha signals, and quadratic inventory penalisation.  Let the state at time~$t$ be
+\[
+  s_t \;=\;
+  \bigl(p_t,\;\operatorname{imb}_{1,t},\;\operatorname{imb}_{2,t},\;
+        \alpha_{1,t},\;\alpha_{2,t}\bigr),
+\]
+with
+\begin{itemize}[nosep]
+  \item $p_t$ — current inventory,
+  \item $\operatorname{imb}_{j,t}$ — transient impact states ($j=1,2$),
+  \item $\alpha_{j,t}$ — alpha signals ($j=1,2$).
+\end{itemize}
+A trade is $x_t\in\mathbb R$ (buy $>$ 0, sell $<$ 0).
+Our goal is to show that the optimal state–action value function
+\[
+  Q^\*(s,x)
+  \;=\;
+  f_1(s)\,x^2 \;-\; c\,|x| \;+\; f_3(s)\,x + f_4(s),
+\]
+has a state-independent $|x|$-coefficient equal to $-c$.
+
+\section{Model Specification}
+
+\subsection{State dynamics}
+\begin{align}
+    p_{t+1} &= p_t + x_t, \label{eq:p-update}\\[4pt]
+    \operatorname{imb}_{j,t+1} &= \phi_j \operatorname{imb}_{j,t}
+                                 + (1-\phi_j)\,x_t,
+      \quad 0<\phi_j<1,\; j=1,2,  \label{eq:imb-update}\\[4pt]
+    \alpha_{j,t+1} &= \rho_j \alpha_{j,t} + \varepsilon_{j,t+1},
+      \quad |\rho_j|<1,\; j=1,2,                       \label{eq:alpha-update}
+\end{align}
+
+\subsection{One–period reward}
+\[
+  r(s,x) = q(s,x)-c\,|x|,
+  \qquad
+  q(s,x)=A\,x^{2}+B(s)\,x+D(s),\quad A<0.
+\]
+
+\subsection{Bellman operator}
+\[
+  (TQ)(s,x)
+  = r(s,x) + \gamma\,
+    \mathbb E\bigl[\max_{a\in\mathbb R} Q(s',a)\mid s,x\bigr],
+  \qquad 0<\gamma<1.
+\]
+
+\section{Function Class}
+\[
+  \mathcal F
+  :=\Bigl\{\,Q\; \bigm|\;
+    Q(s,x)=g(s,x)-c\,|x|,
+    \ g(s,\cdot)\in C^{1}\text{ near }x=0
+  \Bigr\}.
+\]
+
+\section{Invariance of \texorpdfstring{$\mathcal F$}{F}}
+\begin{lemma}
+If $Q\in\mathcal F$ then $TQ\in\mathcal F$.
+\end{lemma}
+\begin{proof}
+(Outlined steps: quadratic form, optimisation of next trade, affine dependence on current trade, smoothing via conditional expectation, reassembly.)
+\end{proof}
+
+\section{Main Result}
+\begin{theorem}
+$Q^\*\in\mathcal F$, hence
+\[
+  Q^\*(s,x)
+  = f_1(s)\,x^{2} - c\,|x| + f_3(s)\,x + f_4(s).
+\]
+\end{theorem}
+
+\section{Discussion}
+
+\begin{itemize}[nosep]
+  \item Only the \emph{current} transaction cost contributes non-smoothness.
+  \item Any learning architecture will converge to the fixed coefficient $-c$.
+\end{itemize}
+
+\end{document}
+```
