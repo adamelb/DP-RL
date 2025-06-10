@@ -1,0 +1,78 @@
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
+# === USER SETUP: replace these with your own ===
+num_epochs = 20          # Number of training epochs
+tMIN = 0                 # Minimum iteration label
+tMAX = 9                 # Maximum iteration label
+batch_size = 64          # Batch size
+learning_rate = 1e-3     # Learning rate
+
+# Assume you have:
+#   - a Dataset that returns (features, target, iteration) per sample
+#   - a DataLoader wrapping it
+# Replace the line below with your own DataLoader
+# dataloader = DataLoader(your_dataset, batch_size=batch_size, shuffle=False)
+
+# Define your model and optimizer
+# model = YourModel(...)
+# optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+# =============================================
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
+
+for epoch in range(1, num_epochs + 1):
+    # ------------------------------
+    # 1) Gather entire dataset into memory (no shuffling)
+    # ------------------------------
+    model.eval()
+    all_feats, all_tgts, all_iters = [], [], []
+    with torch.no_grad():
+        for feats, tgts, iters in dataloader:
+            all_feats.append(feats)
+            all_tgts.append(tgts)
+            all_iters.append(iters)
+    feats_all = torch.cat(all_feats, dim=0).to(device)      # shape (N, 25)
+    tgts_all  = torch.cat(all_tgts,  dim=0).to(device)      # shape (N,)
+    iters_all = torch.cat(all_iters, dim=0).to(device)      # shape (N,)
+
+    # ------------------------------
+    # 2) Compute mean loss per iteration
+    # ------------------------------
+    loss_per_iter = []
+    for it in range(tMIN, tMAX + 1):
+        mask = (iters_all == it)
+        if mask.any():
+            out    = model(feats_all[mask])
+            loss_i = F.mse_loss(out, tgts_all[mask], reduction='mean').item()
+        else:
+            loss_i = 0.0
+        loss_per_iter.append(loss_i)
+    loss_per_iter = torch.tensor(loss_per_iter, device=device)        # shape (tMAX-tMIN+1,)
+    # Normalize so weights sum to 1
+    weights_per_iter = loss_per_iter / loss_per_iter.sum()
+
+    # ------------------------------
+    # 3) Training pass with dynamic weights
+    # ------------------------------
+    model.train()
+    for feats, tgts, iters in dataloader:
+        feats, tgts, iters = feats.to(device), tgts.to(device), iters.to(device)
+        out = model(feats)                                           # shape (batch_size, ...)
+        # per-sample loss
+        per_sample = F.mse_loss(out, tgts, reduction='none')
+        # if output is >1d, average per sample:
+        if per_sample.ndim > 1:
+            per_sample = per_sample.view(per_sample.size(0), -1).mean(dim=1)
+        # lookup sample weights by iteration
+        sample_w = weights_per_iter[iters - tMIN]                    # shape (batch_size,)
+        # weighted mean loss
+        loss = (sample_w * per_sample).mean()
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    print(f"Epoch {epoch}/{num_epochs} complete. Iteration-losses: {loss_per_iter.tolist()}")
