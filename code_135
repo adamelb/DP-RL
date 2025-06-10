@@ -1,0 +1,22 @@
+import torch
+
+# Parameters
+tMIN = 0
+tMAX = 9
+n = 10000  # number of samples
+
+# Create values from tMIN to tMAX
+values = torch.arange(tMIN, tMAX + 1)
+
+# Create a weight vector (example: tMIN = 100x tMAX)
+# Let's assume a simple linear weight decay from tMIN to tMAX
+weights = torch.linspace(100.0, 1.0, steps=len(values))
+
+# Normalize to get probabilities
+probabilities = weights / weights.sum()
+
+# Sample indices according to the probabilities
+sample_indices = torch.multinomial(probabilities, n, replacement=True)
+
+# Map indices to values
+samples = values[sample_indices]
