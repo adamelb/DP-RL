@@ -1,0 +1,28 @@
+import torch
+import torch.nn.functional as F
+
+# ——— Your tensors ———
+# features:   (N, D)
+# targets:    (N,)
+# iteration:  (N,)  values in [tMIN … tMAX]
+# loss_per_iter:  list or 1-D tensor of length (tMAX–tMIN+1)
+
+device = features.device
+# 1) make a tensor of normalized iteration-losses
+iter_losses   = torch.tensor(loss_per_iter, device=device)              # shape (M,)
+weights_iter  = iter_losses / iter_losses.sum()                         # sum → 1
+
+# 2) pick a random batch of indices however you like
+idx           = torch.randperm(features.size(0))[:batch_size]          # e.g. random idx
+x_batch       = features[idx]
+y_batch       = targets[idx]
+it_batch      = iteration[idx]
+
+# 3) map each sample to its iteration-weight
+#    if your iteration starts at tMIN ≠ 0, subtract it:
+sample_w      = weights_iter[it_batch - tMIN]                          # shape (batch_size,)
+
+# 4) forward + per-sample MSE + weighted mean
+y_pred        = model(x_batch)
+per_sample    = F.mse_loss(y_pred, y_batch, reduction='none').view(-1)  # (batch_size,)
+loss          = (per_sample * sample_w).mean()
