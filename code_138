@@ -1,0 +1,46 @@
+import pandas as pd
+import plotly.express as px
+
+# --- 1) Prepare a long‐form DataFrame with normalized x and labeled features
+records = []
+for featur, xs in dic_ranges.items():
+    ys = f_out_dict[featur]              # numpy array shape (len(xs), 3)
+    xmin, xmax = xs[0], xs[-1]
+    label = f"{featur} ({xmin}–{xmax})"
+    for i, x in enumerate(xs):
+        x_norm = (x - xmin) / (xmax - xmin)
+        for j in range(3):
+            records.append({
+                "feature":   label,
+                "component": f"f{j+1}",
+                "x_norm":    x_norm,
+                "y":         ys[i, j]
+            })
+
+df = pd.DataFrame(records)
+
+# --- 2) Plot one figure per component using facet_row
+fig = px.line(
+    df,
+    x="x_norm", y="y",
+    color="feature",
+    facet_row="component",
+    labels={
+      "x_norm":    "Normalized feature value",
+      "y":         "f-output",
+      "feature":   "Feature (orig. range)",
+      "component": ""
+    },
+    title="Model outputs f₁–f₃ vs. normalized feature sweeps"
+)
+
+# Clean up the facet titles (remove “component=” prefix)
+fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+
+fig.update_layout(
+    height=900,
+    showlegend=True,
+    legend_title_text=""
+)
+
+fig.show()
