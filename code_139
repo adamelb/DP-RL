@@ -1,0 +1,38 @@
+# 1) Compute and collect outputs for each feature
+f_out_dict = {}
+for featur, range_feat in dic_ranges.items():
+    # set this feature’s values in dic_map
+    dic_map[featur] = torch.tensor(range_feat, dtype=torch.float32, device=DEVICE)
+    # re-encode dataset with this feature varying
+    p_tt, alpha1_tt, alpha2_tt, c_tt, tl_tt, corr1_tt, corr2_tt, imb1_tt, imb2_tt = encode_dataset(
+        dic_map["p"], dic_map["alpha1"], dic_map["alpha2"],
+        dic_map["c"], dic_map["tl"], dic_map["corr1"],
+        dic_map["corr2"], dic_map["imbalance1"], dic_map["imbalance2"],
+        for_feat=featur
+    )
+    # you already have PHI1, PHI2 fixed from dic_fix
+    dic_map[featur] = torch.tensor(dic_fix[featur], dtype=torch.float32, device=DEVICE)
+    feat = features(
+        p_tt, alpha1_tt, alpha2_tt, c_tt, tl_tt,
+        corr1_tt, corr2_tt, imb1_tt, imb2_tt,
+        PHI1, PHI2
+    )
+    feat_flat = feat.view(-1, feat.shape[-1])
+    with torch.no_grad():
+        f_out = model(feat_flat)       # shape [len(range_feat), 3]
+    f_out_dict[featur] = f_out.cpu().numpy()
+
+# 2) Plot one big figure per output dimension
+import matplotlib.pyplot as plt
+
+for j in range(3):
+    plt.figure(figsize=(8, 6))
+    for featur, range_feat in dic_ranges.items():
+        plt.plot(range_feat, f_out_dict[featur][:, j], label=featur)
+    plt.title(f"Evolution of f{j+1} across all features")
+    plt.xlabel("Feature value")
+    plt.ylabel(f"f{j+1}")
+    plt.grid()
+    plt.legend()
+plt.tight_layout()
+plt.show()
