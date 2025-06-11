@@ -1,0 +1,59 @@
+import numpy as np
+import pandas as pd
+import plotly.express as px
+
+# --- 1) Compute f_out_dict as before, then build a DataFrame
+records = []
+for featur, xs in dic_ranges.items():
+    ys = f_out_dict[featur]  # shape (len(xs), 3)
+    xmin, xmax = xs[0], xs[-1]
+    label = f"{featur} ({xmin}–{xmax})"
+    for i, x in enumerate(xs):
+        x_norm = (x - xmin) / (xmax - xmin)
+        for j in range(3):
+            records.append({
+                "feature":   label,
+                "component": f"f{j+1}",
+                "x_norm":    x_norm,
+                "y":         ys[i, j]
+            })
+
+df = pd.DataFrame(records)
+
+# --- 2) Find tight y-ranges for each component
+y_ranges = {}
+for j in range(3):
+    all_vals = np.concatenate([f_out_dict[f][:, j] for f in dic_ranges])
+    y_ranges[f"f{j+1}"] = (all_vals.min(), all_vals.max())
+
+# --- 3) Make the facetted line-plot
+fig = px.line(
+    df,
+    x="x_norm", y="y",
+    color="feature",
+    facet_row="component",
+    labels={
+      "x_norm":    "Normalized feature value",
+      "y":         "f-output",
+      "feature":   "Feature (orig. range)",
+      "component": ""
+    },
+    title="Model outputs f₁–f₃ vs. normalized feature sweeps"
+)
+
+# clean up facet titles
+fig.for_each_annotation(lambda ann: ann.update(text=ann.text.split("=")[-1]))
+
+# 4) Force each subplot’s y-axis to its exact data range
+for idx, comp in enumerate(["f1","f2","f3"], start=1):
+    lo, hi = y_ranges[comp]
+    fig.update_yaxes(range=[lo, hi], row=idx, col=1, autorange=False)
+
+# 5) Remove extra margin so plots fill more of the canvas
+fig.update_layout(
+    margin=dict(l=20, r=20, t=50, b=20),
+    showlegend=True,
+    legend_title_text=""
+)
+
+fig.show()
