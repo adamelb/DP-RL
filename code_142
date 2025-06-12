@@ -1,0 +1,37 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+# Pivot the actual and predicted values into grid form
+pivot_Q = df.pivot_table(index='s', columns='x', values='Q')
+pivot_pred = df.pivot_table(index='s', columns='x', values='predicted')
+
+# Create meshgrid
+X, Y = np.meshgrid(pivot_Q.columns, pivot_Q.index)
+Z_actual = pivot_Q.values
+Z_pred = pivot_pred.values
+
+# Plotting
+fig = plt.figure()
+ax = fig.add_subplot(111, projection='3d')
+
+# Plot actual surface
+surf1 = ax.plot_surface(X, Y, Z_actual, cmap='viridis', alpha=0.7, label='Actual')
+
+# Plot predicted surface
+surf2 = ax.plot_surface(X, Y, Z_pred, cmap='plasma', alpha=0.5, label='Predicted')
+
+# Labels
+ax.set_xlabel('x')
+ax.set_ylabel('s')
+ax.set_zlabel('Q / Predicted')
+
+# Title
+ax.set_title('Actual vs Predicted Surface')
+
+# Colorbars (optional: you can add one or combine)
+fig.colorbar(surf1, ax=ax, shrink=0.5, aspect=5, label='Actual Q')
+fig.colorbar(surf2, ax=ax, shrink=0.5, aspect=5, label='Predicted')
+
+plt.show()
