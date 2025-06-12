@@ -1,0 +1,122 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class CustomMLP(nn.Module):
+    def __init__(self, in_features, hidden_sizes, transforms=None):
+        """
+        in_features:   dimensionality of each input vector
+        hidden_sizes:  list of hidden layer widths, e.g. [128, 64]
+        transforms:    list of 6 callables, one per output; each takes a 1D Tensor and returns a Tensor
+        """
+        super().__init__()
+        # build shared trunk
+        layers = []
+        current = in_features
+        for h in hidden_sizes:
+            layers += [ nn.Linear(current, h), nn.ReLU(inplace=True) ]
+            current = h
+        self.trunk = nn.Sequential(*layers)
+        # one final linear layer producing 6 raw outputs
+        self.head = nn.Linear(current, 6)
+        # set up transforms
+        if transforms is None:
+            transforms = [lambda x: x for _ in range(6)]
+        if len(transforms) != 6:
+            raise ValueError("transforms must be a list of 6 callables")
+        self.transforms = transforms
+
+    def forward(self, x):
+        """
+        x: Tensor of shape (batch_size, in_features)
+        returns: Tensor of shape (batch_size, 6) where each column has been
+                 post-processed by the corresponding transform
+        """
+        shared = self.trunk(x)         # (batch_size, last_hidden)
+        raw    = self.head(shared)     # (batch_size, 6)
+        # apply per-output transforms
+        outs = []
+        for i, fn in enumerate(self.transforms):
+            # raw[:, i] is shape (batch_size,)
+            outs.append(fn(raw[:, i]))
+        # stack back into (batch_size, 6)
+        return torch.stack(outs, dim=1)
+
+
+def fit(model, X, Y,
+        epochs=20,
+        batch_size=32,
+        lr=1e-3,
+        device=None):
+    """
+    model:      instance of CustomMLP (or any nn.Module)
+    X:          array or Tensor of shape (ndata, in_features)
+    Y:          array or Tensor of shape (ndata, 6)
+    epochs:     number of passes over the data
+    batch_size: samples per update
+    lr:         learning rate
+    device:     'cpu' or 'cuda'; auto‐chosen if None
+    """
+    # device setup
+    if device is None:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model.to(device)
+
+    # convert to tensors if needed
+    if not isinstance(X, torch.Tensor):
+        X = torch.tensor(X, dtype=torch.float32, device=device)
+    else:
+        X = X.to(device)
+    if not isinstance(Y, torch.Tensor):
+        Y = torch.tensor(Y, dtype=torch.float32, device=device)
+    else:
+        Y = Y.to(device)
+
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+    n = X.size(0)
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        perm = torch.randperm(n, device=device)
+        running_loss = 0.0
+
+        for start in range(0, n, batch_size):
+            idx = perm[start:start + batch_size]
+            xb, yb = X[idx], Y[idx]
+
+            optimizer.zero_grad()
+            preds = model(xb)
+            loss = criterion(preds, yb)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * xb.size(0)
+
+        epoch_loss = running_loss / n
+        print(f"Epoch {epoch:3d}/{epochs} — loss: {epoch_loss:.6f}")
+
+    return model
+
+
+# -------------------------
+# Example usage:
+
+# Define your custom transforms:
+# tl = 0.1
+# transforms = [
+#     lambda x: tl * x,            # output 1: scaled by tl
+#     lambda x: torch.sigmoid(x),  # output 2: sigmoid
+#     lambda x: torch.relu(x),     # output 3: relu
+#     lambda x: torch.tanh(x),     # output 4: tanh
+#     lambda x: x**2,              # output 5: square
+#     lambda x: x                   # output 6: identity
+# ]
+
+# model = CustomMLP(in_features=X_data.shape[1],
+#                   hidden_sizes=[128, 64],
+#                   transforms=transforms)
+# model = fit(model, X_data, Y_data,
+#             epochs=50,
+#             batch_size=64,
+#             lr=1e-3)
