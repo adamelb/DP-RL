@@ -1,0 +1,61 @@
+import numpy as np
+import pandas as pd
+import plotly.express as px
+
+# --- assume `dic_ranges` and `f_out_dict` are already defined as in previous steps
+
+# 1) build DataFrame
+records = []
+for feat, xs in dic_ranges.items():
+    ys = f_out_dict[feat]      # shape (len(xs), 3)
+    xmin, xmax = xs[0], xs[-1]
+    label = f"{feat} ({xmin}–{xmax})"
+    for i, x in enumerate(xs):
+        x_norm = (x - xmin) / (xmax - xmin)
+        for j in range(3):
+            records.append({
+                "feature":   label,
+                "component": f"f{j+1}",
+                "x_norm":    x_norm,
+                "y":         ys[i, j]
+            })
+df = pd.DataFrame(records)
+
+# 2) compute tight y-ranges per component
+y_ranges = {}
+for j in range(3):
+    vals = np.concatenate([f_out_dict[f][:, j] for f in dic_ranges])
+    y_ranges[f"f{j+1}"] = (vals.min(), vals.max())
+
+# 3) loop and make + save each plot
+for j in range(3):
+    comp = f"f{j+1}"
+    lo, hi = y_ranges[comp]
+    df_j = df[df["component"] == comp]
+    
+    fig = px.line(
+        df_j,
+        x="x_norm", y="y",
+        color="feature",
+        labels={
+            "x_norm":   "Normalized feature value",
+            "y":        comp,
+            "feature":  "Feature (orig. range)"
+        },
+        title=f"Model output {comp} vs. normalized feature sweep"
+    )
+    # force exact min/max, no padding
+    fig.update_yaxes(range=[lo, hi], autorange=False)
+    
+    # make it taller (length) than wide
+    fig.update_layout(
+        width=800,
+        height=1200,
+        margin=dict(l=40, r=40, t=60, b=40),
+        showlegend=True,
+        legend_title_text=""
+    )
+    
+    # save to PNG (requires kaleido) and HTML fallback
+    fig.write_image(f"{comp}.png")
+    fig.write_html(f"{comp}.html")
