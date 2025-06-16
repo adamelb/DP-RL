@@ -1,0 +1,50 @@
+import pickle
+import pandas as pd
+import plotly.express as px
+
+# 1) load your pickled results
+with open('/srp/crouch/src/rh_v2/boh/v3/snanp/dynamic_alpha/non_static_with_stds.pkl', 'rb') as f:
+    data_dict = pickle.load(f)
+
+# 2) the same names you used for columns
+names = [
+    'alpha1_reg', 'alpha1_std',
+    'alpha2_reg', 'alpha2_std',
+    'alpha3_reg', 'alpha3_std'
+]
+
+# 3) flatten into a tidy DataFrame
+records = []
+for alpha_val, chunk in data_dict.items():
+    # chunk is a dict of { 'alpha1_bef': [...], ... }
+    df_chunk = pd.DataFrame.from_dict(chunk).T
+    df_chunk.columns = names
+    df_chunk.index.name = 'alpha1'
+    for idx, row in df_chunk.iterrows():
+        for col in names:
+            records.append({
+                'alpha1': float(idx),
+                'metric': col,
+                'value': row[col]
+            })
+
+df = pd.DataFrame.from_records(records)
+df = df.sort_values('alpha1')
+
+# 4) plot with Plotly Express
+fig = px.line(
+    df,
+    x='alpha1',
+    y='value',
+    color='metric',
+    markers=True,
+    title='regression coefficient of alpha1 against 3 alphas shifted'
+)
+
+fig.update_layout(
+    xaxis_title='alpha1',
+    yaxis_title='coefficient / std value',
+    legend_title='metric'
+)
+
+fig.show()
