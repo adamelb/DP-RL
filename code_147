@@ -1,0 +1,42 @@
+import pandas as pd
+import numpy as np
+from scipy.linalg import fractional_matrix_power
+
+def fractional_power_df(df):
+    """
+    1) Drops any timestamp that doesn’t have exactly 3 rows.
+    2) For each remaining timestamp, treats the rows (in order alpha1, alpha2, alpha3)
+       and their val1/val2/val3 as a 3×3 matrix.
+    3) Computes matrix**(1/30) and returns a new DataFrame with same structure.
+    """
+    # 1) Keep only timestamps with exactly 3 records
+    counts = df['timestamp'].value_counts()
+    valid_ts = counts[counts == 3].index
+    df_filtered = df[df['timestamp'].isin(valid_ts)]
+    
+    # 2) Define transform on each group
+    def transform(group):
+        mat = group[['val1', 'val2', 'val3']].values
+        # 3) fractional power, stays real for PD matrices
+        mat_fp = fractional_matrix_power(mat, 1/30)
+        out = group.copy()
+        out[['val1', 'val2', 'val3']] = mat_fp
+        return out
+
+    # 4) Apply per valid timestamp
+    return df_filtered.groupby('timestamp', group_keys=False).apply(transform)
+
+
+# ── Example usage ──
+if __name__ == "__main__":
+    data = {
+        'y': ['alpha1','alpha2','alpha3',  'alpha1','alpha2'],   # note second timestamp only has 2 rows
+        'timestamp': [1,1,1,  2,2],
+        'val1': [1.0, 0.2, 0.1,  1.1, 0.3],
+        'val2': [0.5, 0.6, 0.7,  0.4, 0.5],
+        'val3': [0.3, 0.4, 0.5,  0.2, 0.3],
+    }
+    df = pd.DataFrame(data)
+
+    df_new = fractional_power_df(df)
+    print(df_new)
