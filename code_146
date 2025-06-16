@@ -1,0 +1,40 @@
+import pandas as pd
+import numpy as np
+from scipy.linalg import fractional_matrix_power
+
+def fractional_power_df(df):
+    """
+    For each unique timestamp in df, treats the 3 rows (y=alpha1, alpha2, alpha3)
+    and their val1, val2, val3 as a 3×3 matrix, computes the matrix power 1/30,
+    and returns a new DataFrame with the same structure but updated val columns.
+    """
+    def transform(group):
+        # Extract the 3×3 block
+        mat = group[['val1', 'val2', 'val3']].values
+        # Compute matrix^(1/30)
+        mat_fp = fractional_matrix_power(mat, 1/30)
+        # Build a copy replacing the val columns
+        out = group.copy()
+        out[['val1', 'val2', 'val3']] = mat_fp
+        return out
+
+    # Apply per timestamp (expects exactly 3 rows per timestamp, in the order alpha1, alpha2, alpha3)
+    return df.groupby('timestamp', group_keys=False).apply(transform)
+
+
+# ── Example usage ──
+if __name__ == "__main__":
+    # Sample data
+    data = {
+        'y': ['alpha1','alpha2','alpha3']*2,
+        'timestamp': [1,1,1,  2,2,2],
+        'val1': [1.0, 0.2, 0.1,  1.1, 0.3, 0.2],
+        'val2': [0.5, 0.6, 0.7,  0.4, 0.5, 0.6],
+        'val3': [0.3, 0.4, 0.5,  0.2, 0.3, 0.4],
+    }
+    df = pd.DataFrame(data)
+
+    # Compute fractional power
+    df_new = fractional_power_df(df)
+
+    print(df_new)
