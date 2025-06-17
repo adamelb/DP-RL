@@ -1,0 +1,157 @@
+# Finite-Horizon LQG Control for Intraday Liquidation
+
+We solve an optimal-trading problem as a finite-horizon linear-quadratic Gaussian (LQG) control.  At each minute $t$ before close we choose a trade $x_t$ to maximize expected cumulative reward, knowing that at the final minute we must fully liquidate.
+
+---
+
+### 1. State and Control
+
+Define the **state**  
+$$
+s_t = \begin{pmatrix}
+\alpha_t \\[4pt]
+p_t \\[4pt]
+\mathrm{imb1}_t \\[4pt]
+\mathrm{imb2}_t
+\end{pmatrix}
+\in\mathbb R^5,
+\quad
+x_t\in\mathbb R,
+$$  
+where  
+- $\alpha_t\in\mathbb R^3$ is the vector of three alpha signals, each following an AR(1),  
+- $p_t$ is current position,  
+- $\mathrm{imb1}_t,\mathrm{imb2}_t$ are two lagged “imbalance” processes.  
+
+---
+
+### 2. Dynamics
+
+We assume  
+$$
+\alpha_t = \Rho\,\alpha_{t-1} + \varepsilon_t,\quad
+\varepsilon_t\sim\mathcal N(0,\Sigma),
+$$  
+and  
+$$
+\begin{aligned}
+p_{t}           &= p_{t-1} + x_{t-1},\\
+\mathrm{imb1}_{t} &= \phi_1\,\mathrm{imb1}_{t-1} + (1-\phi_1)\,x_{t-1},\\
+\mathrm{imb2}_{t} &= \phi_2\,\mathrm{imb2}_{t-1} + (1-\phi_2)\,x_{t-1}.
+\end{aligned}
+$$  
+In **matrix form**,  
+$$
+s_{t+1} = A\,s_t + B\,x_t + w_{t+1},
+$$  
+with  
+- $A$ block-diagonal containing $\Rho$, $1$, $\phi_1$, $\phi_2$,  
+- $B=(0,1,1-\phi_1,1-\phi_2)^\top$,  
+- $w_{t+1}=(\varepsilon_{t+1},0,0,0)^\top$.
+
+---
+
+### 3. Instantaneous Cost (Negative Reward)
+
+We define the cost  
+$$
+\ell(s_t,x_t)
+=\;-\Bigl[\underbrace{\tfrac{\alpha^1_t}{30}(p_t+x_t)}_{\text{alpha‐P\&L}}
+    \;-\;\tfrac12(p_t+x_t)^2
+    \;-\;\tfrac12\,\lambda\bigl(\mathrm{imb1}_{t+1}+\mathrm{imb2}_{t+1}\bigr)x_t\Bigr].
+$$  
+Equivalently, write it in quadratic form  
+$$
+\ell(s,x)
+=\tfrac12\,s^\top Q\,s
++ s^\top N\,x
++ \tfrac12\,R\,x^2
++ s^\top m
++ c\,x,
+$$  
+where $Q,N,R,m,c$ are chosen by matching coefficients.
+
+---
+
+### 4. Terminal Condition
+
+At the final trade time $T-1$ (just before close) we force full liquidation.  The **terminal cost** is  
+$$
+V_T(s_T)
+=\;-\,p_T\bigl(\mathrm{imb1}_T+\mathrm{imb2}_T\bigr)
+=\tfrac12\,s_T^\top Q_f\,s_T,
+$$  
+with $Q_f$ encoding the bilinear term $-p_T(\mathrm{imb1}_T+\mathrm{imb2}_T)$.  For $t\ge T+1$, we set $V_t(s)=0$.
+
+---
+
+### 5. Bellman Equation
+
+For $t=T-1,T-2,\dots,0$, the value function satisfies  
+$$
+V_t(s)
+=\min_{x}\Bigl\{\ell(s,x)
+  +\mathbb E\bigl[V_{t+1}(A\,s+B\,x+w)\bigr]\Bigr\}.
+$$
+
+---
+
+### 6. Quadratic Ansatz
+
+We seek a **quadratic value** and **linear policy**:
+$$
+V_t(s)=s^\top P_t\,s + 2\,q_t^\top s + r_t,
+\qquad
+\pi_t(s)=x_t^*=-K_t\,s \;-\; k_t.
+$$
+
+---
+
+### 7. First-Order Optimality
+
+Define
+$$
+H_t = R + B^\top P_{t+1}B,\quad
+L_t = B^\top P_{t+1}A + N^\top,\quad
+d_t = B^\top q_{t+1} + c_t.
+$$  
+Setting $\partial/\partial x=0$ yields
+$$
+K_t = H_t^{-1} L_t,
+\qquad
+k_t = H_t^{-1} d_t.
+$$
+
+---
+
+### 8. Riccati-Type Backward Recursion
+
+Initialize at $t=T$:
+$$
+P_T = Q_f,\quad q_T=0,\quad r_T=0.
+$$  
+Then for $t=T-1,\dots,0$ compute:
+$$
+\begin{aligned}
+P_t &= Q + A^\top P_{t+1}A
+     - (A^\top P_{t+1}B + N)\,K_t,\\[6pt]
+q_t &= A^\top\bigl(q_{t+1} - P_{t+1}B\,k_t\bigr) + m_t,\\[6pt]
+r_t &= r_{t+1}
+     + \tfrac12\,k_t^\top H_t\,k_t
+     - q_{t+1}^\top B\,k_t
+     + \tfrac12\Tr(P_{t+1}\,\Sigma).
+\end{aligned}
+$$  
+This backward pass takes $\mathcal O(T\,n^3)$ time and yields $\{P_t,q_t,r_t,K_t,k_t\}$.
+
+---
+
+### 9. Online Policy and Value
+
+At each minute $t$:
+1. **Observe** $s_t\,$.
+2. **Compute** the trade $x_t = -K_t\,s_t - k_t\,$.  
+3. **Execute** $x_t$ and update $s_{t+1} = A\,s_t+B\,x_t+w_{t+1}$.  
+4. **Value**: $V_t(s_t)=s_t^\top P_t\,s_t + 2\,q_t^\top s_t + r_t$.
+
+This gives a closed-form solution for both the **optimal policy** $\pi_t(s)$ and the **value function** $V_t(s)$ at all times $0\le t\le T$.  
