@@ -1,0 +1,116 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 1) PARAMETERS
+phi1, phi2 = 0.8, 0.5       # imbalance decay
+lambda_   = 0.1             # penalty weight
+T         = 390             # minutes until close
+n_alpha   = 3               # number of alphas
+
+# 2) ALPHA AR(1) DYNAMICS
+Rho = np.array([[0.9, 0.1, 0.0],
+                [0.0, 0.7, 0.2],
+                [0.0, 0.0, 0.5]])
+Sigma_alpha = 0.01 * np.eye(n_alpha)
+
+# 3) BUILD STATE-SPACE MATRICES
+# state s = [ p, imb1, imb2, alpha1, alpha2, alpha3 ]ᵀ
+n = 1 + 2 + n_alpha
+F = np.zeros((n,n))
+F[0,0]    = 1              # p_{t+1} = p_t + x_t
+F[1,1]    = phi1
+F[2,2]    = phi2
+F[3:,3:]  = Rho            # alpha dynamics
+
+G = np.zeros((n,1))
+G[0,0] = 1
+G[1,0] = 1 - phi1
+G[2,0] = 1 - phi2
+
+# 4) INSTANTANEOUS COST ℓ(s,x) = ½(p+x)² − (α₁/30)(p+x) + ½λ(imb1_{t+1}+imb2_{t+1})x
+#   in LQ form ℓ = ½ sᵀ Q s + sᵀ N x + ½ R x²:
+
+Q = np.zeros((n,n))
+Q[0,0] = 1                      # gives ½ p²
+# cross (p * alpha1) term: 1/2·2·Q[0,3]·p·α₁ = Q[0,3] p α₁ must equal −(α₁/30)p
+Q[0,3] = Q[3,0] = -1/30        
+
+N = np.zeros((n,1))
+# from p x → coefficient 1·p·x
+N[0,0] = 1.0                   
+# from −(α₁/30)x → coefficient −1/30·α₁·x
+N[3,0] = -1/30                 
+# from ½λ(φ₁ imb1 + φ₂ imb2)x
+N[1,0] = 0.5 * lambda_ * phi1  
+N[2,0] = 0.5 * lambda_ * phi2  
+
+# R = 1/2·2·(1/2)x² from (p+x)² plus ½λ(2−φ₁−φ₂)x²
+R = 1.0 + lambda_ * (2 - (phi1 + phi2))
+
+# 5) TERMINAL COST: V_T(s) = −p_T·(imb1_T+imb2_T) = ½ sᵀ Qf s
+Qf = np.zeros((n,n))
+Qf[0,1] = Qf[1,0] = -0.5
+Qf[0,2] = Qf[2,0] = -0.5
+
+# 6) BACKWARD RICCATI PASS → P_t, K_t, and r_t
+P = [None]*(T+1)
+r = np.zeros(T+1)
+K = [None]*T
+
+# initialize terminal
+P[T]   = Qf
+r[T]   = 0.0
+
+# build full noise covariance
+Sigma_full = np.zeros((n,n))
+Sigma_full[3:,3:] = Sigma_alpha
+
+for t in reversed(range(T)):
+    H = float(R + (G.T @ P[t+1] @ G))          # scalar
+    K[t] = ((G.T @ P[t+1] @ F + N.T) / H)      # shape (1,n)
+    # Riccati update
+    P[t] = (Q 
+            + F.T @ P[t+1] @ F 
+            - (F.T @ P[t+1] @ G + N) @ K[t])
+    # constant term accumulation
+    r[t] = r[t+1] + 0.5 * np.trace(P[t+1] @ Sigma_full)
+
+# 7) SIMULATION UNDER x_t = −K_t s_t
+np.random.seed(123)
+s = np.zeros((n,1))
+cum_x = []
+values = []
+rewards= []
+
+for t in range(T):
+    # apply policy
+    x = float(- K[t] @ s)                                  
+    cum_x.append(x)
+    # value: V_t(s) = sᵀP_ts + r[t]
+    values.append(float(s.T @ P[t] @ s) + r[t])
+    # compute reward
+    p, i1, i2 = s[0,0], s[1,0], s[2,0]
+    a1 = s[3,0]
+    p_next   = p + x
+    im1_next = phi1*i1 + (1-phi1)*x
+    im2_next = phi2*i2 + (1-phi2)*x
+    rew = (a1/30)*p_next \
+          - 0.5*p_next**2 \
+          - 0.5*lambda_*(im1_next+im2_next)*x
+    rewards.append(rew)
+    # state update
+    eps = np.zeros((n,1))
+    eps[3:,0] = np.random.multivariate_normal(np.zeros(n_alpha), Sigma_alpha)
+    s = F @ s + G*x + eps
+
+# 8) PLOT & DIAGNOSTICS
+print("Final cumulative position:", sum(cum_x))
+plt.figure(figsize=(12,4))
+plt.subplot(1,3,1)
+plt.plot(np.cumsum(cum_x)); plt.title("Cumulative Position"); plt.grid(True)
+plt.subplot(1,3,2)
+plt.plot(values); plt.title("Value V_t(s_t)"); plt.grid(True)
+plt.subplot(1,3,3)
+plt.plot(np.cumsum(rewards)); plt.title("Cumulative Reward"); plt.grid(True)
+plt.tight_layout()
+plt.show()
