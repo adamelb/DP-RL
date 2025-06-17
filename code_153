@@ -1,0 +1,132 @@
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 1) PARAMETERS
+phi1, phi2 = 0.8, 0.5      # imbalance decay factors
+lambda_   = 0.1            # penalty weight
+T         = 390            # minutes until close
+n_alpha   = 3              # number of alpha signals
+
+# 2) ALPHA AR(1) DYNAMICS
+Rho = np.array([[0.9, 0.1, 0.0],
+                [0.0, 0.7, 0.2],
+                [0.0, 0.0, 0.5]])
+Sigma_alpha = 0.01 * np.eye(n_alpha)
+
+# 3) BUILD STATE-SPACE MATRICES
+#    state s = [ p, imb1, imb2, alpha1, alpha2, alpha3 ]ᵀ
+n = 1 + 2 + n_alpha
+F = np.zeros((n, n))
+F[0,0]    = 1
+F[1,1]    = phi1
+F[2,2]    = phi2
+F[3:,3:]  = Rho
+
+G = np.zeros((n,1))
+G[0,0] = 1
+G[1,0] = 1 - phi1
+G[2,0] = 1 - phi2
+
+# 4) PENALTY COST (time‐invariant part)
+N_pen = np.zeros((n,1))
+N_pen[1,0] = 0.5 * lambda_ * phi1
+N_pen[2,0] = 0.5 * lambda_ * phi2
+R_pen = lambda_ * (2 - (phi1 + phi2))
+
+# 5) TERMINAL COST V_T(s) = -p_T*(imb1_T+imb2_T) = ½ sᵀ Qf s
+Qf = np.zeros((n,n))
+Qf[0,1] = Qf[1,0] = -0.5
+Qf[0,2] = Qf[2,0] = -0.5
+
+# 6) BACKWARD RICCATI PASS → P_t, r_const_t, K_t
+P = [None] * (T+1)
+r_const = np.zeros(T+1)
+K = [None] * T
+
+# full noise covariance (only alphas noisy)
+Sigma_full = np.zeros((n,n))
+Sigma_full[3:,3:] = Sigma_alpha
+
+# terminal condition
+P[T] = Qf.copy()
+r_const[T] = 0.0
+
+# indices for readability
+idx_p, idx_a1, idx_a3 = 0, 3, 5
+
+for t in reversed(range(T)):
+    # 6.1) build time‐dependent Q_t and N_t incorporating PnL terms
+    Q_t = np.zeros((n,n))
+    N_t = N_pen.copy()
+    if t >= T - 9:
+        coef = 1.0 / (T - t + 1)
+        Q_t[idx_p, idx_a3] = Q_t[idx_a3, idx_p] = -coef
+        N_t[idx_a3,0] += -coef
+    elif t >= 39:
+        coef = 1.0 / (T - 10 - t + 1)
+        Q_t[idx_p, idx_a1] = Q_t[idx_a1, idx_p] = -coef
+        N_t[idx_a1,0] += -coef
+    else:
+        coef = 1.0 / 30.0
+        Q_t[idx_p, idx_a1] = Q_t[idx_a1, idx_p] = -coef
+        N_t[idx_a1,0] += -coef
+
+    R_t = R_pen
+
+    # 6.2) Riccati‐like update
+    H = float(R_t + (G.T @ P[t+1] @ G))           # scalar
+    K[t] = (G.T @ P[t+1] @ F + N_t.T) / H         # shape (1,n)
+    P[t] = (Q_t
+            + F.T @ P[t+1] @ F
+            - (F.T @ P[t+1] @ G + N_t) @ K[t])
+    r_const[t] = r_const[t+1] + 0.5 * np.trace(P[t+1] @ Sigma_full)
+
+# 7) SIMULATION UNDER x_t = -K_t s_t
+np.random.seed(0)
+s = np.zeros((n,1))
+cum_x = []
+values = []
+rewards = []
+
+for t in range(T):
+    # optimal control
+    x = float(-K[t] @ s)
+    cum_x.append(x)
+
+    # compute value V_t(s) = sᵀ P_t s + r_const[t]
+    values.append(float(s.T @ P[t] @ s) + r_const[t])
+
+    # compute instantaneous reward with PnL*(p+x) + imbalance penalty
+    p, i1, i2, a1, a2, a3 = s.flatten()
+    p1 = p + x
+    # select proper PnL rate
+    if t >= T - 9:
+        rate = a3 / (T - t + 1)
+    elif t >= 39:
+        rate = a1 / (T - 10 - t + 1)
+    else:
+        rate = a1 / 30.0
+    pnl = rate * p1
+    im1_next = phi1 * i1 + (1-phi1) * x
+    im2_next = phi2 * i2 + (1-phi2) * x
+    penalty = 0.5 * lambda_ * (im1_next + im2_next) * x
+    rew = pnl - penalty
+    rewards.append(rew)
+
+    # state update
+    eps = np.zeros((n,1))
+    eps[3:,0] = np.random.multivariate_normal(np.zeros(n_alpha), Sigma_alpha)
+    s = F @ s + G * x + eps
+
+# 8) DIAGNOSTICS
+print("Final cumulative position:", np.sum(cum_x))
+plt.figure(figsize=(12,4))
+plt.subplot(1,3,1)
+plt.plot(np.cumsum(cum_x));  plt.title("Cumulative Position");  plt.grid(True)
+plt.subplot(1,3,2)
+plt.plot(values);            plt.title("Value Function V_t(s_t)"); plt.grid(True)
+plt.subplot(1,3,3)
+plt.plot(np.cumsum(rewards)); plt.title("Cumulative Reward");      plt.grid(True)
+plt.tight_layout()
+plt.show()
