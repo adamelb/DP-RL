@@ -1,0 +1,104 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 1) PARAMETERS
+phi1, phi2 = 0.8, 0.5       # imbalance decay factors
+lambda_ = 0.1               # imbalance penalty weight
+T = 390                     # number of minutes until close
+n_alpha = 3                 # number of alphas
+
+# AR(1) dynamics for alphas (triangular matrix)
+Rho = np.array([[0.9, 0.1, 0.0],
+                [0.0, 0.7, 0.2],
+                [0.0, 0.0, 0.5]])
+Sigma_alpha = 0.01 * np.eye(n_alpha)
+
+# 2) STATE DIMENSION AND SYSTEM MATRICES
+# state vector s = [p, imb1, imb2, alpha1, alpha2, alpha3]
+n = 1 + 2 + n_alpha
+F = np.zeros((n, n))
+F[0, 0] = 1                     # p_{t+1} = p_t + x_t
+F[1, 1] = phi1                  # imb1_{t+1} = phi1 * imb1_t + ...
+F[2, 2] = phi2                  # imb2_{t+1} = phi2 * imb2_t + ...
+F[3:, 3:] = Rho                 # alpha dynamics
+
+G = np.zeros((n, 1))
+G[0, 0] = 1
+G[1, 0] = 1 - phi1
+G[2, 0] = 1 - phi2
+
+# 3) COST MATRICES
+# Instantaneous cost: 1/2*(p+x)^2 - (alpha1/30)*(p+x) + 1/2*lambda*(imb1+imb2)*x
+Q = np.zeros((n, n))
+Q[0, 0] = 1
+N = np.zeros((n, 1))
+N[1, 0] = 0.5 * lambda_ * phi1
+N[2, 0] = 0.5 * lambda_ * phi2
+R = 1 + lambda_ * (2 - (phi1 + phi2))
+
+# Terminal cost V_T(s) = -p*(imb1+imb2) = s^T Qf s
+Qf = np.zeros((n, n))
+Qf[0, 1] = Qf[1, 0] = -0.5
+Qf[0, 2] = Qf[2, 0] = -0.5
+
+# Full noise covariance (only alphas have noise)
+Sigma_full = np.zeros((n, n))
+Sigma_full[3:, 3:] = Sigma_alpha
+
+# 4) BACKWARD RICCATI‐LIKE RECURSION
+P = [None] * (T + 1)
+c_const = np.zeros(T + 1)
+P[T] = Qf
+
+K = [None] * T
+for t in reversed(range(T)):
+    # scalar denominator
+    M = R + float(G.T @ P[t + 1] @ G)
+    
+    # feedback gain K[t] (shape 1×n)
+    K[t] = ((G.T @ P[t + 1] @ F + N.T) / M)
+    
+    # Riccati update
+    P[t] = (Q 
+            + F.T @ P[t + 1] @ F 
+            - (F.T @ P[t + 1] @ G + N) @ K[t])
+    
+    # constant term from process noise
+    c_const[t] = c_const[t + 1] + 0.5 * np.trace(P[t + 1] @ Sigma_full)
+
+# 5) SIMULATION
+np.random.seed(0)
+s = np.zeros((n, 1))
+rewards = []
+
+for t in range(T):
+    alpha1 = s[3, 0]
+    c_t = -alpha1 / 30                       # linear term from P&L
+    M = R + float(G.T @ P[t + 1] @ G)       # recompute denominator
+    k_t = c_t / M                           # affine term
+    
+    # control action
+    x = float(-K[t] @ s - k_t)
+    
+    # immediate reward
+    p, i1, i2 = s[0, 0], s[1, 0], s[2, 0]
+    p_next = p + x
+    im1_next = phi1 * i1 + (1 - phi1) * x
+    im2_next = phi2 * i2 + (1 - phi2) * x
+    rew = alpha1 / 30 * p_next \
+          - 0.5 * p_next**2 \
+          - 0.5 * lambda_ * (im1_next + im2_next) * x
+    rewards.append(rew)
+    
+    # state update with Gaussian noise on alphas
+    eps = np.zeros((n, 1))
+    eps[3:, 0] = np.random.multivariate_normal(np.zeros(n_alpha), Sigma_alpha)
+    s = F @ s + G * x + eps
+
+# 6) PLOT CUMULATIVE REWARD
+plt.plot(np.cumsum(rewards))
+plt.title("Cumulative Reward over One Trading Day")
+plt.xlabel("Minute")
+plt.ylabel("Cumulative Reward")
+plt.grid(True)
+plt.show()
