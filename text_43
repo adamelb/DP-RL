@@ -1,0 +1,145 @@
+% Paste this into a Jupyter Notebook Markdown cell
+
+\section*{Finite‐Horizon Linear‐Quadratic Gaussian (LQG) Control with Two Imbalances}
+
+\subsection*{1. State and Control}
+Define the 6‐dimensional state and scalar control
+\[
+  s_t = \begin{pmatrix}
+    \alpha_t \\[4pt]
+    p_t \\[4pt]
+    \mathrm{imb1}_t \\[4pt]
+    \mathrm{imb2}_t
+  \end{pmatrix}
+  \in \mathbb{R}^6,
+  \quad
+  x_t \in \mathbb{R},
+\]
+where \(\alpha_t\in\mathbb{R}^3\), \(p_t\in\mathbb{R}\), and \(\mathrm{imb1}_t,\mathrm{imb2}_t\in\mathbb{R}\).
+
+\subsection*{2. Dynamics}
+\[
+  \alpha_t = \Rho\,\alpha_{t-1} + \varepsilon_t,\quad
+  \varepsilon_t\sim\mathcal{N}(0,\Sigma),
+\]
+\[
+  p_t = p_{t-1} + x_{t-1},\quad
+  \mathrm{imb1}_t = \phi_1\,\mathrm{imb1}_{t-1} + (1-\phi_1)\,x_{t-1},\quad
+  \mathrm{imb2}_t = \phi_2\,\mathrm{imb2}_{t-1} + (1-\phi_2)\,x_{t-1}.
+\]
+In compact form:
+\[
+  s_{t+1} = A\,s_t + B\,x_t + w_{t+1}, 
+  \quad
+  A = 
+  \begin{pmatrix}
+    \Rho & 0 & 0 & 0\\
+    0 & 1 & 0 & 0\\
+    0 & 0 & \phi_1 & 0\\
+    0 & 0 & 0 & \phi_2
+  \end{pmatrix},\;
+  B = \begin{pmatrix}0\\1\\1-\phi_1\\1-\phi_2\end{pmatrix},\;
+  w_{t+1}=\begin{pmatrix}\varepsilon_{t+1}\\0\\0\\0\end{pmatrix}.
+\]
+
+\subsection*{3. Instantaneous Cost (Negative Reward)}
+\[
+  \ell(s_t,x_t)
+  = \tfrac12\,(p_t + x_t)^2
+    \;-\;\tfrac{\alpha^1_t}{30}\,(p_t + x_t)
+    \;+\;\tfrac{\lambda}{2}\,\bigl(\mathrm{imb1}_{t+1} + \mathrm{imb2}_{t+1}\bigr)\,x_t.
+\]
+But
+\[
+  \mathrm{imb1}_{t+1} + \mathrm{imb2}_{t+1}
+  = \phi_1\,\mathrm{imb1}_t + \phi_2\,\mathrm{imb2}_t
+    + \bigl(2 - (\phi_1+\phi_2)\bigr)\,x_t,
+\]
+so we rewrite \(\ell(s,x)\) as
+\[
+  \ell(s,x)
+  = \tfrac12\,s^\top Q_t\,s 
+    + s^\top N_t\,x
+    + \tfrac12\,R_t\,x^2
+    + s^\top m_t
+    + c_t\,x,
+\]
+with
+\[
+  Q_t = \mathrm{diag}(0,0,0,1,0,0),
+  \quad
+  N_t^\top = \begin{pmatrix}0&0&0&1&\tfrac{\lambda\phi_1}{2}&\tfrac{\lambda\phi_2}{2}\end{pmatrix},
+\]
+\[
+  R_t = 1 + \lambda\bigl(2 - (\phi_1+\phi_2)\bigr),
+  \quad
+  m_t = \begin{pmatrix}0\\0\\0\\-\tfrac{\alpha^1_t}{30}\\0\\0\end{pmatrix},
+  \quad
+  c_t = -\tfrac{\alpha^1_t}{30}.
+\]
+
+\subsection*{4. Terminal Cost}
+At \(t=T\) (just before close), enforce full liquidation:
+\[
+  V_T(s_T) = -\,p_T\,\bigl(\mathrm{imb1}_T + \mathrm{imb2}_T\bigr)
+           = s_T^\top Q_f\,s_T,
+\]
+where \(Q_f\) is symmetric, zero everywhere except
+\((Q_f)_{p,\mathrm{imb1}}=(Q_f)_{\mathrm{imb1},p}=(Q_f)_{p,\mathrm{imb2}}=(Q_f)_{\mathrm{imb2},p}=-\tfrac12.\)
+
+\subsection*{5. Bellman Equation}
+For \(t=T-1,\dots,0\), solve
+\[
+  V_t(s) = \min_{x}\Bigl\{\ell(s,x)
+    \;+\;\mathbb{E}\bigl[V_{t+1}(A\,s + B\,x + w)\bigr]\Bigr\}.
+\]
+Assume the quadratic form
+\[
+  V_t(s) = s^\top P_t\,s + 2\,q_t^\top s + r_t,
+  \quad
+  \pi_t(s) = x_t^* = -K_t\,s - k_t.
+\]
+
+\subsection*{6. First‐Order Optimality}
+The terms in \(x\) are
+\[
+  \tfrac12\,x^\top\bigl(R_t + B^\top P_{t+1}B\bigr)x
+  + x^\top\bigl(N_t^\top + B^\top P_{t+1}A\bigr)s
+  + x\,(c_t + B^\top q_{t+1}).
+\]
+Setting \(\partial/\partial x=0\) gives
+\[
+  x_t^* = -\bigl(R_t + B^\top P_{t+1}B\bigr)^{-1}
+         \Bigl[(B^\top P_{t+1}A + N_t^\top)\,s + B^\top q_{t+1} + c_t\Bigr],
+\]
+so
+\[
+  K_t = (R_t + B^\top P_{t+1}B)^{-1}(B^\top P_{t+1}A + N_t^\top),
+  \quad
+  k_t = (R_t + B^\top P_{t+1}B)^{-1}(B^\top q_{t+1} + c_t).
+\]
+
+\subsection*{7. Riccati‐Type Recursions}
+For \(t=T-1,\dots,0\):
+\[
+\begin{aligned}
+  P_t &= Q_t + A^\top P_{t+1}A
+         - (A^\top P_{t+1}B + N_t)\,(R_t + B^\top P_{t+1}B)^{-1}
+           (B^\top P_{t+1}A + N_t^\top),\\
+  q_t &= A^\top\!\Bigl(I - P_{t+1}B\,(R_t + B^\top P_{t+1}B)^{-1}B^\top\Bigr)q_{t+1}
+         + m_t
+         - (A^\top P_{t+1}B + N_t)\,k_t,\\
+  r_t &= r_{t+1}
+         + \tfrac12\,k_t^\top\,(R_t + B^\top P_{t+1}B)\,k_t
+         - q_{t+1}^\top B\,k_t
+         + \tfrac12\,\mathrm{tr}(P_{t+1}\,\Sigma).
+\end{aligned}
+\]
+
+\subsection*{8. Online Policy and Value}
+After backward recursion \(\{P_t,q_t,r_t,K_t,k_t\}\), for each minute \(t\):
+\[
+  x_t = -K_t\,s_t - k_t,
+  \quad
+  V_t(s_t) = s_t^\top P_t\,s_t + 2\,q_t^\top s_t + r_t.
+\]
