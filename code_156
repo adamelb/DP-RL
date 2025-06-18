@@ -1,0 +1,137 @@
+# Paste this into a Jupyter‐Notebook Python cell
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 1) PARAMETERS
+phi1, phi2 = 0.8, 0.5    # imbalance decay factors
+T = 390                  # total minutes until close
+n_alpha = 3              # number of alpha signals
+
+# 2) AR(1) PARAMETERS FOR ALPHAS (triangular ρ)
+Rho = np.array([
+    [0.9, 0.05, 0.0],
+    [0.0, 0.8,  0.1],
+    [0.0, 0.0,  0.7]
+])
+Sigma_alpha = 0.01 * np.eye(n_alpha)
+
+# 3) BUILD STATE‐SPACE MATRICES
+# state s = [ p, imb1, imb2, α1, α2, α3 ]ᵀ
+n = 1 + 2 + n_alpha
+A = np.zeros((n,n))
+A[0,0]    = 1            # p_{t+1} = p_t + x_t
+A[1,1]    = phi1         # imb1_{t+1} = φ1·imb1_t + ...
+A[2,2]    = phi2         # imb2_{t+1} = φ2·imb2_t + ...
+A[3:,3:]  = Rho          # α‐dynamics
+
+B = np.zeros((n,1))
+B[0,0] = 1
+B[1,0] = 1 - phi1
+B[2,0] = 1 - phi2
+
+# 4) IMBALANCE PENALTY (λ=1 so omitted)
+# cost has +½·(imb1_next+imb2_next)·x
+# → control‐quadratic coefficient R_pen = (2 - φ1 - φ2)
+# → cross‐terms N_pen[imb1], N_pen[imb2]
+N_pen = np.zeros((n,1))
+N_pen[1,0] = 0.5 * phi1
+N_pen[2,0] = 0.5 * phi2
+R_pen    = (2 - (phi1 + phi2))
+
+# 5) TERMINAL CONDITION: enforce x_T=−p
+# Last‐step reward r_{T-1} = rate·(p + x) - penalty,
+# with x=−p gives r = -½(φ1·imb1 + φ2·imb2).
+# We want the **cost** V_T(s) = -r = +½(φ1·imb1 + φ2·imb2).
+# This is a *linear* terminal cost: no Q_f, only q_f.
+P = [None]*(T+1)
+r_const = np.zeros(T+1)
+K = [None]*T
+
+# Terminal: P[T]=0, q[T] encodes +½(φ1·imb1+φ2·imb2)
+P[T] = np.zeros((n,n))
+
+# We'll absorb q into an equivalent shift r_const in the r‐recursion.
+
+# Full noise covariance for trace term
+Sigma_full = np.zeros((n,n))
+Sigma_full[3:,3:] = Sigma_alpha
+
+# 6) BACKWARD RICCATI‐LIKE RECURSION
+for t in reversed(range(T)):
+    # time‐dependent "rate" term: cost = -rate*(p+x) + penalty
+    # encode -rate*p as Q_t[p,alpha], and -rate*x as N_t[alpha]
+    Q_t = np.zeros((n,n))
+    N_t = N_pen.copy()
+
+    if t >= T - 9:
+        # rate = α3/(T - t + 1)
+        idx_alpha = 5
+        # cross p·α3 term: cost has -(1/(T-t+1))*α3·p
+        factor = 1.0/(T - t + 1)
+        Q_t[0,idx_alpha] = Q_t[idx_alpha,0] = -0.5 * factor
+        # cross α3·x term: cost has -(1/(T-t+1))*α3·x
+        N_t[idx_alpha,0] += -factor
+    elif t >= T - 39:
+        # rate = α1/(T - 10 - t + 1)
+        idx_alpha = 3
+        factor = 1.0/(T - 10 - t + 1)
+        Q_t[0,idx_alpha] = Q_t[idx_alpha,0] = -0.5 * factor
+        N_t[idx_alpha,0] += -factor
+    else:
+        # rate = α1/100
+        idx_alpha = 3
+        factor = 1.0/100.0
+        Q_t[0,idx_alpha] = Q_t[idx_alpha,0] = -0.5 * factor
+        N_t[idx_alpha,0] += -factor
+
+    R_t = R_pen
+
+    # Compute feedback gain
+    H = float(R_t + (B.T @ P[t+1] @ B))         # scalar
+    K[t] = ((B.T @ P[t+1] @ A + N_t.T) / H)     # shape (1,n)
+
+    # Riccati‐like update
+    P[t] = (Q_t
+            + A.T @ P[t+1] @ A
+            - (A.T @ P[t+1] @ B + N_t) @ K[t])
+
+    # Constant term from process noise
+    r_const[t] = r_const[t+1] + 0.5 * np.trace(P[t+1] @ Sigma_full)
+
+# 7) SIMULATION UNDER x_t = -K_t s_t
+np.random.seed(0)
+s = np.zeros((n,1))
+xs, rewards = [], []
+
+for t in range(T):
+    x = float(-K[t] @ s)
+    xs.append(x)
+
+    # Compute instantaneous reward
+    p, i1, i2, a1, a2, a3 = s.flatten()
+    p1 = p + x
+    if t >= T - 9:
+        rate = a3/(T-t+1)
+    elif t >= T - 39:
+        rate = a1/(T-10-t+1)
+    else:
+        rate = a1/100.0
+    penalty = 0.5*((phi1*i1 + (1-phi1)*x) + (phi2*i2 + (1-phi2)*x))*x
+    reward = rate * p1 - penalty
+    rewards.append(reward)
+
+    # State update
+    eps = np.zeros((n,1))
+    eps[3:,0] = np.random.multivariate_normal(np.zeros(n_alpha), Sigma_alpha)
+    s = A @ s + B*x + eps
+
+# 8) DIAGNOSTICS
+print("Final cumulative position:", np.sum(xs))
+plt.figure(figsize=(8,4))
+plt.plot(np.cumsum(rewards))
+plt.title("Cumulative Reward over Trading Day")
+plt.xlabel("Minute")
+plt.ylabel("Cumulative Reward")
+plt.grid(True)
+plt.show()
