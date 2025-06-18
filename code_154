@@ -1,0 +1,149 @@
+# Paste this into a Jupyter‐Notebook Python cell
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 1) PARAMETERS
+phi1, phi2 = 0.8, 0.5      # imbalance decay factors
+lambda_   = 0.1            # imbalance penalty weight
+T         = 390            # total minutes until close
+n_alpha   = 3              # number of alpha signals
+
+# 2) ALPHA AR(1) PARAMETERS
+Rho = np.array([[0.9, 0.05, 0.0],
+                [0.0, 0.8,  0.1],
+                [0.0, 0.0,  0.7]])
+Sigma_alpha = 0.01 * np.eye(n_alpha)
+
+# 3) BUILD STATE-SPACE MATRICES
+# state s = [ p, imb1, imb2, alpha1, alpha2, alpha3 ]ᵀ
+n = 1 + 2 + n_alpha
+A = np.zeros((n, n))
+A[0,0]    = 1
+A[1,1]    = phi1
+A[2,2]    = phi2
+A[3:,3:]  = Rho
+
+B = np.zeros((n,1))
+B[0,0] = 1
+B[1,0] = 1 - phi1
+B[2,0] = 1 - phi2
+
+# 4) TERMINAL COST: V_T(s) = - p_T*(imb1_T+imb2_T) = ½ sᵀ Qf s
+Qf = np.zeros((n,n))
+Qf[0,1] = Qf[1,0] = -0.5
+Qf[0,2] = Qf[2,0] = -0.5
+m_f = np.zeros((n,1))
+r_f = 0.0
+
+# 5) PENALTY COEFFICIENTS (instantaneous imbalance‐penalty)
+N_pen = np.zeros((n,1))
+N_pen[1,0] = 0.5 * lambda_ * phi1
+N_pen[2,0] = 0.5 * lambda_ * phi2
+R_pen      = lambda_ * (2 - (phi1 + phi2))
+
+# 6) ALLOCATE FOR RECURSION
+P       = [None]*(T+1)
+q       = [None]*(T+1)
+r       = np.zeros(T+1)
+K       = [None]*T
+k       = np.zeros(T)
+
+# full process‐noise covariance (only alphas noisy)
+Sigma_full = np.zeros((n,n))
+Sigma_full[3:,3:] = Sigma_alpha
+
+# initialize terminal
+P[T] = Qf.copy()
+q[T] = m_f.copy()
+r[T] = r_f
+
+# indices for readability
+idx_p, idx_i1, idx_i2, idx_a1, idx_a3 = 0,1,2,3,5
+
+# 7) BACKWARD RICCATI RECURSION (time-varying Q_t, N_t, R_t, m_t, c_t)
+for t in reversed(range(T)):
+    # BUILD time-dependent cost matrices
+    Q_t = np.zeros((n,n))
+    N_t = N_pen.copy()
+    m_t = np.zeros((n,1))
+    c_t = np.zeros((1,1))
+    
+    if t >= T - 9:
+        rate = 1.0/(T - t + 1)
+        Q_t[idx_p,idx_a3] = Q_t[idx_a3,idx_p] = -rate
+        N_t[idx_a3,0] += -rate
+    elif t >= 39:
+        rate = 1.0/(T - 10 - t + 1)
+        Q_t[idx_p,idx_a1] = Q_t[idx_a1,idx_p] = -rate
+        N_t[idx_a1,0] += -rate
+    else:
+        rate = 1.0/30.0
+        Q_t[idx_p,idx_a1] = Q_t[idx_a1,idx_p] = -rate
+        N_t[idx_a1,0] += -rate
+
+    R_t = R_pen
+
+    # PRE-COMPUTE FOR FEEDBACK
+    H   = float(R_t + (B.T @ P[t+1] @ B))           # scalar
+    L   = (B.T @ P[t+1] @ A) + N_t.T                # shape (1,n)
+    d   = (B.T @ q[t+1]) + c_t                      # shape (1,1)
+
+    # FEEDBACK GAIN
+    K[t] = (L / H)                                  # shape (1,n)
+    k[t] = float(d / H)                            # scalar
+
+    # RICCATI RECURRENCES
+    P[t] = (Q_t
+            + A.T @ P[t+1] @ A
+            - ((A.T @ P[t+1] @ B) + N_t) @ K[t])
+    q[t] = (A.T @ (q[t+1] - (P[t+1] @ B) * k[t])) + m_t
+    r[t] = (r[t+1]
+            + 0.5 * (k[t]**2) * H
+            - float(q[t+1].T @ B) * k[t]
+            + 0.5 * np.trace(P[t+1] @ Sigma_full))
+
+# 8) SIMULATION UNDER x_t = -K_t s_t - k_t
+np.random.seed(0)
+s = np.zeros((n,1))
+xs, values, rewards = [], [], []
+
+for t in range(T):
+    # control
+    x = float(-K[t] @ s - k[t])
+    xs.append(x)
+
+    # value V_t(s)
+    values.append(float(0.5 * (s.T @ P[t] @ s) + (q[t].T @ s) + r[t]))
+
+    # instantaneous reward for monitoring
+    p, i1, i2, a1, a2, a3 = s.flatten()
+    p1 = p + x
+    if t >= T - 9:
+        rate = a3/(T - t + 1)
+    elif t >= 39:
+        rate = a1/(T - 10 - t + 1)
+    else:
+        rate = a1/30.0
+    pnl = rate * p1
+    im1_next = phi1*i1 + (1-phi1)*x
+    im2_next = phi2*i2 + (1-phi2)*x
+    penalty  = 0.5 * lambda_ * (im1_next + im2_next) * x
+    rewards.append(pnl - penalty)
+
+    # state update
+    eps = np.zeros((n,1))
+    eps[3:,0] = np.random.multivariate_normal(np.zeros(n_alpha), Sigma_alpha)
+    s = A @ s + B * x + eps
+
+# 9) DIAGNOSTICS
+print("Final cumulative position:", np.sum(xs))
+plt.figure(figsize=(12,4))
+plt.subplot(1,3,1)
+plt.plot(np.cumsum(xs));    plt.title("Cumulative Position");      plt.grid(True)
+plt.subplot(1,3,2)
+plt.plot(values);           plt.title("Value Function V_t(s_t)");  plt.grid(True)
+plt.subplot(1,3,3)
+plt.plot(np.cumsum(rewards)); plt.title("Cumulative Reward");      plt.grid(True)
+plt.tight_layout()
+plt.show()
