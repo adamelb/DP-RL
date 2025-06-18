@@ -1,0 +1,98 @@
+import numpy as np
+from scipy.linalg import solve_discrete_lyapunov
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1) GIVEN AR(1) PARAMETERS FOR ALPHAS
+#    Rho         : 3×3 transition matrix
+#    Sigma_alpha : 3×3 covariance of residuals ε_t in α_t = Rho @ α_{t-1} + ε_t
+# ─────────────────────────────────────────────────────────────────────────────
+Rho = np.array([
+    [0.9, 0.05, 0.0],
+    [0.0, 0.8,  0.1],
+    [0.0, 0.0,  0.7]
+])
+Sigma_alpha = 0.01 * np.eye(3)
+
+# 2) SOLVE FOR STATIONARY COVARIANCE P AND CHOLESKY FACTOR L
+#    P solves   P = Rho @ P @ Rho.T + Sigma_alpha
+P_stat = solve_discrete_lyapunov(Rho, Sigma_alpha)  # shape (3,3)
+L = np.linalg.cholesky(P_stat)                     # lower-triangular (3,3)
+
+# 3) DIMENSIONS
+n_alpha = 3
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4) RESAMPLE DATASET FUNCTION
+#    Returns a batch of "normalized" states:
+#      - t        : integer time index uniform in [0, T)
+#      - z        : latent alpha ∼ N(0, I_3)
+#      - p_norm   : normalized position ∼ N(0,1)
+#      - imb1_norm: normalized imbalance1 ∼ N(0,1)
+#      - imb2_norm: normalized imbalance2 ∼ N(0,1)
+# ─────────────────────────────────────────────────────────────────────────────
+def resample_dataset(batch_size: int, T: int):
+    """
+    Sample a batch of normalized states for training.
+
+    Returns a dict with keys:
+      't'         : np.ndarray shape (batch_size,) integers in [0, T)
+      'z'         : np.ndarray shape (batch_size, 3), ~ N(0,I)
+      'p_norm'    : np.ndarray shape (batch_size, 1), ~ N(0,1)
+      'imb1_norm' : np.ndarray shape (batch_size, 1), ~ N(0,1)
+      'imb2_norm' : np.ndarray shape (batch_size, 1), ~ N(0,1)
+    """
+    t = np.random.randint(0, T, size=(batch_size,))
+    z = np.random.randn(batch_size, n_alpha)
+    p_norm    = np.random.randn(batch_size, 1)
+    imb1_norm = np.random.randn(batch_size, 1)
+    imb2_norm = np.random.randn(batch_size, 1)
+    return {
+        't': t,
+        'z': z,
+        'p_norm': p_norm,
+        'imb1_norm': imb1_norm,
+        'imb2_norm': imb2_norm
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5) DECODE DATASET FUNCTION
+#    Transforms normalized batch into real state:
+#      alpha = L @ z.T (→ transpose back)
+#      p     = p_norm
+#      imb1  = imb1_norm
+#      imb2  = imb2_norm
+# ─────────────────────────────────────────────────────────────────────────────
+def decode_dataset(batch: dict):
+    """
+    Decode a batch of normalized samples into real alphas and state.
+
+    Input batch keys: 't', 'z', 'p_norm', 'imb1_norm', 'imb2_norm'
+    Output dict with:
+      't'     : same as input
+      'alpha' : np.ndarray shape (batch_size,3), ~ N(0,P_stat)
+      'p'     : same as 'p_norm'
+      'imb1'  : same as 'imb1_norm'
+      'imb2'  : same as 'imb2_norm'
+    """
+    z = batch['z']                         # (batch,3)
+    # transform to real alpha ∼ N(0,P_stat)
+    alpha = z.dot(L.T)                     # (batch,3)
+    return {
+        't': batch['t'],
+        'alpha': alpha,
+        'p': batch['p_norm'],
+        'imb1': batch['imb1_norm'],
+        'imb2': batch['imb2_norm']
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6) USAGE EXAMPLE
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    T = 390
+    batch = resample_dataset(batch_size=5, T=T)
+    decoded = decode_dataset(batch)
+    print("Sample t indices:", decoded['t'])
+    print("Sample alphas:\n", decoded['alpha'])
+    print("Sample positions p:\n", decoded['p'])
+    print("Sample imbalances:\n", decoded['imb1'], decoded['imb2'])
