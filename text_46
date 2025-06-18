@@ -1,0 +1,215 @@
+# Reward-Based Finite-Horizon LQG for Intraday Liquidation
+
+We solve  
+$$
+V_t(s)\;=\;\max_{x_t,\dots,x_{T-1}}\;\mathbb E\Bigl[\sum_{u=t}^{T-1}r_u(s_u,x_u)\;+\;r_{T-1}(s_{T-1},x_{T-1})\Bigr],
+$$  
+with no “\(\tfrac12(p+x)^2\)” cost, only P&L and imbalance-penalty, and a hard liquidation \(x_T=-p_T\) at the final minute.
+
+---
+
+## 1. State, Control, Dynamics
+
+Let the **state** be  
+\[
+s_t = \begin{pmatrix}
+p_t \\[4pt]
+\mathrm{imb1}_t \\[4pt]
+\mathrm{imb2}_t \\[4pt]
+\alpha^1_t \\[4pt]
+\alpha^2_t \\[4pt]
+\alpha^3_t
+\end{pmatrix}
+\in\mathbb R^6,
+\quad
+x_t\in\mathbb R.
+\]
+The **dynamics** are linear:
+\[
+s_{t+1} = A\,s_t + B\,x_t + w_{t+1},
+\]
+with
+\[
+A = \begin{pmatrix}
+1      & 0      & 0      & 0      & 0      & 0\\
+0      & \phi_1 & 0      & 0      & 0      & 0\\
+0      & 0      & \phi_2 & 0      & 0      & 0\\
+0      & 0      & 0      & \rho_{11}&\rho_{12}&\rho_{13}\\
+0      & 0      & 0      & 0      & \rho_{22}&\rho_{23}\\
+0      & 0      & 0      & 0      & 0      & \rho_{33}
+\end{pmatrix},
+\quad
+B = \begin{pmatrix}1\\[2pt]1-\phi_1\\[2pt]1-\phi_2\\[2pt]0\\[2pt]0\\[2pt]0\end{pmatrix},
+\]
+and Gaussian noise only on \(\alpha\):
+\[
+w_{t+1} = (0,0,0,\varepsilon^1_{t+1},\varepsilon^2_{t+1},\varepsilon^3_{t+1})^T,
+\quad
+\varepsilon_t\sim\mathcal N(0,\Sigma).
+\]
+
+---
+
+## 2. Instantaneous Reward
+
+At each \(t<T\), choose \(x\) to receive
+\[
+r_t(s,x)
+= \underbrace{\mathrm{rate}_t(\alpha)\,(p+x)}_{\substack{\text{alpha‐capture}\\\text{per share}}}
+\;-\;\tfrac12\,\underbrace{\bigl(\mathrm{imb1}_{t+1}+\mathrm{imb2}_{t+1}\bigr)}_{\substack{\phi_1\,\mathrm{imb1}_t+(1-\phi_1)x\\+\;\phi_2\,\mathrm{imb2}_t+(1-\phi_2)x}}\;x,
+\]
+with the time-varying **rate** defined by
+\[
+\mathrm{rate}_t(\alpha) = 
+\begin{cases}
+\alpha^1_t/100, & t < T-39,\\
+\alpha^1_t/(T-10-t+1), & T-39 \le t < T-9,\\
+\alpha^3_t/(T-t+1), & t \ge T-9.
+\end{cases}
+\]
+
+---
+
+## 3. Terminal Condition
+
+At the final minute \(T\), we **must** liquidate with \(x_T=-p_T\).  There is no new alpha, so the **last reward** at \(t=T-1\) is
+\[
+r_{T-1}
+= \underbrace{\mathrm{rate}_{T-1}\,0}_{=0}
+\;-\;\tfrac12\bigl(\phi_1\,\mathrm{imb1}_{T-1}+\phi_2\,\mathrm{imb2}_{T-1}\bigr)\,(-p_{T-1})
+= +\tfrac12\bigl(\phi_1\,\mathrm{imb1}_{T-1}+\phi_2\,\mathrm{imb2}_{T-1}\bigr)\,p_{T-1}.
+\]
+We then set
+\[
+V_T(s) = 0,
+\]
+so that the entire terminal payoff is captured in \(r_{T-1}\).
+
+---
+
+## 4. Quadratic–Linear Ansatz
+
+We posit a value function of the form
+\[
+V_t(s) = \tfrac12\,s^\top P_t\,s \;+\; q_t^\top s \;+\; r_t,
+\quad
+\pi_t(s) = x_t^* = -\,K_t\,s \;-\; k_t.
+\]
+Here
+- \(P_t\in\mathbb R^{6\times6}\) (symmetric),
+- \(q_t\in\mathbb R^6\),
+- \(r_t\in\mathbb R\),
+- \(K_t\in\mathbb R^{1\times6}\),
+- \(k_t\in\mathbb R\).
+
+---
+
+## 5. Bellman Backup (Reward Maximization)
+
+At each \(t=T-1,\dots,0\),
+\[
+V_t(s) = \max_x\Bigl\{r_t(s,x)
+  + \mathbb E\bigl[V_{t+1}(A\,s + B\,x + w)\bigr]\Bigr\}.
+\]
+Because \(r_t\) and \(V_{t+1}\) are quadratic in \((s,x)\), the inner maximization is a **concave** quadratic in \(x\).
+
+---
+
+## 6. Collect Terms in \(x\)
+
+Write
+\[
+\mathcal J(x)
+= r_t(s,x)
++ \tfrac12 (A s + Bx)^\top P_{t+1}(A s + B x)
++ q_{t+1}^\top(A s + B x)
++ r_{t+1}
++ \tfrac12\Tr(P_{t+1}\Sigma).
+\]
+Gathering:
+
+1. **Quadratic**: \(\tfrac12\,x\,H_t\,x\),  
+   \[
+   H_t = -\bigl(B^\top P_{t+1}B\bigr)\;-\;0
+         \quad(\text{minus because max vs. min}),
+   \]
+   plus any \(x^2\) from imbalance-penalty:  
+   \(\;-\tfrac12(2-\phi_1-\phi_2)\,x^2\).
+
+2. **Linear**: \(x^\top(L_t\,s + d_t)\), with
+   \[
+   L_t = \underbrace{\nabla_x r_t}_{\text{from }-\tfrac12(\dots)x}
+         + B^\top P_{t+1}A,
+   \quad
+   d_t = B^\top q_{t+1}.
+   \]
+
+3. **Constant**: terms in \(s\) and \(\tfrac12\Tr(P_{t+1}\Sigma)\).
+
+---
+
+## 7. Optimal \(x\)
+
+Setting \(\partial\mathcal J/\partial x=0\) gives
+\[
+x_t^* = -H_t^{-1}\bigl(L_t\,s + d_t\bigr),
+\]
+i.e.
+\[
+K_t = H_t^{-1}L_t,
+\quad
+k_t = H_t^{-1}d_t.
+\]
+
+---
+
+## 8. Riccati-Type Recursions
+
+Initialize at \(t=T\):
+\[
+P_T = 0,\quad q_T = 0,\quad r_T = 0.
+\]
+Then for \(t=T-1,\dots,0\):
+\[
+\begin{aligned}
+P_t &= \underbrace{\nabla_{ss}r_t}_{Q_t}
+     + A^\top P_{t+1}A
+     \;-\;(A^\top P_{t+1}B + \nabla_{sx}r_t)\,H_t^{-1}\,(B^\top P_{t+1}A + \nabla_{xs}r_t),\\[6pt]
+q_t &= \nabla_s r_t
+     + A^\top q_{t+1}
+     \;-\;(A^\top P_{t+1}B + \nabla_{sx}r_t)\,H_t^{-1}\,B^\top q_{t+1},\\[6pt]
+r_t &= r_{t+1}
+     + \tfrac12\Tr(P_{t+1}\Sigma)
+     + \tfrac12\bigl(d_t + L_t\,s\bigr)^\top H_t^{-1}\bigl(d_t + L_t\,s\bigr).
+\end{aligned}
+\]
+
+---
+
+## 9. Explicit Matrices for Our Setup
+
+- **State dimension** \(n=6\), control scalar \(m=1\).
+- **Rate derivatives** produce
+  \[
+  Q_t[p,\alpha^i] = \nabla_{pp}(-\text{rate}_t\,p) = 0,\quad
+  Q_t[p,\alpha^i]=Q_t[\alpha^i,p]=-{\tfrac12}\,\partial_{\alpha^i}\,\text{rate}_t,
+  \]
+  \[
+  \nabla_{sx}r_t = N_t,\quad
+  N_t[\alpha^i,0] = -\partial_{\alpha^i}\,\text{rate}_t,\quad
+  R_t = -(2-\phi_1-\phi_2).
+  \]
+- **Dynamics**: \(A,B,\Sigma\) as above.
+- **Terminal**: \(P_T=0\), \(q_T=0\), \(r_T=0\) since we enforce the last liquidation in \(r_{T-1}\).
+
+---
+
+## 10. Implementation in Python
+
+1. Build \(A,B,\Sigma\).  
+2. For each \(t\):
+   - Compute \(\text{rate}_t\), then fill \(Q_t, N_t, R_t\).  
+   - Backward pass to get \(P_t,q_t,r_t,K_t,k_t\).  
+3. Simulate with \(x_t=-K_t s_t - k_t\), plus hard‐liquidate at \(t=T-1\).  
+
+This fully specifies the **quadratic-linear** closed-form solution for a **reward-maximizing** LQG with no \((p+x)^2\) penalty and a direct liquidation terminal condition.  
