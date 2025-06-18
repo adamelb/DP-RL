@@ -1,0 +1,98 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 1) Paramètres
+phi1, phi2 = 0.8, 0.5
+T = 390
+n_alpha = 3
+
+# 2) AR(1) des alphas
+Rho = np.array([[0.9,0.05,0.0],[0.0,0.8,0.1],[0.0,0.0,0.7]])
+Sigma_alpha = 0.01*np.eye(n_alpha)
+
+# 3) Dynamique de l’état s=[p,imb1,imb2,alpha1,alpha2,alpha3]
+n = 1+2+n_alpha
+A = np.zeros((n,n))
+A[0,0]=1; A[1,1]=phi1; A[2,2]=phi2; A[3:,3:]=Rho
+B = np.zeros((n,1)); B[0,0]=1; B[1,0]=1-phi1; B[2,0]=1-phi2
+
+# 4) Pénalité d’imbalance (λ=1)
+R_pen = 2 - (phi1+phi2)
+N_pen = np.zeros((n,1))
+N_pen[1,0] = 0.5*phi1
+N_pen[2,0] = 0.5*phi2
+
+# 5) Coût terminal non nul : V_T(s)=½(φ1·imb1+φ2·imb2)·p
+Qf = np.zeros((n,n))
+Qf[0,1] = Qf[1,0] = 0.25*phi1
+Qf[0,2] = Qf[2,0] = 0.25*phi2
+
+# 6) Préparer les structures pour la récurrence
+P       = [None]*(T+1)
+K       = [None]*T
+r_const = np.zeros(T+1)
+
+# bruits pour le terme de trace
+Sigma_full = np.zeros((n,n))
+Sigma_full[3:,3:] = Sigma_alpha
+
+# 7) Condition terminale
+P[T] = Qf.copy()        # V_T(s)=s^TQf s
+
+# 8) Récurrence backward
+for t in range(T-1, -1, -1):
+    # 8.1) construire Q_t et N_t selon rate(t)
+    Q_t = np.zeros((n,n))
+    N_t = N_pen.copy()
+    if   t >= T-9:
+        idx, fac = 5, 1.0/(T-t+1)
+    elif t >= T-39:
+        idx, fac = 3, 1.0/(T-10-t+1)
+    else:
+        idx, fac = 3, 1.0/100.0
+    Q_t[0,idx] = Q_t[idx,0] = -0.5*fac
+    N_t[idx,0]        += -fac
+    R_t = R_pen
+
+    # 8.2) gain en rétroaction
+    H    = float(R_t + (B.T @ P[t+1] @ B))
+    K[t] = ((B.T @ P[t+1] @ A + N_t.T) / H)
+
+    # 8.3) mise à jour Riccati
+    P[t] = (Q_t
+            + A.T @ P[t+1] @ A
+            - (A.T @ P[t+1] @ B + N_t) @ K[t])
+    r_const[t] = r_const[t+1] + 0.5*np.trace(P[t+1]@Sigma_full)
+
+# 9) Simulation
+np.random.seed(0)
+s = np.zeros((n,1))
+xs, rewards = [], []
+
+for t in range(T):
+    x = float(-K[t] @ s)
+    xs.append(x)
+
+    p, i1, i2, a1, a2, a3 = s.flatten()
+    p1 = p+x
+    if   t >= T-9:
+        rate = a3/(T-t+1)
+    elif t >= T-39:
+        rate = a1/(T-10-t+1)
+    else:
+        rate = a1/100.0
+    im1p = phi1*i1 + (1-phi1)*x
+    im2p = phi2*i2 + (1-phi2)*x
+    rew  = rate*p1 - 0.5*(im1p+im2p)*x
+    rewards.append(rew)
+
+    eps = np.zeros((n,1))
+    eps[3:,0] = np.random.multivariate_normal(np.zeros(n_alpha), Sigma_alpha)
+    s = A@s + B*x + eps
+
+# 10) Affichage
+print("Position finale (somme x) :", np.sum(xs))
+plt.plot(np.cumsum(rewards))
+plt.title("Cumulative Reward")
+plt.grid(True)
+plt.show()
