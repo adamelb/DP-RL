@@ -1,0 +1,84 @@
+# Reward-Based Finite-Horizon LQG: End-to-End Derivation
+
+We solve the intraday liquidation problem by **directly maximizing reward** 
+\[
+V_t(s)=\max_{x_t,\dots,x_{T-1}}\;\E\Bigl[\sum_{u=t}^{T-1}r_u(s_u,x_u)\Bigr],
+\]
+with a **hard liquidation** \(x_T=-p_T\) at the final minute and **no** \(\tfrac12(p+x)^2\) term.
+
+---
+
+## 1. State, Control, Dynamics
+
+- **State**  
+  \[
+    s_t=\bigl[p_t,\;\mathrm{imb1}_t,\;\mathrm{imb2}_t,\;\alpha^1_t,\;\alpha^2_t,\;\alpha^3_t\bigr]^\top\in\R^6.
+  \]
+- **Control** \(x_t\in\R\).  
+- **Dynamics**  
+  \[
+    s_{t+1}=A\,s_t + B\,x_t + w_{t+1},\quad
+    w_{t+1}\sim\Ncal(0,\Sigma),
+  \]
+  where  
+  \[
+    A=\begin{pmatrix}
+      1 & 0 & 0 & 0 & 0 & 0\\
+      0 & \phi_1 & 0 & 0 & 0 & 0\\
+      0 & 0 & \phi_2 & 0 & 0 & 0\\
+      0 & 0 & 0 & \rho_{11} & \rho_{12} & \rho_{13}\\
+      0 & 0 & 0 & 0 & \rho_{22} & \rho_{23}\\
+      0 & 0 & 0 & 0 & 0 & \rho_{33}
+    \end{pmatrix},
+    \quad
+    B=\begin{pmatrix}1\\1-\phi_1\\1-\phi_2\\0\\0\\0\end{pmatrix}.
+  \]
+
+---
+
+## 2. Instantaneous Reward as LQ
+
+At each \(t<T\), we get  
+\[
+r_t(s,x)
+=\underbrace{\mathrm{rate}_t(\alpha)\,(p+x)}_{\text{alpha P\&L}}
+\;-\;\tfrac12\Bigl(\mathrm{imb1}_{t+1}+\mathrm{imb2}_{t+1}\Bigr)\,x,
+\]
+with  
+\[
+\mathrm{imb1}_{t+1}=\phi_1\,\mathrm{imb1}_t+(1-\phi_1)x,\quad
+\mathrm{imb2}_{t+1}=\phi_2\,\mathrm{imb2}_t+(1-\phi_2)x.
+\]
+Define the **time‐varying rate**  
+\[
+\mathrm{rate}_t(\alpha)=
+\begin{cases}
+\alpha^1_t/100,                      & t < T-39,\\
+\alpha^1_t/(T-10-t+1),               & T-39\le t<T-9,\\
+\alpha^3_t/(T-t+1),                  & t\ge T-9.
+\end{cases}
+\]
+
+We embed \(r_t\) in the form
+\[
+r_t(s,x)
+=\tfrac12\,s^\top Q_t\,s
+\;+\;s^\top N_t\,x
+\;+\;\tfrac12\,R_t\,x^2,
+\]
+with:
+
+1. **\(Q_t\):** only \(p\)–\(\alpha^i\) cross‐terms  
+   \[
+     Q_t[\,p,\alpha^i\,] \;=\;Q_t[\,\alpha^i,p\,]\;=\;\tfrac12\,\mathrm{rate}_t,
+   \]
+   where \(i=1\) or \(3\) per the above piecewise rule.
+
+2. **\(N_t\):** state–control cross‐terms
+   \[
+     s^\top N_t x
+     = \underbrace{\mathrm{rate}_t}_{N_t[p,0]}\,p\,x
+     \;-\;\tfrac12\phi_1\,\mathrm{imb1}\,x
+     \;-\;\tfrac12\phi_2\,\mathrm{imb2}\,x,
+   \]
+   i.e.
