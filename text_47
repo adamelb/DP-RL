@@ -82,3 +82,101 @@ with:
      \;-\;\tfrac12\phi_2\,\mathrm{imb2}\,x,
    \]
    i.e.
+
+3. **\(R_t\):** pure control‐quadratic
+\[
+  \tfrac12\,R_t\,x^2 
+  = -\tfrac12\,(2-\phi_1-\phi_2)\,x^2
+  \quad\Longrightarrow\quad
+  R_t = -\bigl(2-\phi_1-\phi_2\bigr).
+\]
+
+---
+
+## 3. Terminal Condition
+
+At \(t=T\) we **force** \(x_T=-p_T\).  There is **no** new alpha, so we set
+\[
+V_T(s)=0,
+\]
+and absorb the final liquidation payoff
+\[
+r_{T-1}
+= 0\cdot\mathrm{rate}_{T-1}
+\;-\;\tfrac12\bigl(\phi_1\mathrm{imb1}_{T-1}+\phi_2\mathrm{imb2}_{T-1}\bigr)(-p_{T-1})
+= +\tfrac12(\phi_1\mathrm{imb1}+\phi_2\mathrm{imb2})\,p
+\]
+directly in \(r_{T-1}\).
+
+---
+
+## 4. Quadratic Ansatz for \(V\)
+
+Assume
+\[
+V_t(s) = \tfrac12\,s^\top P_t\,s \;+\; r_t,
+\quad
+x_t^* = -\,K_t\,s,
+\]
+with \(P_t\in\R^{6\times6}\) and scalar \(r_t\).
+
+---
+
+## 5. Bellman Backup
+
+For \(t=T-1,\dots,0\):
+\[
+V_t(s)
+=\max_x\Bigl\{r_t(s,x)
++\E[V_{t+1}(A s + B x + w)]\Bigr\}.
+\]
+Plug in the ansatz for \(V_{t+1}\) and collect terms in \(x\):
+
+---
+
+## 6. Define
+\[
+H_t = R_t + B^\top P_{t+1}B,
+\qquad
+L_t = B^\top P_{t+1}A + N_t^\top.
+\]
+Then the maximization
+\(\max_x\bigl\{-\tfrac12x^\top H_t x - x^\top(L_t s)\bigr\}\)
+yields
+\[
+x_t^* \;=\;-\,H_t^{-1}\,L_t\,s,
+\qquad
+K_t = H_t^{-1}\,L_t.
+\]
+
+---
+
+## 7. Riccati Recursion
+
+With \(x^*=-K_t s\), identify \(P_t,r_t\) by matching:
+\[
+\begin{aligned}
+P_t &= Q_t + A^\top P_{t+1}A 
+  - (A^\top P_{t+1}B + N_t)\,K_t,\\[6pt]
+r_t &= r_{t+1} + \tfrac12\Tr\bigl(P_{t+1}\,\Sigma\bigr)
+  + \tfrac12\,\bigl(K_t\,s\bigr)^\top H_t \bigl(K_t\,s\bigr)\quad(\text{constant term}).
+\end{aligned}
+\]
+
+Initialize
+\(\;P_T=0,\;r_T=0\;\) and recurse backward.
+
+---
+
+## 8. Implementation Steps
+
+1. **Build** \(A,B,\Sigma\).  
+2. **For** \(t=T-1,\dots,0\):  
+- Compute \(\mathrm{rate}_t\) and fill \(Q_t,N_t,R_t\).  
+- Form \(H_t,L_t\).  
+- Set \(K_t=H_t^{-1}L_t\).  
+- Update \(P_t,r_t\).  
+3. **Simulate** using \(x_t=-K_t s_t\) (and force \(x_{T-1}=-p_{T-1}\) if desired).  
+4. **Plot** cumulative position, cumulative reward, and \(V_t(s_t)=\tfrac12\,s_t^\top P_t s_t + r_t\).
+
+This completes the **clean, fully‐specified** derivation and sets you up for a direct Python implementation.  
