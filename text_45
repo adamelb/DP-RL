@@ -1,0 +1,209 @@
+# Closed‐Form Solution of a Finite‐Horizon LQG with Terminal Liquidation
+
+We consider a discrete‐time control problem on $t=0,1,\dots,T$ with
+
+- **State** $s_t\in\mathbb R^n$  
+- **Control** $x_t\in\mathbb R^m$ (here $m=1$)  
+- **Dynamics**  
+  $$
+    s_{t+1} = A\,s_t \;+\; B\,x_t \;+\; w_{t+1}, 
+    \quad w_{t+1}\sim\mathcal N(0,\Sigma).
+  $$
+
+- **Instantaneous cost** (negative reward)  
+  $$
+    \ell(s_t,x_t)
+      = \tfrac12\,s_t^\top Q_t\,s_t
+      \;+\;s_t^\top N_t\,x_t
+      \;+\;\tfrac12\,x_t^\top R_t\,x_t
+      \;+\;s_t^\top m_t
+      \;+\;c_t^\top x_t,
+  $$
+  where $Q_t\in\mathbb R^{n\times n}$, $N_t\in\mathbb R^{n\times m}$, $R_t\in\mathbb R^{m\times m}$, $m_t\in\mathbb R^n$, $c_t\in\mathbb R^m$ may all depend on $t$.
+
+- **Terminal cost** at $t=T$:  
+  $$
+    V_T(s_T)
+    = \tfrac12\,s_T^\top Q_f\,s_T
+    \;+\;s_T^\top m_f
+    \;+\;r_f,
+  $$
+  encoding in particular a penalty for non‐zero terminal state (e.g.\ liquidation).
+
+We seek the **value function** and **optimal policy**:
+$$
+  V_t(s) = \min_{x_t,\dots,x_{T-1}}\,
+    \mathbb E\Bigl[\sum_{u=t}^{T-1}\ell(s_u,x_u)\;+\;V_T(s_T)\Bigr],
+  \qquad
+  \pi_t(s)=x_t^*.
+$$
+
+---
+
+## 1. Quadratic Ansatz
+
+We look for a quadratic form
+$$
+  V_t(s) = \tfrac12\,s^\top P_t\,s \;+\;q_t^\top s \;+\;r_t,
+  \quad
+  \pi_t(s)=x_t^* = -K_t\,s \;-\;k_t,
+$$
+with $P_t\in\mathbb R^{n\times n}$ symmetric, $q_t\in\mathbb R^n$, $r_t\in\mathbb R$, $K_t\in\mathbb R^{m\times n}$, $k_t\in\mathbb R^m$.
+
+---
+
+## 2. Bellman Equation
+
+At each $t=T-1,\dots,0$,
+$$
+  V_t(s)
+  = \min_{x}\Bigl\{\ell(s,x)
+      +\mathbb E\bigl[V_{t+1}(A\,s + B\,x + w)\bigr]\Bigr\}.
+$$
+Compute the expectation using the ansatz at $t+1$:
+$$
+\mathbb E\bigl[V_{t+1}(A s + B x + w)\bigr]
+= \tfrac12 (A s + B x)^\top P_{t+1}(A s + B x)
++ q_{t+1}^\top (A s + B x)
++ r_{t+1}
++ \tfrac12\Tr\bigl(P_{t+1}\,\Sigma\bigr).
+$$
+
+---
+
+## 3. Combine and Collect Terms
+
+Define the scalar‐quadratic form in $x$:
+$$
+\begin{aligned}
+\mathcal J(x)
+&= \tfrac12 s^\top Q_t s
+ + s^\top N_t x
+ + \tfrac12 x^\top R_t x
+ + s^\top m_t
+ + c_t^\top x\\
+&\quad + \tfrac12 s^\top A^\top P_{t+1}A\,s
+ + s^\top A^\top P_{t+1}B\,x
+ + \tfrac12 x^\top B^\top P_{t+1}B\,x\\
+&\quad + q_{t+1}^\top A\,s
+ + q_{t+1}^\top B\,x
+ + r_{t+1}
+ + \tfrac12\Tr(P_{t+1}\Sigma).
+\end{aligned}
+$$
+
+Gather coefficients in $x$:
+
+- **Quadratic in $x$**: 
+  $$
+    \tfrac12\,x^\top H_t\,x,\quad
+    H_t \;=\; R_t \;+\; B^\top P_{t+1}B.
+  $$
+
+- **Linear in $x$**:
+  $$
+    x^\top\Bigl(N_t^\top + B^\top P_{t+1}A\Bigr)\,s
+   \;+\; x^\top\bigl(B^\top q_{t+1} + c_t\bigr)
+  = x^\top(L_t\,s + d_t),
+  $$
+  with 
+  $$
+    L_t = B^\top P_{t+1}A + N_t^\top,
+    \quad
+    d_t = B^\top q_{t+1} + c_t.
+  $$
+
+- **Constant terms** in $s$ and noise trace.
+
+---
+
+## 4. First‐Order Optimality
+
+Setting $\nabla_x\mathcal J(x)=0$ gives
+$$
+  H_t\,x + L_t\,s + d_t = 0.
+$$
+Hence the **optimal control** is
+$$
+  x_t^* = -\,H_t^{-1}\,(L_t\,s + d_t)
+         = -\,K_t\,s \;-\; k_t,
+$$
+where
+$$
+  K_t = H_t^{-1}L_t,
+  \qquad
+  k_t = H_t^{-1}d_t.
+$$
+
+---
+
+## 5. Riccati Recursions
+
+Plug $x_t^*$ back into $\mathcal J$ to identify $P_t,q_t,r_t$:
+
+1. **Matrix Riccati**:
+   $$
+     P_t 
+     = Q_t 
+     + A^\top P_{t+1}A
+     \;-\;(A^\top P_{t+1}B + N_t)\,H_t^{-1}\,(B^\top P_{t+1}A + N_t^\top).
+   $$
+
+2. **Vector recursion**:
+   $$
+     q_t
+     = m_t
+     + A^\top q_{t+1}
+     \;-\;(A^\top P_{t+1}B + N_t)\,H_t^{-1}\,(B^\top q_{t+1} + c_t).
+   $$
+
+3. **Scalar recursion**:
+   $$
+     r_t
+     = r_{t+1}
+     + \tfrac12\Tr(P_{t+1}\,\Sigma)
+     \;-\;\tfrac12\,d_t^\top\,H_t^{-1}\,d_t.
+   $$
+
+---
+
+## 6. Initialization and Terminal
+
+- Set $P_T=Q_f$, $q_T=m_f$, $r_T=r_f$ as given by the terminal cost.
+- Recursively compute $(P_t,q_t,r_t)$ and $(K_t,k_t)$ backward for $t=T-1,\dots,0$.
+
+---
+
+## 7. Online Policy and Value
+
+At each time $t$:
+
+1. **Observe** $s_t$.  
+2. **Compute** 
+   $$
+     x_t = -K_t\,s_t \;-\; k_t.
+   $$
+3. **Execute** $x_t$, observe $s_{t+1} = A s_t + B x_t + w_{t+1}$.  
+4. **Value**:
+   $$
+     V_t(s_t) = \tfrac12\,s_t^\top P_t\,s_t \;+\; q_t^\top s_t \;+\; r_t.
+   $$
+
+This yields a closed‐form, time‐varying linear feedback law and an exact value function for all $t\le T$.  
+
+---
+
+## 8. Specialization to the Intraday Trading Problem
+
+For our intraday liquidation:
+
+- $n=5$, $m=1$, state $s_t=(\alpha_t^1,\alpha_t^2,\alpha_t^3,p_t,\mathrm{imb}_t)^\top$ (or extended to two imbalances).
+- $A,B,\Sigma$ come from AR(1) on $\alpha$ and inventory/imbalance updates.
+- $Q_t,N_t,R_t,m_t,c_t$ are directly read off from the expression of the instantaneous cost
+  $$\ell(s,x)
+    = \tfrac12(p+x)^2
+      -\tfrac{\alpha^1}{30}(p+x)
+      + \tfrac\lambda2(\mathrm{imb}_{t+1})\,x,
+  $$
+  and the terminal cost $V_T(s)=-p_T\cdot\mathrm{imb}_T$.  
+- You then plug into the above recursions to get $P_t,q_t,r_t,K_t,k_t$ and implement the policy.
