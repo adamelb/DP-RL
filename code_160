@@ -1,0 +1,150 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 0) Example `stds` array (389×3).  Replace with your real data.
+#    stds[t,0] = σ₁(t), stds[t,1] = σ₂(t), stds[t,2] = σ₃(t)
+np.random.seed(0)
+stds = np.abs(np.random.randn(389, 3))
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 1) BASIC PARAMS
+T        = stds.shape[0]       # 389 timestamps: 0…388
+phi1,phi2 = 0.8, 0.5           # imbalance decay
+n_alpha  = 3
+n        = 1 + 2 + n_alpha     # state dim = [p, imb1, imb2, α1, α2, α3]
+
+# 2) PLACEHOLDER AR(1) FOR ALPHAS (replace with your own Rho/Sigma)
+Rho         = np.array([[0.9,0.05,0.0],
+                        [0.0,0.8, 0.1],
+                        [0.0,0.0, 0.7]])
+Sigma_alpha = 0.01 * np.eye(n_alpha)
+
+# 3) STATE‐SPACE MATRICES
+A = np.zeros((n,n))
+A[0,0]   = 1
+A[1,1]   = phi1
+A[2,2]   = phi2
+A[3:,3:] = Rho
+
+B = np.zeros((n,1))
+B[0,0] = 1
+B[1,0] = 1 - phi1
+B[2,0] = 1 - phi2
+
+# 4) IMBALANCE‐PENALTY COST PARAMETERS
+#    cost ℓ = -reward.  The imbalance‐term is ½(imb1_next+imb2_next)·x → yields:
+R_pen = (1 - phi1) + (1 - phi2)       # pure x² coefficient
+N_pen = np.zeros((n,1))
+N_pen[1,0] = +0.5 * phi1              # i1·x term
+N_pen[2,0] = +0.5 * phi2              # i2·x term
+
+# 5) NOISE COV FOR TRACE TERM
+Sigma_full = np.zeros((n,n))
+Sigma_full[3:,3:] = Sigma_alpha
+
+# 6) ALLOCATE BACKWARD ARRAYS
+P       = [None]*(T+1)   # P[0]…P[T]
+K       = [None]*T       # K[0]…K[T-1]
+r_const = np.zeros(T+1)  # constant term from trace
+
+# 7) TERMINAL: V_T(s)=0  ⇒  P[T]=0, r_const[T]=0
+P[T]        = np.zeros((n,n))
+r_const[T]  = 0.0
+
+# 8) FORCE LAST‐MINUTE LIQUIDATION AT t=T-1
+t_last = T-1
+P[t_last] = np.zeros((n,n))
+# We want V_{T-1}(s) =  ½·(φ1·imb1 + φ2·imb2)·p  as cost = -reward
+# So cost‐matrix Qc has Qc[p,i1] = Qc[i1,p] = -0.25·φ1, same for i2
+P[t_last][0,1] = P[t_last][1,0] = -0.25 * phi1
+P[t_last][0,2] = P[t_last][2,0] = -0.25 * phi2
+# Force policy x = -p
+K[t_last]      = np.zeros((1,n))
+K[t_last][0,0] = 1.0
+r_const[t_last] = 0.0
+
+# 9) BACKWARD RICCATI RECURSION FOR t = T-2 … 0
+for t in range(T-2, -1, -1):
+    # 9.1) Build instantaneous cost Qc, Nc, Rc from stds[t]
+    Qc = np.zeros((n,n))
+    Nc = N_pen.copy()
+    if   t < T-39:
+        idx_alpha = 3
+        rate      = stds[t,0] / 30.0
+    elif t < T-9:
+        idx_alpha = 3
+        rate      = stds[t,0] / (T - 10 - t + 1)
+    else:
+        idx_alpha = 5
+        rate      = stds[t,2] / (T - t + 1)
+    # cost = -rate*(p+x) + ½(imb1_next+imb2_next)*x
+    # ⇒ Qc[p,α] = Qc[α,p] = -½·rate,   Nc[α,0] += -rate
+    Qc[0,idx_alpha] = Qc[idx_alpha,0] = -0.5 * rate
+    Nc[idx_alpha,0] += -rate
+    Rc = R_pen
+
+    # 9.2) Complete‐the‐square: H_t = Rc + Bᵀ P[t+1] B
+    H = float(Rc + (B.T @ P[t+1] @ B))
+    # Linear term in x: L = Bᵀ P[t+1] A + Ncᵀ
+    L = (B.T @ P[t+1] @ A + Nc.T)
+    # Feedback gain
+    K[t] = (L / H)
+
+    # 9.3) Riccati update
+    P[t] = (Qc
+            + A.T @ P[t+1] @ A
+            - (A.T @ P[t+1] @ B + Nc) @ K[t])
+    # Trace term for value constant
+    r_const[t] = r_const[t+1] + 0.5 * np.trace(P[t+1] @ Sigma_full)
+
+# 10) SIMULATION UNDER x_t = -K[t]·s_t  (with forced last‐step)
+np.random.seed(1)
+s = np.zeros((n,1))
+xs, rewards, values = [], [], []
+
+for t in range(T):
+    # control
+    if t == t_last:
+        x = -float(s[0,0])
+    else:
+        x = float(-K[t] @ s)
+    xs.append(x)
+
+    # true reward = rate*(p+x) - ½(imb1_next+imb2_next)*x
+    p = float(s[0,0]); p1 = p + x
+    if   t < T-39:
+        rate = stds[t,0] / 30.0
+    elif t < T-9:
+        rate = stds[t,0] / (T - 10 - t + 1)
+    else:
+        rate = stds[t,2] / (T - t + 1)
+    im1p = phi1*s[1,0] + (1-phi1)*x
+    im2p = phi2*s[2,0] + (1-phi2)*x
+    rew  = rate * p1 - 0.5 * (im1p + im2p) * x
+    rewards.append(rew)
+
+    # value for reward = -cost = -(½ sᵀP s + r_const[t])
+    values.append(- (0.5 * float(s.T @ P[t] @ s) + r_const[t]))
+
+    # state update
+    eps = np.zeros((n,1))
+    eps[3:,0] = np.random.multivariate_normal(np.zeros(n_alpha), Sigma_alpha)
+    s = A @ s + B*x + eps
+
+# 11) PLOTS
+cum_pos    = np.cumsum(xs)
+cum_rew    = np.cumsum(rewards)
+
+plt.figure(figsize=(12,4))
+plt.subplot(1,3,1)
+plt.plot(cum_pos);    plt.title("Cumulative Position"); plt.grid(True)
+
+plt.subplot(1,3,2)
+plt.plot(cum_rew);    plt.title("Cumulative Reward"); plt.grid(True)
+
+plt.subplot(1,3,3)
+plt.plot(values);     plt.title("Value Function V_t(s)"); plt.grid(True)
+
+plt.tight_layout()
+plt.show()
