@@ -1,0 +1,96 @@
+import numpy as np
+
+def compute_Q_grid(
+    P_list,
+    r_const_list,
+    t,
+    A, B, Sigma,
+    Q_t, N_t, R_t,
+    s_fixed,
+    p_range, x_range,
+    num=1001
+):
+    """
+    Compute Q_t(s,x) = r_t(s,x) + E[V_{t+1}(s_{t+1})] on a grid of (p,x) values.
+
+    Parameters
+    ----------
+    P_list : list of ndarray, length T+1
+        P_list[k] is the (n×n) value matrix at time k.
+    r_const_list : array_like, length T+1
+        r_const_list[k] is the scalar constant term at time k.
+    t : int
+        Time index (0 <= t < T).
+    A : ndarray, shape (n,n)
+        State transition matrix.
+    B : ndarray, shape (n,1)
+        Control input matrix.
+    Sigma : ndarray, shape (n,n)
+        Process noise covariance.
+    Q_t : ndarray, shape (n,n)
+        Instantaneous reward state–state matrix at time t.
+    N_t : ndarray, shape (n,1)
+        Instantaneous reward state–control matrix at time t.
+    R_t : float
+        Instantaneous reward control–control scalar at time t.
+    s_fixed : ndarray, shape (n,)
+        The current state, except p (which will vary). Must be ordered
+        [p, imb1, imb2, alpha1, alpha2, alpha3].
+        Only s_fixed[1:] are used; s_fixed[0] will be overwritten by p.
+    p_range : float
+        Absolute range for p: grid from -p_range to +p_range.
+    x_range : float
+        Absolute range for x: grid from -x_range to +x_range.
+    num : int, optional
+        Number of points per axis (default 1001).
+
+    Returns
+    -------
+    p_grid : ndarray, shape (num, num)
+    x_grid : ndarray, shape (num, num)
+    Q_grid : ndarray, shape (num, num)
+        Values of Q_t(s,x) at each grid point.
+    """
+    # create mesh of p and x
+    p_vals = np.linspace(-p_range, p_range, num)
+    x_vals = np.linspace(-x_range, x_range, num)
+    p_grid, x_grid = np.meshgrid(p_vals, x_vals, indexing='ij')  # (num,num)
+
+    # flatten for vectorized computation
+    NN = num * num
+    p_flat = p_grid.ravel()
+    x_flat = x_grid.ravel()
+
+    # build s_flat: copy s_fixed, overwrite p component
+    n = A.shape[0]
+    s_flat = np.tile(s_fixed, (NN, 1))  # (NN, n)
+    s_flat[:, 0] = p_flat
+
+    # instantaneous reward r_t(s,x)
+    # r = 0.5 * s^T Q_t s + (N_t^T s) * x + 0.5 * R_t * x^2
+    # compute 0.5*s^TQ_ts for all
+    Qs = 0.5 * np.sum(s_flat @ Q_t * s_flat, axis=1)      # (NN,)
+    Ns = (s_flat @ N_t).ravel()                            # (NN,)
+    rx = Ns * x_flat + 0.5 * R_t * x_flat**2               # (NN,)
+    r_flat = Qs + rx                                       # (NN,)
+
+    # continuation term E[V_{t+1}(s_next)] 
+    # = 0.5*(A s + B x)^T P_{t+1} (A s + B x) + 0.5*Tr(P_{t+1}Sigma) + r_const[t+1]
+    Pnext = P_list[t+1]
+    rc_next = r_const_list[t+1]
+    # compute s_next for all
+    # s_next = s_flat @ A^T + x * B^T
+    sA = s_flat @ A.T                                 # (NN, n)
+    s_next = sA + x_flat[:, None] * B.ravel()[None, :]  # (NN, n)
+    # quadratic form
+    Vs = 0.5 * np.sum((s_next @ Pnext) * s_next, axis=1)  # (NN,)
+    trace_term = 0.5 * np.trace(Pnext @ Sigma)
+    cont_flat = Vs + trace_term + rc_next                 # (NN,)
+
+    # Q = r + continuation
+    Q_flat = r_flat + cont_flat
+
+    # reshape back to grid
+    Q_grid = Q_flat.reshape(num, num)
+
+    return p_grid, x_grid, Q_grid
