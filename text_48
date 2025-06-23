@@ -1,0 +1,64 @@
+**Setup**  
+– State‐dynamics:  
+\[
+s_{t+1}=A\,s_t\,+\,B\,x_t\,+\,w_{t+1},\quad w_{t+1}\sim\mathcal N(0,\Sigma)
+\]  
+– Instantaneous reward (to be maximized):  
+\[
+r(s,x)=\tfrac12\,s^\top Q\,s\;+\;s^\top N\,x\;+\;\tfrac12\,R\,x^2
+\]  
+– Terminal at \(t=T\):  
+\[
+V_T(s)=0\quad\Longrightarrow\quad P_T=0,\;r_{\rm const,T}=0
+\]  
+– Quadratic ansatz for all \(t\):  
+\[
+V_t(s)=\tfrac12\,s^\top P_t\,s\;+\;r_{\rm const,t}.
+\]
+
+---
+
+###  Riccati‐type recursion (constant matrices)
+
+For \(t=T-1,T-2,\dots,0\):
+
+1.  **Define** the scalar  
+    \[
+      H \;=\; R \;+\; B^\top P_{t+1}\,B.
+    \]
+
+2.  **Update** the value‐matrix  
+    \[
+      P_t
+      = Q
+      \;+\;A^\top P_{t+1}\,A
+      \;-\;
+      \bigl(A^\top P_{t+1}B \;+\;N\bigr)\;
+      H^{-1}
+      \;\bigl(B^\top P_{t+1}A \;+\;N^\top\bigr).
+    \]
+
+3.  **Update** the constant term (noise trace)  
+    \[
+      r_{\rm const,t}
+      = r_{\rm const,t+1}
+      \;+\;\tfrac12\,\Tr\!\bigl(P_{t+1}\,\Sigma\bigr).
+    \]
+
+---
+
+#### Summary
+
+- **Backward** from \(t=T\) with \(P_T=0,\;r_{\rm const,T}=0\).  
+- At each step compute  
+  \(\;H=R+B^\top P_{t+1}B\),  
+  then  
+  \[
+    P_t
+    = Q + A^\top P_{t+1}A
+      - (A^\top P_{t+1}B + N)\,H^{-1}(B^\top P_{t+1}A + N^\top),
+  \]
+  and  
+  \(\;r_{\rm const,t}=r_{\rm const,t+1} + \tfrac12\Tr(P_{t+1}\Sigma).\)
+- This yields \(P_t\) and \(r_{\rm const,t}\) for all \(t\), and thus  
+  \(\displaystyle V_t(s)=\tfrac12\,s^\top P_t\,s + r_{\rm const,t}.\)
