@@ -1,0 +1,125 @@
+# ================================================================
+#  INFINITE-HORIZON (γ = 1) INTRADAY CONTROL – STATE DIM = 6
+#  ----------------------------------------------------------------
+#  · imbalance dynamics as before
+#  · reward  r(α) = (α₁·σ₁)/30 · (p + x)
+#  · σ₁ is fixed and chosen below
+#  · closed-form steady-state solution obtained with the
+#    Discrete-time Algebraic Riccati Equation (DARE)
+#
+#  You can freely change *all* hyper-parameters: φ₁, φ₂, σ₁, ρ, Σ…
+#  The script returns:
+#      – P∞ : solution of the DARE   (6×6)
+#      – K∞ : steady-state feedback   x* = −K∞ s
+#      – closed-loop eigenvalues  λ(A − B K∞)
+# ================================================================
+
+import numpy as np
+from scipy.linalg import solve_discrete_are, eigvals
+
+# ----------------------------------------------------------------
+# 1.  PARAMETERS  -------------------------------------------------
+# ----------------------------------------------------------------
+phi1 = 0.55
+phi2 = 0.35
+tilde_R = 2 - phi1 - phi2            # must stay > 0
+
+# persistence + covariance of the 3-factor alpha vector
+rho = np.array([[0.96, 0.02, 0.00],
+                [0.00, 0.90, 0.05],
+                [0.01, 0.00, 0.85]])
+
+Sigma = np.diag([0.02, 0.015, 0.01])
+
+# fixed executions std for alpha1
+sigma1 = 0.20               # ← change me
+r_coef = sigma1 / 30.0       # α₁ × (σ₁/30)
+
+# ----------------------------------------------------------------
+# 2.  SYSTEM MATRICES  (state = [p, imb1, imb2, α₁, α₂, α₃]) -----
+# ----------------------------------------------------------------
+A = np.block([
+    [1,         0,         0,        np.zeros((1,3))],
+    [0,     phi1,         0,        np.zeros((1,3))],
+    [0,        0,     phi2,        np.zeros((1,3))],
+    [np.zeros((3,1)), np.zeros((3,1)), np.zeros((3,1)), rho]
+])                                    # 6×6
+
+B = np.array([[1],
+              [1 - phi1],
+              [1 - phi2],
+              [0],
+              [0],
+              [0]])                   # 6×1
+
+# noise covariance (unused in the DARE itself, shown for completeness)
+Omega = np.zeros((6, 6))
+Omega[3:, 3:] = Sigma
+
+# ----------------------------------------------------------------
+# 3.  QUADRATIC-REWARD COEFFICIENTS (time-independent) ------------
+#     Reward   R(s,x)=  r·α₁·(p + x)
+#                    − ½[φ₁ imb1 + φ₂ imb2] x  − ½·tilde_R x²
+# ----------------------------------------------------------------
+Q = np.zeros((6, 6))
+Q[0, 3] = Q[3, 0] = r_coef           # p ↔ α₁
+
+N = np.zeros((6, 1))
+N[1, 0] = -0.5 * phi1                # −½ φ₁ imb1 · x
+N[2, 0] = -0.5 * phi2                # −½ φ₂ imb2 · x
+N[3, 0] = r_coef                     #   + r·α₁ · x
+
+R = np.array([[tilde_R]])            # scalar > 0  (penalty on x²)
+
+# ----------------------------------------------------------------
+# 4.  FROM “MAXIMISATION” TO LQR “MINIMISATION”
+#     maximise R  ↔  minimise C = −R
+# ----------------------------------------------------------------
+Q_c = -Q            # cost quadratic term
+S_c = -N            # state-control cross term
+R_c = R.copy()      # control quadratic term (still >0)
+
+# ----------------------------------------------------------------
+# 5.  STEADY-STATE RICCATI SOLUTION  ------------------------------
+# ----------------------------------------------------------------
+P_inf = solve_discrete_are(A, B, Q_c, R_c, s=S_c)
+# Optimal LQR gain  (minimisation → u = −K s)
+K_lqr = np.linalg.inv(R_c + B.T @ P_inf @ B) @ (B.T @ P_inf @ A + S_c.T)
+
+# Under our original “maximisation” sign convention, the same
+# feedback  x* = −K_lqr s  maximises the discounted sum of rewards.
+K_inf = K_lqr            # 1×6 row vector
+
+# ----------------------------------------------------------------
+# 6.  STABILITY CHECK  -------------------------------------------
+# ----------------------------------------------------------------
+eig_cl = eigvals(A - B @ K_inf)      # closed-loop eigenvalues
+
+# ----------------------------------------------------------------
+# 7.  UTILITIES  --------------------------------------------------
+# ----------------------------------------------------------------
+def optimal_x(s):
+    """Returns optimal scalar order x* given state s (shape (6,))."""
+    return -float(K_inf @ s)
+
+def value_inf(s):
+    """
+    Infinite-horizon *maximal* value  V(s) = −½ sᵀ P_inf s.
+    (remember P_inf solves the *cost* DARE on −Reward)
+    """
+    s = np.asarray(s).reshape(6, 1)
+    return -0.5 * float(s.T @ P_inf @ s)
+
+# ----------------------------------------------------------------
+# 8.  DEMO  -------------------------------------------------------
+# ----------------------------------------------------------------
+if __name__ == "__main__":
+    s0 = np.array([1.0, 0.2, -0.1, 0.05, -0.03, 0.02])
+    print("Steady-state Riccati matrix  P∞:")
+    print(P_inf.round(6))
+    print("\nOptimal feedback  K∞  (x* = −K∞ s):")
+    print(K_inf.round(6))
+    print("\nClosed-loop eigenvalues:")
+    print(np.round(eig_cl, 6))
+    print("\nV(s0) =", value_inf(s0))
+    print("x*(s0) =", optimal_x(s0))
