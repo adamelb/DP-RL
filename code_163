@@ -1,0 +1,172 @@
+# ===========================================================
+#  FORMULATION GENERALE DU PROBLÈME INTRADAY  (T = 388 pas)
+#  -----------------------------------------------------------
+#  Ce script calcule :
+#    • les coefficients (K_t, k_t, c_t)  de la value-function
+#        V_t(s) = ½ sᵀ K_t s + k_tᵀ s + c_t      pour tout t
+#    • la politique optimale   x*_t(s) = argmax_x R_t(s,x)+…
+#
+#  Tous les hyper-paramètres sont fixés ci-dessous « au hasard ».
+#  Vous pouvez librement les modifier (phi1, phi2, rho, Σ, std…)
+# ===========================================================
+
+import numpy as np
+
+# ------------------------------------------------------------------
+# 1. Paramètres GÉNÉRAUX  ––> modifiez-les comme bon vous semble
+# ------------------------------------------------------------------
+T        = 388                         # horizon
+phi1     = 0.55                        # poids imb1
+phi2     = 0.35                        # poids imb2
+tilde_R  = 2 - phi1 - phi2             # doit être > 0
+
+# matrice de persistance des alpha (3×3)
+rho = np.array([[0.96, 0.02, 0.00],
+                [0.00, 0.90, 0.05],
+                [0.01, 0.00, 0.85]])
+
+# matrice de variance des chocs sur alpha
+Sigma = np.diag([0.02, 0.015, 0.01])
+
+# tableau des écarts-types intraday : shape = (T,3)
+rng  = np.random.default_rng(seed=42)
+std  = rng.uniform(0.1, 0.5, size=(T, 3))
+
+# ------------------------------------------------------------------
+# 2. Matrices fixes A, B
+# ------------------------------------------------------------------
+A = np.block([
+    [1,         0,         0,        np.zeros((1,3))],
+    [0,     phi1,         0,        np.zeros((1,3))],
+    [0,        0,     phi2,        np.zeros((1,3))],
+    [np.zeros((3,1)), np.zeros((3,1)), np.zeros((3,1)), rho]
+])
+B = np.array([[1],
+              [1 - phi1],
+              [1 - phi2],
+              [0],
+              [0],
+              [0]])
+
+# covariance du bruit w_t  (padding de Sigma à 6×6)
+Omega = np.zeros((6, 6))
+Omega[3:, 3:] = Sigma
+
+# ------------------------------------------------------------------
+# 3. Pré-calcul : r_t, Q_t, N_t pour chaque date
+# ------------------------------------------------------------------
+r_t      = np.zeros((T, 3))       #  r_t[k] = coef du k-ième alpha dans rate
+for t in range(T):
+    if t >= T - 9:
+        r_t[t, 2] = std[t, 2] / (T - t + 1)
+    elif t >= T - 39:
+        r_t[t, 0] = std[t, 0] / (T - 10 - t + 1)
+    else:
+        r_t[t, 0] = std[t, 0] / 30
+
+Q_list = []      #  Q_t  (6×6)
+N_list = []      #  N_t  (6×1)
+
+for t in range(T):
+    rt = r_t[t]
+    Q = np.zeros((6, 6))
+    # blocs  (p,imb1,imb2,alpha(3))
+    Q[0, 3:] = rt
+    Q[3:, 0] = rt
+    # reste nul (Q_t est semi-défini)
+    Q_list.append(Q)
+
+    N = np.zeros((6, 1))
+    N[1, 0] = -0.5 * phi1
+    N[2, 0] = -0.5 * phi2
+    N[3:, 0] = rt
+    N_list.append(N)
+
+# ------------------------------------------------------------------
+# 4. Conditions terminales (K_T, k_T, c_T)
+# ------------------------------------------------------------------
+K_T = np.zeros((6, 6))
+K_T[0, 0] = -tilde_R
+K_T[0, 1] = K_T[1, 0] = 0.5 * phi1
+K_T[0, 2] = K_T[2, 0] = 0.5 * phi2
+# autres coefficients déjà à 0
+
+k_T = np.zeros((6, 1))
+c_T = 0.0
+
+# ------------------------------------------------------------------
+# 5. Backward pass : Riccati discrets
+# ------------------------------------------------------------------
+K = [None]*(T+1)
+k = [None]*(T+1)
+c = [None]*(T+1)
+
+K[T] = K_T
+k[T] = k_T
+c[T] = c_T
+
+R_scalar = tilde_R  # pour lisibilité
+
+for t in reversed(range(T)):
+    Q  = Q_list[t]
+    N  = N_list[t]
+
+    # scalaires / matrices intermédiaires
+    H = -R_scalar + (B.T @ K[t+1] @ B)[0,0]   # (1×1) -> scalaire
+    assert H < 0, "Condition H_t<0 violée : ajustez 'tilde_R' ou paramètres."
+
+    H_inv = 1.0 / H
+    L = A.T @ K[t+1] @ B + N                # (6×1)
+
+    # Riccati
+    K_t = Q + A.T @ K[t+1] @ A - L @ (H_inv * L.T)
+    k_t = (A.T - L * H_inv * B.T) @ k[t+1]          # (6×1)
+    c_t = (c[t+1]
+           + 0.5 * np.trace(K[t+1] @ Omega)
+           - 0.5 * (k[t+1].T @ B)[0,0] * H_inv * (B.T @ k[t+1])[0,0])
+
+    K[t] = K_t
+    k[t] = k_t
+    c[t] = c_t
+
+# ------------------------------------------------------------------
+# 6. Fonctions utilitaires :  value_function(t,s)  et  optimal_x(t,s)
+# ------------------------------------------------------------------
+def value_function(t, s):
+    """
+    Calcule V_t(s) = ½ sᵀ K_t s + k_tᵀ s + c_t.
+    ----
+    Paramètres
+    ----------
+    t : int          (0 ≤ t ≤ T)
+    s : array-like   shape (6,)  état courant
+    """
+    s = np.asarray(s).reshape(6, 1)
+    return 0.5 * float(s.T @ K[t] @ s) + float(k[t].T @ s) + c[t]
+
+def optimal_x(t, s):
+    """
+    Politique optimale x*_t(s) = –H_t⁻¹ (L_tᵀ s + Bᵀ k_{t+1})
+    ----
+    Renvoie un scalaire.
+    """
+    s = np.asarray(s).reshape(6, 1)
+    Q  = Q_list[t]
+    N  = N_list[t]
+    H  = -R_scalar + (B.T @ K[t+1] @ B)[0,0]
+    H_inv = 1.0 / H
+    L = A.T @ K[t+1] @ B + N
+    return - H_inv * (float(L.T @ s) + float((B.T @ k[t+1])[0,0]))
+
+# ------------------------------------------------------------------
+# 7. Illustration rapide (à supprimer / remplacer)
+# ------------------------------------------------------------------
+if __name__ == "__main__":
+    # état initial factice
+    s0 = np.array([1.0, 0.0, 0.0, 0.05, -0.03, 0.02])
+    # valeur de départ
+    v0 = value_function(0, s0)
+    # politique au début
+    x0 = optimal_x(0, s0)
+    print(f"V_0(s0)  = {v0:.6f}")
+    print(f"x*_0(s0) = {x0:.6f}")
