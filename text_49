@@ -1,0 +1,215 @@
+# Problème de contrôle intraday : formulation matricielle et solution fermée
+
+On considère un horizon discret  
+\(t\in\{0,1,\dots,T\}\) avec \(T=388\).
+
+---
+
+## 1. Espace d’état  
+
+\[
+s_t
+=\begin{pmatrix}
+p_t\\[2pt]
+\mathrm{imb}_{1,t}\\[2pt]
+\mathrm{imb}_{2,t}\\[2pt]
+\alpha_{1,t}\\[2pt]
+\alpha_{2,t}\\[2pt]
+\alpha_{3,t}
+\end{pmatrix}\in\mathbb R^{6}.
+\]
+
+---
+
+## 2. Contrôle  
+
+À chaque date \(t<T\) on choisit une quantité d’ordre  
+\(x_t\in\mathbb R\).
+
+---
+
+## 3. Dynamiques linéaires  
+
+Soient \(\phi_1,\phi_2\in(0,1)\).  
+Posons  
+
+\[
+A=\begin{pmatrix}
+1 & 0 & 0 & 0_{1\times3}\\
+0 & \phi_1 & 0 & 0_{1\times3}\\
+0 & 0 & \phi_2 & 0_{1\times3}\\
+0_{3\times1} & 0_{3\times1} & 0_{3\times1} & \rho
+\end{pmatrix},
+\qquad
+B=\begin{pmatrix}
+1\\
+1-\phi_1\\
+1-\phi_2\\
+0_{3\times1}
+\end{pmatrix},
+\qquad
+w_t=\begin{pmatrix}
+0\\0\\0\\ \varepsilon_t
+\end{pmatrix},\;
+\varepsilon_t\sim\mathcal N(0,\Sigma).
+\]
+
+La dynamique d’état est alors  
+
+\[
+s_{t+1}=A\,s_t+B\,x_t+w_t,\qquad 
+\mathbb E[w_t]=0,\;\; 
+\Omega:=\mathbb E[w_t w_t^\top]=\operatorname{diag}(0,0,0,\Sigma).
+\]
+
+---
+
+## 4. Coefficient de **rate**  
+
+On dispose d’un tableau \(\texttt{std}[t,k]\) \((k=0,1,2)\).  
+On définit pour chaque \(t<T\) le vecteur  
+
+\[
+r_t=
+\begin{cases}
+\bigl(0,\,0,\,\dfrac{\texttt{std}[t,2]}{T-t+1}\bigr)^\top, & t\ge T-9,\\[8pt]
+\bigl(\dfrac{\texttt{std}[t,0]}{T-10-t+1},\,0,\,0\bigr)^\top, & T-39\le t\le T-10,\\[8pt]
+\bigl(\dfrac{\texttt{std}[t,0]}{30},\,0,\,0\bigr)^\top, & t< T-39.
+\end{cases}
+\]
+
+Alors  
+\[
+\text{rate}(\alpha_t,t)=r_t^\top\alpha_t.
+\]
+
+---
+
+## 5. Fonctions de gain  
+
+### 5.1 Gain terminal  
+
+\[
+G(s_T)=\frac12\bigl(\phi_1\,\mathrm{imb}_{1,T}+\phi_2\,\mathrm{imb}_{2,T}\bigr)p_T
+-\frac12\bigl(2-\phi_1-\phi_2\bigr)p_T^{2}.
+\]
+
+### 5.2  Gain instantané  
+
+\[
+R_t(s_t,x_t)=\bigl(r_t^\top\alpha_t\bigr)\bigl(p_t+x_t\bigr)
+-\frac12\Bigl[\phi_1\,\mathrm{imb}_{1,t}+\phi_2\,\mathrm{imb}_{2,t}\Bigr]x_t
+-\frac12\bigl(2-\phi_1-\phi_2\bigr)x_t^{2}.
+\]
+
+---
+
+### 5.3  Écriture quadratique compacte  
+
+Notons \(\tilde R:=2-\phi_1-\phi_2>0\).  
+Pour tout \(t<T\), on pose  
+
+\[
+Q_t=
+\begin{pmatrix}
+0 & 0_{1\times2} & r_t^\top\\
+0_{2\times1} & 0_{2\times2} & 0_{2\times3}\\
+r_t & 0_{3\times2} & 0_{3\times3}
+\end{pmatrix},\quad
+N_t=
+\begin{pmatrix}
+0\\[2pt]
+-\tfrac12\phi_1\\[2pt]
+-\tfrac12\phi_2\\[2pt]
+r_t
+\end{pmatrix},\quad
+R:=\tilde R.
+\]
+
+Alors  
+
+\[
+R_t(s,x)=\frac12\,s^\top Q_t\,s\;+\;s^\top N_t\,x\;-\;\frac12\,R\,x^{2}.
+\]
+
+Le gain terminal s’écrit aussi  
+
+\[
+G(s)=\frac12\,s^\top K_T\,s,\quad K_T=
+\begin{pmatrix}
+-\tilde R & \tfrac12\phi_1 & \tfrac12\phi_2 & 0_{1\times3}\\[2pt]
+\tfrac12\phi_1 & 0 & 0 & 0_{1\times3}\\[2pt]
+\tfrac12\phi_2 & 0 & 0 & 0_{1\times3}\\[2pt]
+0_{3\times1} & 0_{3\times1} & 0_{3\times1} & 0_{3\times3}
+\end{pmatrix}.
+\]
+
+---
+
+## 6. Problème d’optimisation dynamique  
+
+\[
+V_t(s)=
+\max_{x_t,\dots,x_{T-1}}
+\mathbb E\Bigl[
+\sum_{u=t}^{T-1}R_u(s_u,x_u)+G(s_T)\,\bigm|\,s_t=s
+\Bigr].
+\]
+
+---
+
+## 7. Forme quadratique de la value function  
+
+Le couple \((A,B,Q_t,N_t,R,K_T)\) est **linéaire‐quadratique**.  
+Il en résulte :
+
+\[
+\boxed{\;
+V_t(s)=\frac12\,s^\top K_t\,s + k_t^\top s + c_t,\qquad
+K_T,\;k_T\equiv0,\;c_T\equiv0
+\;}
+\]
+
+avec les **récurrences de Riccati** suivantes, valables pour \(t=T-1,\dots,0\):
+
+\[
+\begin{aligned}
+H_t &= -\,R + B^\top K_{t+1} B \quad(\text{scalaire strictement négatif pour garantir la concavité}),\\[4pt]
+L_t &= A^\top K_{t+1} B + N_t \;\in\mathbb R^{6\times1},\\[4pt]
+K_t &= Q_t + A^\top K_{t+1} A\;-\;L_t\,H_t^{-1}\,L_t^\top,\\[6pt]
+k_t &= \bigl(A^\top - L_t H_t^{-1}B^\top\bigr) k_{t+1},\\[6pt]
+c_t &= c_{t+1} + \tfrac12\operatorname{tr}(K_{t+1}\,\Omega)\;-\;\tfrac12\,k_{t+1}^\top B\,H_t^{-1}B^\top k_{t+1}.
+\end{aligned}
+\]
+
+---
+
+## 8. Politique optimale en retour d’état  
+
+À chaque date \(t<T\), le contrôle optimal est  
+
+\[
+\boxed{\;
+x_t^{\star}= -\,H_t^{-1}\Bigl(L_t^\top s_t + B^\top k_{t+1}\Bigr).
+\;}
+
+\]
+
+---
+
+## 9. Commentaire sur l’implémentation  
+
+1. **Pré-calcul** :  
+   * Construire la suite \((r_t)_{t=0}^{T-1}\) à l’aide du tableau `std`.  
+   * En déduire \(Q_t\) et \(N_t\) pour chaque \(t\).
+
+2. **Backward pass** :  
+   * Initialiser \(K_T,k_T,c_T\) comme indiqué.  
+   * Appliquer les récursions de la section 7 pour \(t=T-1\rightarrow0\).  
+
+3. **Forward pass (exécution)** :  
+   * Partant de \(s_0\), appliquer la loi de contrôle \(x_t^\star\) puis la dynamique d’état.
+
+Sous l’hypothèse \(H_t<0\) (ce qui est garanti si \(\tilde R\) est assez grand), la fonction valeur est concave et la politique ci-dessus est unique et globalement optimale.
+
+---
