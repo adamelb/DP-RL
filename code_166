@@ -1,0 +1,43 @@
+import torch
+import torch.nn as nn
+
+def create_data_parallel(
+    target_model: nn.Module,
+    generate_batch_fn,
+    process_outputs_fn,
+    num_batches: int
+):
+    """
+    - target_model:    your frozen nn.Module
+    - generate_batch_fn:   () -> Tensor of shape (B, …) on CPU
+    - process_outputs_fn:  (Tensor on GPU) -> (features: Tensor, targets: Tensor)
+    - num_batches:     how many batches to generate
+    """
+    # 1) move model to GPU and wrap for multi-GPU
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = target_model.to(device)
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+    model.eval()
+
+    all_feats = []
+    all_tars  = []
+
+    # 2) run your batches
+    with torch.no_grad():
+        for _ in range(num_batches):
+            # generate a batch on the CPU however you like:
+            # e.g. random inputs, or pull from some generator function
+            batch = generate_batch_fn()         # Tensor on CPU, shape (B, …)
+            batch = batch.to(device)           # move to GPU, DataParallel will auto-split
+
+            outputs = model(batch)             # scattered across GPUs
+            feats, tars = process_outputs_fn(outputs)
+            # move back to CPU for concatenation
+            all_feats.append(feats.cpu())
+            all_tars .append(tars.cpu())
+
+    # 3) concatenate everything
+    features = torch.cat(all_feats, dim=0)
+    targets  = torch.cat(all_tars , dim=0)
+    return features, targets
