@@ -1,0 +1,10 @@
+\[
+\Delta\mathrm{PnL}_t \;=\;
+\begin{cases}
+\dfrac{p_t\,\alpha_{1,t}}{30}, & t < T - 39, \\[8pt]
+\dfrac{p_t\,\alpha_{1,t}}{\,T - t - 9\,}, & T - 39 \le t < T - 10, \\[8pt]
+\dfrac{p_t\,\alpha_{3,t}}{\,T - t + 1\,}, & t \ge T - 9,
+\end{cases}
+\quad
+T = \text{close time.}
+\]
