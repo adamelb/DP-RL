@@ -1,0 +1,81 @@
+import torch
+import torch.nn as nn
+import torch.multiprocessing as mp
+
+# Exemple de MLP, mais vous pouvez définir autant de classes / variantes que vous voulez
+class DummyMLP(nn.Module):
+    def __init__(self, in_dim, hidden_dim, out_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, out_dim)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+def _mp_worker(
+    rank: int,
+    samples_per_gpu: int,
+    feature_dim: int,
+    model_class: type,
+    model_kwargs: dict,
+    return_dict: mp.Manager().dict
+):
+    # Bind à son GPU
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+
+    # Instanciation du modèle **dans** le process
+    model = model_class(**model_kwargs).to(device).eval()
+
+    # Génération + forward
+    with torch.no_grad():
+        x = torch.randn(samples_per_gpu, feature_dim, device=device)
+        y = model(x)
+
+    # Rapatriement en CPU pour réduction mémoire
+    return_dict[rank] = (x.cpu(), y.cpu())
+
+def create_data_mp(
+    model_class: type,
+    model_kwargs: dict,
+    total_samples: int = 300,
+    feature_dim: int = 10
+):
+    """
+    Instancie `model_class(**model_kwargs)` sur chaque GPU en parallèle,
+    génère `total_samples` échantillons gaussiens, fait le forward, et
+    renvoie features/targets concaténés en CPU.
+    """
+    num_gpus = torch.cuda.device_count()
+    if num_gpus == 0:
+        raise RuntimeError("Aucun GPU détecté pour le multiprocessing.")
+    samples_per_gpu = total_samples // num_gpus
+
+    # Manager pour collecter les résultats
+    manager = mp.Manager()
+    return_dict = manager.dict()
+
+    # Spawn des processes (nprocs = nombre de GPUs)
+    mp.spawn(
+        fn=_mp_worker,
+        args=(samples_per_gpu, feature_dim, model_class, model_kwargs, return_dict),
+        nprocs=num_gpus,
+        join=True
+    )
+
+    # Concaténation en CPU
+    feats = [return_dict[i][0] for i in range(num_gpus)]
+    tars  = [return_dict[i][1] for i in range(num_gpus)]
+    features = torch.cat(feats, dim=0)
+    targets  = torch.cat(tars, dim=0)
+    return features, targets
+
+# === Exécution exemple ===
+if __name__ == "__main__":
+    # Sur 3 GPUs, sampler 300 échantillons, dim features = 10
+    model_kwargs = dict(in_dim=10, hidden_dim=32, out_dim=1)
+    F, T = create_data_mp(DummyMLP, model_kwargs, total_samples=300, feature_dim=10)
+    print("Features:", F.shape)  # -> torch.Size([300, 10])
+    print("Targets :", T.shape)  # -> torch.Size([300, 1])
