@@ -1,0 +1,109 @@
+import numpy as np
+import cvxpy as cp
+
+def simulate_mpc_with_flat_close(
+    rho, Sigma, std, phi1, phi2, c,
+    alpha0, p0=0.0, imb1_0=0.0, imb2_0=0.0, seed=None
+):
+    """
+    Simule une trajectoire alpha_t et, à chaque t, résout un
+    programme convexe (MPC) sur l'horizon restant en sachant
+    tous les alphas futurs, puis n'exécute que x[0], avec contrainte
+    de position flat à la fin de la journée (p_T = 0).
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    T = std.shape[0]
+
+    # 1) Simuler alpha_t
+    alpha = np.zeros((T, 3))
+    alpha[0] = alpha0
+    for t in range(1, T):
+        alpha[t] = rho @ alpha[t-1] + np.random.multivariate_normal(
+            np.zeros(3), Sigma
+        )
+
+    # 2) Initialisation
+    p_traj    = np.zeros(T+1)
+    imb1_traj = np.zeros(T+1)
+    imb2_traj = np.zeros(T+1)
+    x_traj    = np.zeros(T)
+    p_traj[0], imb1_traj[0], imb2_traj[0] = p0, imb1_0, imb2_0
+
+    # 3) Boucle MPC
+    for t in range(T):
+        N = T - t
+        x = cp.Variable(N)
+
+        # prédiction prix
+        M = np.tril(np.ones((N, N)))
+        p_pred = p_traj[t] + M @ x
+
+        # prédiction imb1, imb2
+        phi1_pows = phi1**np.arange(1, N+1)
+        L1 = np.fromfunction(lambda i, j: (i >= j)*(phi1**(i-j))*(1-phi1), (N, N), dtype=int)
+        imb1_pred = phi1_pows*imb1_traj[t] + L1 @ x
+
+        phi2_pows = phi2**np.arange(1, N+1)
+        L2 = np.fromfunction(lambda i, j: (i >= j)*(phi2**(i-j))*(1-phi2), (N, N), dtype=int)
+        imb2_pred = phi2_pows*imb2_traj[t] + L2 @ x
+
+        # rates
+        rates = np.zeros(N)
+        for i in range(N):
+            tt = t + i
+            if tt >= T - 9:
+                rates[i] = alpha[tt, 2]*std[tt, 2]/(T - tt + 1)
+            elif tt >= T - 39:
+                rates[i] = alpha[tt, 0]*std[tt, 0]/(T - 10 - tt + 1)
+            else:
+                rates[i] = alpha[tt, 0]*std[tt, 0]/30.0
+
+        # objectif
+        obj = (
+            rates @ p_pred
+            - 0.5*cp.sum(cp.multiply(imb1_pred + imb2_pred, x))
+            - c*cp.norm1(x)
+        )
+
+        # contrainte flat close
+        constraints = [p_pred[-1] == 0]
+
+        prob = cp.Problem(cp.Maximize(obj), constraints)
+        prob.solve(solver=cp.OSQP, verbose=False)
+
+        x0 = float(x.value[0]) if x.value is not None else 0.0
+        x_traj[t]    = x0
+        p_traj[t+1]    = p_traj[t] + x0
+        imb1_traj[t+1] = phi1*imb1_traj[t] + (1-phi1)*x0
+        imb2_traj[t+1] = phi2*imb2_traj[t] + (1-phi2)*x0
+
+    return {
+        "x_traj":    x_traj,
+        "p_traj":    p_traj,
+        "imb1_traj": imb1_traj,
+        "imb2_traj": imb2_traj,
+        "alpha":     alpha,
+    }
+
+# Exemple d’utilisation
+if __name__ == "__main__":
+    T = 388
+    phi1, phi2 = 0.55, 0.35
+    c = 0.01
+    rho = np.array([[0.96,0.02,0.00],
+                    [0.00,0.90,0.05],
+                    [0.01,0.00,0.85]])
+    Sigma = np.diag([0.02,0.015,0.01])
+    std = np.random.default_rng(42).uniform(0.1,0.5,(T,3))
+    alpha0 = np.array([0.05,-0.03,0.02])
+
+    res = simulate_mpc_with_flat_close(
+        rho, Sigma, std, phi1, phi2, c, alpha0,
+        p0=0.0, imb1_0=0.0, imb2_0=0.0, seed=123
+    )
+
+    print("x[0..10]    =", np.round(res["x_traj"][:10], 4))
+    print("p[0..10]    =", np.round(res["p_traj"][:11], 4))
+    print("imb1[0..10] =", np.round(res["imb1_traj"][:11], 4))
+    print("imb2[0..10] =", np.round(res["imb2_traj"][:11], 4))
