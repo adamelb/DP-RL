@@ -1,0 +1,93 @@
+import numpy as np
+import torch
+
+
+def optimise_intraday(alpha,
+                      p,
+                      imb1,
+                      imb2,
+                      c,
+                      tl,
+                      phi1,
+                      phi2,
+                      lr: float = 5e-2,
+                      steps: int = 5_000,
+                      seed: int | None = None):
+    """
+    Résout l'optimisation intraday pour un vecteur alpha donné.
+
+    Parameters
+    ----------
+    alpha : 1-D array_like (len = n)
+        Alpha à chaque minute.
+    p : float
+        Position initiale (en nombre de titres).
+    imb1, imb2 : float
+        Imbalance 1 et 2 au début du pas de temps.
+    c : float
+        Coût linéaire fixe (commission, bid-ask, …).
+    tl : float
+        Pré-facteur de l'impact (tick * lot probablement).
+    phi1, phi2 : float in (0,1)
+        Coefficients de décroissance des deux imbalances.
+    lr : float, optional
+        Learning rate de l'optimiseur Adam.
+    steps : int, optional
+        Nombre d'itérations de gradient ascent.
+    seed : int | None, optional
+        Pour la reproductibilité.
+
+    Returns
+    -------
+    x_opt : np.ndarray (shape n)
+        Les trades optimaux minute par minute.
+    reward_opt : float
+        PnL attendu selon l'objectif ci-dessus.
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    alpha = torch.tensor(alpha, dtype=torch.float32)
+    n = alpha.shape[0]
+
+    # variables libres : x_0 … x_{n-2}
+    x_free = torch.zeros(n - 1, dtype=torch.float32, requires_grad=True)
+
+    opt = torch.optim.Adam([x_free], lr=lr)
+
+    for _ in range(steps):
+        opt.zero_grad()
+
+        # impose la contrainte de flat
+        x_last = -p - torch.sum(x_free)
+        x = torch.cat([x_free, x_last.unsqueeze(0)])
+
+        imb1_curr = torch.tensor(float(imb1))
+        imb2_curr = torch.tensor(float(imb2))
+        reward = torch.tensor(0.0)
+
+        for t in range(n):
+            xi = x[t]
+            imb1_new = phi1 * imb1_curr + (1 - phi1) * xi
+            imb2_new = phi2 * imb2_curr + (1 - phi2) * xi
+
+            gain   = alpha[t] * xi
+            cost   = -c * torch.abs(xi)
+            impact = -0.5 * tl * torch.sqrt(torch.abs(imb1_new + imb2_new)) * torch.abs(xi)
+
+            reward = reward + gain + cost + impact
+
+            imb1_curr, imb2_curr = imb1_new, imb2_new
+
+        # ascent ⇒ on minimise le négatif
+        loss = -reward
+        loss.backward()
+        opt.step()
+
+    # résultat final
+    with torch.no_grad():
+        x_last = -p - torch.sum(x_free)
+        x_full = torch.cat([x_free, x_last.unsqueeze(0)])
+        reward_final = reward.item()
+
+    return x_full.detach().cpu().numpy(), reward_final
