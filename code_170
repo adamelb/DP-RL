@@ -1,0 +1,28 @@
+# pip install cvxpy dccp
+import cvxpy as cp
+import dccp            # <-- extension DC/CCP
+import numpy as np
+
+# ----- Données d'exemple -----
+n = 10
+np.random.seed(0)
+M = np.random.randn(n, n)
+A = np.random.randn(n)
+
+# ----- Variable de décision -----
+x = cp.Variable(n)
+
+# ----- Expression non convexe -----
+expr = cp.sqrt(cp.abs(A + M @ x))      # vecteur concave
+obj  = -0.5 * cp.sum(cp.multiply(expr, cp.abs(x)))  # produit bilinéaire
+
+# ----- Problème DCCP -----
+problem = cp.Problem(cp.Maximize(obj))
+problem.solve(method='dccp',            # active le mode CCP
+              ccp_times=10,             # nb d’essais de linéarisation
+              max_iter=100,             # itérations internes
+              solver=cp.SCS,            # ou ECOS, etc.
+              verbose=True)
+
+print("x*  =", x.value)
+print("f(x*) =", problem.value)
