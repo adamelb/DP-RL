@@ -1,0 +1,45 @@
+import numpy as np
+from scipy.optimize import minimize
+
+def solve_opt(alpha, p, imb1_0, imb2_0, phi1, phi2, c, tl, eps=1e-6, delta=1e-6):
+    n = len(alpha)
+
+    def objective(x):
+        im1, im2 = imb1_0, imb2_0
+        total = 0.0
+        cum_x = 0.0
+        for i in range(n):
+            dx = x[i]
+            # mise à jour des imbalances
+            im1 = phi1*im1 + (1-phi1)*dx
+            im2 = phi2*im2 + (1-phi2)*dx
+            cum_x += dx
+            # position courante
+            P = p + cum_x
+            # lissage des valeurs absolues
+            abs_dx = np.sqrt(dx*dx + eps)
+            impact = 0.5*tl * np.sqrt((im1+im2)**2 + delta) * abs_dx
+            if i < n-1:
+                total -= (alpha[i]*P - c*abs_dx - impact)
+            else:
+                total -= (-impact)  # dernier pas : pas de alpha ni coût linéaire
+        return total
+
+    # contrainte d'unwind total
+    cons = {'type': 'eq', 'fun': lambda x: np.sum(x) + p}
+
+    # initialisation
+    x0 = np.zeros(n)
+    res = minimize(objective, x0, method='SLSQP',
+                   constraints=cons,
+                   options={'maxiter': 500, 'ftol': 1e-9, 'disp': False})
+    return res.x, res.fun, res.success
+
+# Exemple d'appel
+alpha = np.random.randn(10)  # vecteur alpha de taille n=10
+p, imb1_0, imb2_0 = 1.0, 0.0, 0.0
+phi1, phi2 = 0.9, 0.8
+c, tl = 0.01, 0.05
+
+x_opt, val_opt, ok = solve_opt(alpha, p, imb1_0, imb2_0, phi1, phi2, c, tl)
+print("Solution trouvée :", x_opt)
