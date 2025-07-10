@@ -1,0 +1,141 @@
+"""
+Optimisation sans boucle Python pour choisir les trades x₁,…,xₙ qui
+maximisent la somme des rewards :
+
+    Rᵢ = αᵢ·(p + Σ_{k≤i} x_k)               # signal
+          – c·|xᵢ|                          # coût linéaire
+          – ½·t_ℓ·√(|imb1ᵢ + imb2ᵢ|)·|xᵢ|   # impact
+
+avec les dynamiques d’inventaires :
+
+    imb1ᵢ = φ₁·imb1_{i-1} + (1−φ₁)·xᵢ
+    imb2ᵢ = φ₂·imb2_{i-1} + (1−φ₂)·xᵢ
+
+Contrainte d’unwind final :
+    p + Σ xᵢ = 0
+
+La fonction `solve` renvoie la solution grâce à SLSQP (SQP) de SciPy,
+en O(n) par évaluation.  Si JAX est présent, le gradient est calculé
+et JIT-compilé pour accélérer l’optimisation.
+
+Auteur : 2025, licence MIT.
+"""
+import numpy as np
+from scipy.optimize import minimize
+
+# ----------------------------------------------------------------------
+# 1)  Optionnel : utiliser JAX pour le gradient automatique + JIT
+# ----------------------------------------------------------------------
+try:
+    import jax.numpy as jnp
+    from jax import grad, jit
+    _XP_JAX_AVAILABLE = True
+except ImportError:  # JAX non installé : on continuera sans gradient
+    _XP_JAX_AVAILABLE = False
+
+
+# ----------------------------------------------------------------------
+# 2)  Utilitaires numériques
+# ----------------------------------------------------------------------
+def _imbalances(x, phi, imb0, xp):
+    """
+    Suite AR(1) vectorisée :
+        imbᵢ = φ^{i+1} · imb0 + (1−φ) Σ_{k=0}^{i} φ^{i−k} · x_k
+    Calcule [imb₁,…,imbₙ] en O(n) sans boucle Python.
+    """
+    n = x.shape[0]
+    idx = xp.arange(n)                 # [0, 1, …, n−1]
+    pow_fwd = phi ** (idx + 1)         # φ¹,…,φⁿ
+    conv = xp.cumsum(x * (phi ** (-idx)))  # Σ_{k≤i} φ^{−k}·x_k
+    return pow_fwd * imb0 + (1.0 - phi) * (phi ** idx) * conv
+
+
+def _make_objective(alpha, p, imb10, imb20, c, tl, phi1, phi2,
+                    eps=1e-8, use_jax=False):
+    """
+    Fabrique la fonction objectif F(x) = –Σ Rᵢ(x) (on minimise F),
+    en numpy ou jax selon `use_jax`.
+    """
+    xp = jnp if use_jax else np
+    alpha = xp.asarray(alpha)
+
+    def obj(x):
+        x = xp.asarray(x)
+        pos = p + xp.cumsum(x)                      # positions cumulées
+        imb1 = _imbalances(x, phi1, imb10, xp)
+        imb2 = _imbalances(x, phi2, imb20, xp)
+
+        absx   = xp.sqrt(x ** 2 + eps)              # |x| lissé
+        impact = 0.5 * tl * xp.sqrt(xp.abs(imb1 + imb2) + eps) * absx
+        reward = alpha * pos - c * absx - impact
+        return -xp.sum(reward)                      # minimisation
+
+    return obj
+
+
+# ----------------------------------------------------------------------
+# 3)  Solveur unique à appeler
+# ----------------------------------------------------------------------
+def solve(alpha, p, imb10, imb20, c, tl, phi1, phi2,
+          x0=None, eps=1e-8, ftol=1e-9, maxit=200, use_jax=_XP_JAX_AVAILABLE):
+    """
+    Résout l’optimisation et renvoie l’objet `OptimizeResult` de SciPy.
+    ------------------------------------------------------------------
+    alpha : array-like   signal α[1…n]
+    p     : float        position initiale
+    imb10 / imb20 : float  inventaires initiaux
+    c, tl : float        paramètres de coût linéaire et d’impact
+    phi1, phi2 : float    coefficients de persistance (0<φ<1)
+    x0    : array-like   point de départ (par défaut zeros)
+    """
+    alpha = np.asarray(alpha)
+    n = alpha.size
+    if x0 is None:
+        x0 = np.zeros(n)
+
+    obj = _make_objective(alpha, p, imb10, imb20, c, tl,
+                          phi1, phi2, eps, use_jax=use_jax)
+
+    # ----------------------------------------------------------------
+    #  Optionnel : gradient JAX si disponible
+    # ----------------------------------------------------------------
+    if use_jax:
+        # grad renvoie un jax.Array ; on le convertit en numpy pour SciPy
+        @jit
+        def _jac_jax(x):
+            return grad(obj)(x)         # dérivée dans l’espace JAX
+
+        def jac(x):
+            return np.array(_jac_jax(x), dtype=float)
+    else:
+        jac = None  # différences finies
+
+    # Contrainte d’unwind final : p + Σ xᵢ = 0
+    cons = {'type': 'eq', 'fun': lambda x: p + x.sum()}
+
+    result = minimize(obj, x0, jac=jac, method='SLSQP',
+                      constraints=[cons],
+                      options={'ftol': ftol, 'maxiter': maxit, 'disp': True})
+    return result
+
+
+# ----------------------------------------------------------------------
+# 4)  Démo rapide
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    # Paramètres jouets
+    n       = 5_000
+    rng     = np.random.default_rng(seed=42)
+    alpha   = rng.normal(0, 1e-3, n)
+    p       = 1.0
+    imb10   = 0.3
+    imb20   = -0.2
+    c       = 1e-2
+    tl      = 5e-2
+    phi1    = 0.97
+    phi2    = 0.93
+
+    res = solve(alpha, p, imb10, imb20, c, tl, phi1, phi2)
+    print("Convergence :", res.success)
+    print("Reward optimal :", -res.fun)
+    print("Premiers trades :", res.x[:10])
