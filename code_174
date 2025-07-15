@@ -1,0 +1,62 @@
+import numpy as np
+from scipy import sparse
+
+def make_bucket_mapping(n):
+    """
+    For any integer n >= 2, returns:
+      - g: an int array of length n, g[i] in [0..m-1] mapping x_i = y[g[i]]
+      - C: an (n x m) sparse matrix so that x = C @ y
+      - values: the list of length-m bucket‐values
+    Pattern:
+      * three 1’s, three 3’s,
+      * then blocks of v repeated v times for v = 6, 9, 12, …
+      * finally two 1’s at the end
+    """
+    # 1) build the (value, count) blocks until we can fit n-2 entries
+    blocks = [(1, 3), (3, 3)]
+    total = 3 + 3
+    v = 6
+    while total + 2 < n:
+        blocks.append((v, v))
+        total += v
+        v += 3
+
+    # 2) flatten the first total entries (reserve last 2 for ones)
+    g = []
+    for idx, (_, cnt) in enumerate(blocks):
+        # only take up to n-2 entries here
+        take = min(cnt, (n - 2) - len(g))
+        g.extend([idx] * take)
+        if len(g) >= n - 2:
+            break
+
+    # 3) force the last two entries to map back to the first block (value=1)
+    g.extend([0] * (n - len(g)))
+    g = np.array(g, dtype=int)
+
+    # 4) extract the bucket‐values y[j] from blocks
+    values = [val for val, _ in blocks]
+
+    # 5) build sparse lifting matrix C of shape (n, m)
+    m = len(blocks)
+    rows = np.arange(n)
+    cols = g
+    data = np.ones(n, dtype=float)
+    C = sparse.csr_matrix((data, (rows, cols)), shape=(n, m))
+
+    return g, C, np.array(values, dtype=float)
+
+# --- Example usage ---
+if __name__ == "__main__":
+    n = 25
+    g, C, values = make_bucket_mapping(n)
+
+    # Suppose we choose unknown y of length m:
+    #   e.g. y = values  (just to see what x looks like)
+    x_approx = C.dot(values)
+
+    print("n =", n)
+    print("Number of buckets m =", len(values))
+    print("Bucket values y =", values)
+    print("Mapping g (first 20 indices) =", g[:20])
+    print("Approximated x =", x_approx)
