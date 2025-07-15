@@ -1,0 +1,64 @@
+import numpy as np
+
+def bucket_sizes(n):
+    """
+    Returns a list of bucket‐sizes summing to n, following:
+      • up to 3 initial buckets of size=1
+      • up to 3 initial buckets of size=3
+      • then buckets of size 6, 9, 12, … as long as they fit
+      • one final bucket of the leftover (if any > 0)
+      • finally exactly 2 buckets of size=1 (unless n < 2)
+    """
+    if n <= 2:
+        return [1] * n
+
+    sizes = []
+    # reserve final two 1's
+    rem = n - 2
+
+    # up to 3 ×1
+    c1 = min(3, rem)
+    sizes += [1] * c1
+    rem -= c1
+
+    # up to 3 ×3
+    c3 = min(3, rem // 3)
+    sizes += [3] * c3
+    rem -= 3 * c3
+
+    # blocks of 6,9,12,...
+    v = 6
+    while rem > v:
+        sizes.append(v)
+        rem -= v
+        v += 3
+
+    # leftover chunk
+    if rem > 0:
+        sizes.append(rem)
+
+    # final two 1's
+    sizes += [1, 1]
+    return sizes
+
+def effective_shape(n):
+    """Number of buckets m for an n-length problem."""
+    return len(bucket_sizes(n))
+
+def expand(y, n):
+    """
+    Given y of length m = effective_shape(n), returns the full n-vector x
+    by repeating each y[i] bucket_sizes(n)[i] times.
+    """
+    sizes = bucket_sizes(n)
+    y = np.asarray(y)
+    if y.size != len(sizes):
+        raise ValueError(f"Expected y of length {len(sizes)}, got {y.size}")
+    return np.repeat(y, sizes)
+
+# ─── Examples ────────────────────────────────────────────────────
+for n in [20, 156]:
+    bs = bucket_sizes(n)
+    print(f"n = {n}, bucket sizes = {bs}")
+    print(f"  m = {len(bs)} buckets; sum = {sum(bs)}")
+    print()
