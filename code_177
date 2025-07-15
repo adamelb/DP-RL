@@ -1,0 +1,97 @@
+import numpy as np
+
+def _compute_bucket_index(n):
+    """
+    Internal helper: returns an int array g of length n, where
+    x[i] = y[g[i]] under your bucketing rules.
+    """
+    if n == 1:
+        return np.array([0], dtype=int)
+
+    g = []
+    # fixed first two blocks:
+    block_values = [1, 3]
+    block_sizes  = [3, 3]
+
+    v = 6    # next dynamic block value/size
+    idx = 0  # block index
+
+    # fill until we must stop to reserve 2 trailing slots
+    while True:
+        if idx < len(block_values):
+            value = block_values[idx]
+            size  = block_sizes[idx]
+        else:
+            value = v
+            size  = v
+
+        # how many of this block can we fit before the final two 1's?
+        max_full = n - 2 - len(g)
+        take = min(size, max(0, max_full))
+
+        # append that many indices
+        if take > 0:
+            g.extend([idx] * take)
+
+        # if we couldn’t take the whole block, stop here
+        if take < size:
+            break
+
+        # advance to next block
+        idx += 1
+        if idx >= len(block_values):
+            v += 3
+
+    # pad the last 2 positions as bucket 0 (value=1)
+    g.extend([0] * (n - len(g)))
+    return np.array(g, dtype=int)
+
+
+def effective_shape(n):
+    """
+    For a length-n problem, returns the number of buckets m you need.
+    """
+    g = _compute_bucket_index(n)
+    return int(g.max()) + 1
+
+
+def expand(y, n):
+    """
+    Given y (length m = effective_shape(n)), returns the expanded length-n x.
+    """
+    g = _compute_bucket_index(n)
+    y = np.asarray(y)
+    m = g.max() + 1
+    if y.shape[0] != m:
+        raise ValueError(f"expand: expected y of length {m}, got {y.shape[0]}")
+    return y[g]
+
+
+# ─── Example of plugging into an optimizer ─────────────────────────────────
+
+if __name__ == "__main__":
+    from scipy.optimize import minimize
+
+    # dummy n-dim objective
+    def f(x):
+        # e.g. distance to a ramp
+        return np.sum((x - np.linspace(0,1,len(x)))**2)
+
+    for n in [1, 5, 20]:
+        m = effective_shape(n)
+        print(f"\nn={n} → optimize over m={m} buckets")
+
+        # initial guess in R^m
+        y0 = np.zeros(m)
+
+        # wrapper that expands to length-n
+        def F(y):
+            x = expand(y, n)
+            return f(x)
+
+        res = minimize(F, y0)
+        y_opt = res.x
+        x_opt = expand(y_opt, n)
+
+        print(" y_opt =", np.round(y_opt, 3))
+        print(" x_opt =", np.round(x_opt, 3))
