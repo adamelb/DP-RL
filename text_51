@@ -1,0 +1,77 @@
+**Définition des variables intermédiaires**
+
+On pose, pour \(p\in\mathbb{R}^n\) :
+\[
+u = B\,p,\quad 
+s = \sgn(u)\quad (\text{vecteur des signes de }u),\quad
+r = \sqrt{\lvert u\rvert}\quad (\text{élément-par-élément}).
+\]
+
+---
+
+**Fonction objectif**
+
+\[
+f(p)
+= \underbrace{\alpha^{T}(A\,p)}_{f_1(p)}
+\;-\;\underbrace{c^{T}\lvert p\rvert}_{f_2(p)}
+\;-\;\underbrace{s^{T}p}_{f_3(p)}
+\;-\;\underbrace{r^{T}p}_{f_4(p)}.
+\]
+
+---
+
+**Gradient de chaque terme**
+
+1. \(f_1(p)=\alpha^T(Ap)\)  
+   \[
+   \nabla f_1(p)=A^T\,\alpha.
+   \]
+
+2. \(f_2(p)=\sum_i c_i\,\lvert p_i\rvert\)  
+   \[
+   \nabla f_2(p)
+   = c\;\circ\;\sgn(p).
+   \]
+
+3. \(f_3(p)=\sum_i s_i\,p_i\)  
+   \[
+   \nabla f_3(p)=s.
+   \]
+
+4. \(f_4(p)=\sum_i r_i\,p_i\)  
+   \[
+   \frac{\partial f_4}{\partial p_j}
+   = r_j \;+\;\sum_{i=1}^n p_i\;\frac{1}{2\,r_i}\;s_i\;B_{i,j},
+   \]
+   soit en vecteur :
+   \[
+   \nabla f_4(p)
+   = r \;+\; B^T\!\Bigl(\frac{p\circ s}{2\,r}\Bigr).
+   \]
+
+---
+
+**Gradient total**
+
+Comme
+\[
+f = f_1 - f_2 - f_3 - f_4,
+\]
+on obtient
+\[
+\boxed{
+\nabla f(p)
+= A^T\alpha
+\;-\;
+c\circ\sgn(p)
+\;-\;
+\sgn(Bp)
+\;-\;
+\sqrt{\lvert Bp\rvert}
+\;-\;
+B^T\!\Bigl(\tfrac{\,p\circ\sgn(Bp)\,}{2\,\sqrt{\lvert Bp\rvert}}\Bigr).
+}
+\]
+
+> **Remarque** : pour éviter les divisions par zéro, on remplace souvent \(\sqrt{\lvert Bp\rvert}\) par \(\sqrt{\lvert Bp\rvert + \varepsilon}\).```
