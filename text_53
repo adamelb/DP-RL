@@ -1,0 +1,90 @@
+### 1. Intermediate definitions
+
+Let  
+\[
+u = B\,p,\quad
+s = \sgn(u)\quad(\text{elementwise sign of }u),\quad
+r = \sqrt{\lvert u\rvert}\quad(\text{elementwise}).
+\]
+
+---
+
+### 2. Objective function
+
+\[
+f(p)
+= \underbrace{\alpha^{T}(A\,p)}_{f_1(p)}
+\;-\;\underbrace{c^{T}\lvert p\rvert}_{f_2(p)}
+\;-\;\underbrace{\sum_{i=1}^n \bigl[s_i\,r_i\,p_i\bigr]}_{f_3(p)},
+\]
+where \(s_i=\sgn(u_i)\) and \(r_i=\sqrt{\lvert u_i\rvert}\).
+
+---
+
+### 3. Gradient of the third term 
+We focus on  
+\[
+f_3(p)=\sum_{i=1}^n s_i\,r_i\,p_i,\quad
+r_i=\sqrt{\lvert u_i\rvert},\;u=B\,p.
+\]
+
+For each component \(j\), use the product and chain rules:
+\[
+\frac{\partial}{\partial p_j}\bigl(s_i\,r_i\,p_i\bigr)
+= 
+\underbrace{\delta_{ij}}_{\substack{\text{Kronecker}\\\text{delta}}} \,s_i\,r_i
+\;+\;
+s_i\,p_i\;\frac{\partial r_i}{\partial p_j}.
+\]
+Since \(s_i=\sgn(u_i)\) is piecewise‐constant, \(\partial s_i/\partial p_j=0\) a.e.  Next,
+\[
+r_i=\sqrt{\lvert u_i\rvert}
+\;\Longrightarrow\;
+\frac{\partial r_i}{\partial p_j}
+= \frac{1}{2\sqrt{\lvert u_i\rvert}}\;\frac{\partial\lvert u_i\rvert}{\partial p_j}
+= \frac{\sgn(u_i)\,B_{i,j}}{2\,r_i}.
+\]
+Hence
+\[
+\frac{\partial f_3}{\partial p_j}
+= s_j\,r_j
+\;+\;\sum_{i=1}^n s_i\,p_i\;\frac{\sgn(u_i)\,B_{i,j}}{2\,r_i}
+= s_j\,r_j
+\;+\;\sum_{i=1}^n \frac{p_i\,B_{i,j}}{2\,r_i}.
+\]
+In **vector** form, this reads
+\[
+\boxed{
+\nabla f_3(p)
+= \;s\circ r
+\;+\;
+B^{T}\!\Bigl(\frac{p}{2\,r}\Bigr),
+}
+\]
+where “\(\circ\)” denotes elementwise (Hadamard) product and division is also elementwise.
+
+---
+
+### 4. Total gradient
+
+Recall
+\[
+f(p) = f_1(p) - f_2(p) - f_3(p),
+\]
+with
+\(\nabla f_1 = A^{T}\alpha\)
+and
+\(\nabla f_2 = c\circ\sgn(p)\).
+Therefore
+\[
+\boxed{
+\nabla f(p)
+= A^{T}\alpha
+\;-\;
+c\circ\sgn(p)
+\;-\;
+\Bigl[s\circ r \;+\; B^{T}\!\bigl(p/(2\,r)\bigr)\Bigr],
+}
+\]
+with \(u=Bp,\;s=\sgn(u),\;r=\sqrt{|u|}\).  
+> **Tip**: to avoid division by zero, use \(r=\sqrt{|u|+\varepsilon}\) for small \(\varepsilon>0\).  
