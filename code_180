@@ -1,0 +1,58 @@
+import numpy as np
+from scipy.optimize import minimize
+
+def objective(p, alpha, A, c, B):
+    """
+    Compute the objective:
+      f(p) = alpha^T (A p)
+           - c^T |p|
+           - sum_i [ sign((B p)_i) * sqrt(|(B p)_i|) * p_i ]
+    """
+    u = B.dot(p)
+    sign_u = np.sign(u)
+    sqrt_u = np.sqrt(np.abs(u))
+    term1 = alpha.dot(A.dot(p))
+    term2 = c.dot(np.abs(p))
+    term3 = np.dot(sign_u * sqrt_u, p)
+    return term1 - term2 - term3
+
+def gradient(p, alpha, A, c, B, eps=1e-8):
+    """
+    Compute the analytic gradient of f at p:
+      ∇f = A^T alpha 
+          - c ◦ sign(p)
+          - [ sign(u)◦sqrt(|u|)  +  B^T ( (p ◦ sign(u)) / (2 sqrt(|u| + eps)) ) ]
+    """
+    u = B.dot(p)
+    s = np.sign(u)
+    r = np.sqrt(np.abs(u) + eps)
+
+    grad_f1 = A.T.dot(alpha)
+    grad_f2 = c * np.sign(p)
+    grad_f3_part1 = s * r
+    grad_f3_part2 = B.T.dot((p * s) / (2.0 * r))
+
+    return grad_f1 - grad_f2 - (grad_f3_part1 + grad_f3_part2)
+
+# --------------------------
+# Example usage
+# --------------------------
+n = alpha.shape[0]  # dimension
+p0 = np.zeros(n)    # initial guess
+
+# Define any linear constraints or bounds if needed:
+# cons = ({'type': 'eq', 'fun': lambda p: ...}, ...)
+# bounds = [(low_i, high_i) for i in range(n)]
+
+result = minimize(
+    fun=lambda p: objective(p, alpha, A, c, B),
+    x0=p0,
+    jac=lambda p: gradient(p, alpha, A, c, B),
+    method='SLSQP',       # or 'SLQP' if available
+    options={'ftol': 1e-9, 'disp': True},
+    # constraints=cons,
+    # bounds=bounds
+)
+
+print("Optimal p:", result.x)
+print("Objective value:", result.fun)
