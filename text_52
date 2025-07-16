@@ -1,0 +1,83 @@
+### 1. Intermediate Definitions
+
+Let \(p\in\mathbb{R}^n\) be the decision vector. Define
+\[
+u = B\,p,\quad
+s = \sgn(u)\quad(\text{elementwise sign of }u),\quad
+r = \sqrt{\lvert u\rvert}\quad(\text{elementwise square‐root of }|u|).
+\]
+
+---
+
+### 2. Objective Function
+
+\[
+f(p)
+= \underbrace{\alpha^{T}(A\,p)}_{f_1(p)}
+\;-\;\underbrace{c^{T}\lvert p\rvert}_{f_2(p)}
+\;-\;\underbrace{\sum_{i=1}^n \bigl[s_i\,r_i\,p_i\bigr]}_{f_3(p)},
+\]
+where \(s_i=\sgn(u_i)\) and \(r_i=\sqrt{\lvert u_i\rvert}\).
+
+---
+
+### 3. Gradient of Each Term
+
+1. **Linear term**  
+   \(f_1(p)=\alpha^T(Ap)\)  
+   \[
+   \nabla f_1(p) = A^T\,\alpha.
+   \]
+
+2. **Absolute‐value term**  
+   \(f_2(p)=\sum_i c_i\lvert p_i\rvert\)  
+   \[
+   \nabla f_2(p) = c \circ \sgn(p),
+   \]
+   where “\(\circ\)” is Hadamard (elementwise) product.
+
+3. **Elementwise product term**  
+   \(f_3(p)=\sum_i s_i\,r_i\,p_i\) with \(r_i=\sqrt{|u_i|}\).  
+   Compute
+   \[
+   \frac{\partial}{\partial p_j}\bigl(s_i\,r_i\,p_i\bigr)
+   = 
+   \begin{cases}
+     s_j\,r_j
+       + \displaystyle\sum_{i=1}^n p_i\;\frac{s_i}{2\,r_i}\;B_{i,j},
+     &\text{if }i=j,\\[1em]
+     \displaystyle\sum_{i=1}^n p_i\;\frac{s_i}{2\,r_i}\;B_{i,j},
+     &\text{otherwise.}
+   \end{cases}
+   \]
+   In vector form:
+   \[
+   \nabla f_3(p)
+   = s\circ r
+   \;+\;
+   B^T\!\Bigl(\frac{p\circ s}{2\,r}\Bigr).
+   \]
+
+---
+
+### 4. Total Gradient
+
+Since
+\[
+f(p) = f_1(p) - f_2(p) - f_3(p),
+\]
+we have
+\[
+\boxed{
+\nabla f(p)
+= A^T\alpha
+\;-\;
+c\circ\sgn(p)
+\;-\;
+\Bigl[s\circ r
+\;+\;
+B^T\!\Bigl(\tfrac{p\circ s}{2\,r}\Bigr)\Bigr]
+}
+\]
+where \(u=Bp,\;s=\sgn(u),\;r=\sqrt{|u|}\).  
+_Add a small \(\varepsilon\) under the square‐root if needed to avoid division by zero: \(\;r=\sqrt{|u|+\varepsilon}\)._
