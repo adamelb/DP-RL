@@ -1,0 +1,71 @@
+# --- Full code for block‐structured optimization in a Jupyter cell ---
+
+import numpy as np
+from scipy.optimize import minimize
+
+# 1) Full objective definition
+def objective_full(p, alpha, A, c, B):
+    """
+    Compute f(p) = alpha^T (A p)
+                 - c^T |p|
+                 - sum_i [ sign((B p)_i) * sqrt(|(B p)_i|) * p_i ]
+    """
+    u = B.dot(p)
+    sign_u = np.sign(u)             # elementwise sign of Bp
+    sqrt_u = np.sqrt(np.abs(u))     # elementwise sqrt of |Bp|
+    term1 = alpha.dot(A.dot(p))     # linear term αᵀAp
+    term2 = c.dot(np.abs(p))        # absolute‑value penalty cᵀ|p|
+    term3 = (sign_u * sqrt_u).dot(p)  # ∑ₙ sign(uₙ)√|uₙ|·pₙ
+    return term1 - term2 - term3
+
+# 2) Full gradient definition
+def gradient_full(p, alpha, A, c, B, eps=1e-8):
+    """
+    Analytic gradient ∇f of the full objective:
+      ∇f = Aᵀα
+           - (c ◦ sign(p))
+           - [ sign_u ◦ sqrt_u  +  Bᵀ((p ◦ sign_u)/(2⋅sqrt_u)) ]
+    """
+    u = B.dot(p)
+    s = np.sign(u)                   # sᵢ = sign(uᵢ)
+    r = np.sqrt(np.abs(u) + eps)     # rᵢ = √(|uᵢ| + ε)
+    grad1 = A.T.dot(alpha)           # ∇ of αᵀAp
+    grad2 = c * np.sign(p)           # ∇ of cᵀ|p|
+    grad3 = s * r + B.T.dot((p * s) / (2 * r))
+    #        └─ elementwise part ─┘   └─ chain rule sum part ─┘
+    return grad1 - grad2 - grad3
+
+# 3) Reduced‐space objective
+def objective_reduced(r, alpha, A, c, B):
+    """
+    F(r) = f(p) with p = repeat(r,5).
+    We optimize over r of length m = n/5.
+    """
+    p = np.repeat(r, 5)   # expand each rₖ into 5 entries
+    return objective_full(p, alpha, A, c, B)
+
+# 4) Reduced‐space gradient
+def gradient_reduced(r, alpha, A, c, B, eps=1e-8):
+    """
+    ∇F(r): sum the 5 corresponding entries of ∇f at p.
+    [∇F(r)]ₖ = ∑_{i=5(k-1)}^{5k-1} [∇f(p)]ᵢ
+    """
+    p = np.repeat(r, 5)
+    g_full = gradient_full(p, alpha, A, c, B, eps)
+    m = r.size
+    # reshape into (m,5) and sum across each row
+    return g_full.reshape(m, 5).sum(axis=1)
+
+# --- Example usage (uncomment + define α, A, c, B before) ---
+# m = alpha.shape[0] // 5
+# r0 = np.zeros(m)
+# result = minimize(
+#     fun=lambda r: objective_reduced(r, alpha, A, c, B),
+#     x0=r0,
+#     jac=lambda r: gradient_reduced(r, alpha, A, c, B),
+#     method='SLSQP',
+#     options={'ftol':1e-9, 'disp':True},
+# )
+# p_opt = np.repeat(result.x, 5)
+# print("Optimal reduced r:", result.x)
+# print("Optimal full p:", p_opt)
