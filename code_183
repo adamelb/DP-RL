@@ -1,0 +1,35 @@
+# Jupyter notebook cell: Objective and Gradient with an added constant inside √|·| term
+
+import numpy as np
+
+def objective_full(p, alpha, A, c, B, cte_vec):
+    """
+    Compute the objective:
+      f(p) = αᵀ (A p)
+           - cᵀ |p|
+           - ∑ᵢ [ sign((B p + cte_vec)_i) * sqrt(|(B p + cte_vec)_i|) * p_i ]
+    """
+    u      = B.dot(p) + cte_vec        # Bp plus constant vector
+    sign_u = np.sign(u)                # elementwise sign of u
+    sqrt_u = np.sqrt(np.abs(u))        # elementwise sqrt(|u|)
+    term1  = alpha.dot(A.dot(p))       # αᵀAp
+    term2  = c.dot(np.abs(p))          # cᵀ|p|
+    term3  = (sign_u * sqrt_u).dot(p)  # ∑ sign_u * sqrt_u * p
+    return term1 - term2 - term3
+
+def gradient_full(p, alpha, A, c, B, cte_vec, eps=1e-8):
+    """
+    Analytic gradient of the objective:
+      ∇f = Aᵀα 
+           - (c ◦ sign(p))
+           - [ sign(u) ◦ sqrt(|u|)  +  Bᵀ( (p ◦ sign(u)) / (2·sqrt(|u|+eps)) ) ]
+    with u = Bp + cte_vec.
+    """
+    u      = B.dot(p) + cte_vec
+    s      = np.sign(u)                         # sᵢ = sign(uᵢ)
+    r      = np.sqrt(np.abs(u) + eps)           # rᵢ = √(|uᵢ| + ε)
+    grad1  = A.T.dot(alpha)                     # ∇ of αᵀAp
+    grad2  = c * np.sign(p)                     # ∇ of cᵀ|p|
+    grad3a = s * r                              # elementwise part
+    grad3b = B.T.dot((p * s) / (2 * r))         # chain‐rule part
+    return grad1 - grad2 - (grad3a + grad3b)
