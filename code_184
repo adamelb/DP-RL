@@ -1,0 +1,194 @@
+import numpy as np
+from typing import NamedTuple, Tuple
+
+class OptResult(NamedTuple):
+    x: np.ndarray       # vecteur de trades minute par minute
+    y: np.ndarray       # évolution d’imb1
+    w: np.ndarray       # évolution d’imb2
+    z: np.ndarray       # imbalance agrégé
+    reward: float       # reward total
+
+# ------------------------------------------------------------------
+#  Fonctions “instantanées”
+# ------------------------------------------------------------------
+def step_reward(alpha, c, z_prev, x, s):
+    """
+    Reward de la minute courante, sachant l'imbalance agrégé avant le trade (z_prev).
+    s = K1 + K2
+    """
+    z_now = z_prev + s * x
+    penalty = np.sign(z_now) * np.sqrt(abs(z_now)) * x if z_now != 0 else 0.0
+    return alpha * x - c * abs(x) - penalty, z_now
+
+def forward_path(x, alpha, c, K1, K2, phi1, phi2,
+                 imb1_0, imb2_0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Étant donnés tous les trades x, calcule (y, w, z) sur l'horizon complet.
+    Renvoie z pour pouvoir recalculer les rewards.
+    """
+    T = len(x)
+    y = np.empty(T + 1); w = np.empty(T + 1); z = np.empty(T)   # y[0] et w[0] contiennent l'état initial
+    y[0], w[0] = imb1_0, imb2_0
+    s = K1 + K2
+    for i in range(T):
+        y[i+1] = phi1 * y[i] + x[i]
+        w[i+1] = phi2 * w[i] + x[i]
+        z[i]   = K1 * y[i+1] + K2 * w[i+1]
+    return y[1:], w[1:], z
+
+def total_reward(x, alpha, c, K1, K2, phi1, phi2, imb1_0, imb2_0):
+    y, w, z = forward_path(x, alpha, c, K1, K2, phi1, phi2, imb1_0, imb2_0)
+    pen   = np.sign(z) * np.sqrt(np.abs(z)) * x
+    return (alpha * x - c * np.abs(x) - pen).sum()
+
+# ------------------------------------------------------------------
+#  Optimisateur principal
+# ------------------------------------------------------------------
+def optimise_positions(alpha: np.ndarray,
+                       c: np.ndarray | float,
+                       K1: float, K2: float,
+                       phi1: float, phi2: float,
+                       imb1_0: float, imb2_0: float,
+                       p: float,
+                       bucket: int = 1,
+                       max_iter_mu: int = 40,
+                       tol_mu: float = 1e-10) -> OptResult:
+    """
+    Résout (approximativement) le problème complet par dichotomie
+    sur le multiplicateur de Lagrange mu associé à la contrainte
+    p + sum(x) = 0.  bucket = 1 → résolution minute par minute ;
+    bucket > 1 → trade constant par bloc pour accélérer.
+    """
+
+    alpha = np.asarray(alpha, dtype=float)
+    if np.isscalar(c):
+        c = np.full_like(alpha, float(c))
+    else:
+        c = np.asarray(c, dtype=float)
+
+    T      = len(alpha)
+    groups = np.arange(T) // bucket                       # chaque indice appartient à un « bucket »
+    n_var  = int(groups.max() + 1)                        # nb d’inconnues après agrégation
+    s      = K1 + K2
+
+    # Pré-agrégation par bucket (moyenne d’alpha / c)
+    alpha_b = np.array([alpha[groups == g].mean() for g in range(n_var)])
+    c_b     = np.array([c[groups == g].mean()     for g in range(n_var)])
+
+    # Pour accélérer la dynamique dans le forward, on pré-calcule
+    # la taille de chaque bucket (utile pour dérouler y,w plus vite) :
+    bucket_sizes = np.array([(groups == g).sum() for g in range(n_var)])
+
+    # Fonctions auxiliaires -------------------------------------------------
+    def forward_bucket(xb: np.ndarray):
+        """
+        Calcule y,w,z minute par minute à partir de xb (trade par bucket).
+        (moins de copies mémoire → rapide)
+        """
+        y = np.empty(T + 1); w = np.empty(T + 1); z = np.empty(T)
+        y[0] = imb1_0; w[0] = imb2_0
+        t = 0
+        for g, xg in enumerate(xb):
+            bsz = bucket_sizes[g]
+            for k in range(bsz):
+                y[t+1] = phi1 * y[t] + xg
+                w[t+1] = phi2 * w[t] + xg
+                z[t]   = K1 * y[t+1] + K2 * w[t+1]
+                t += 1
+        return z
+
+    def reward_bucket(xb: np.ndarray) -> float:
+        z = forward_bucket(xb)
+        # reconstruire alpha_i, c_i répétés sur chaque bucket
+        alpha_rep = np.repeat(alpha_b, bucket_sizes)
+        c_rep     = np.repeat(c_b,     bucket_sizes)
+        pen = np.sign(z) * np.sqrt(np.abs(z)) * np.repeat(xb, bucket_sizes)
+        return (alpha_rep * np.repeat(xb, bucket_sizes) -
+                c_rep * np.abs(np.repeat(xb, bucket_sizes)) -
+                pen).sum()
+
+    # -----------------------------------------------------------------------
+    #  Dichotomie sur mu : chaque bucket devient un opti 1-D fermé.
+    #  x_g(mu) = argmax_{x} (alpha_g - mu)*x - c_g|x| - sign(z_prev+s*x)*sqrt|.|*x
+    #  Comme z_prev dépend de l’historique, on doit dérouler séquentiellement.
+    # -----------------------------------------------------------------------
+    def simulate_given_mu(mu: float):
+        xb = np.zeros(n_var)
+        y = imb1_0; w = imb2_0
+        for g in range(n_var):
+            a = alpha_b[g] - mu                   # alpha “effectif”
+            # approx : on ignore le feedback dans sqrt pour déterminer x_g analytique.
+            # On prend le x qui maximise a*x - c*|x|
+            # → règle “bang-bang” si |a|>c  ; sinon x=0
+            if   a >  c_b[g]: xb[g] =  (a - c_b[g])   # petite marge
+            elif a < -c_b[g]: xb[g] =  (a + c_b[g])
+            else:              xb[g] =  0.0
+
+            # update dynamics minute par minute (same trade in bucket)
+            for _ in range(bucket_sizes[g]):
+                y = phi1 * y + xb[g]
+                w = phi2 * w + xb[g]
+        return xb
+
+    # Déterminer un intervalle [mu_lo, mu_hi] tel que sum(xb(mu)) croise -p
+    mu_lo, mu_hi = -10.0, 10.0
+    for _ in range(30):
+        if np.sign(simulate_given_mu(mu_lo).sum() + p) != np.sign(simulate_given_mu(mu_hi).sum() + p):
+            break
+        mu_lo *= 2.0; mu_hi *= 2.0           # élargir
+    else:
+        raise RuntimeError("Impossible de trouver un intervalle pour mu")
+
+    # Dichotomie
+    for _ in range(max_iter_mu):
+        mu_mid = 0.5 * (mu_lo + mu_hi)
+        s_mid  = simulate_given_mu(mu_mid).sum() + p
+        if abs(s_mid) < tol_mu:
+            mu_lo = mu_hi = mu_mid
+            break
+        if np.sign(s_mid) == np.sign(simulate_given_mu(mu_lo).sum() + p):
+            mu_lo = mu_mid
+        else:
+            mu_hi = mu_mid
+
+    xb_opt = simulate_given_mu(mu_lo)
+    # Débucquetiser pour obtenir x_i minute par minute
+    x_opt = np.repeat(xb_opt, bucket_sizes)
+
+    y_opt, w_opt, z_opt = forward_path(x_opt, alpha, c, K1, K2,
+                                       phi1, phi2, imb1_0, imb2_0)
+    R_tot = (alpha * x_opt - c * np.abs(x_opt) -
+             np.sign(z_opt) * np.sqrt(np.abs(z_opt)) * x_opt).sum()
+
+    return OptResult(x_opt, y_opt, w_opt, z_opt, R_tot)
+
+# ------------------------------------------------------------------
+#  Interface “temps-réel” — ne renvoie que le premier trade
+# ------------------------------------------------------------------
+def next_trade(alpha_today, c_today, K1, K2,
+               phi1, phi2, imb1_0, imb2_0, p,
+               bucket=10):
+    """
+    Convenience : optimise pour le reste de journée puis renvoie x_1.
+    """
+    res = optimise_positions(alpha_today, c_today, K1, K2, phi1, phi2,
+                             imb1_0, imb2_0, p, bucket=bucket)
+    return float(res.x[0]), res  # on renvoie aussi l'objet complet si besoin
+
+# ------------------------------------------------------------------
+#  Ex. d'utilisation
+# ------------------------------------------------------------------
+if __name__ == "__main__":
+    T = 390
+    alpha = np.random.normal(0, 0.5, T)   # alpha minute par minute
+    c     = 0.01                          # coût fixe
+    K1, K2 = 0.2, 0.3
+    phi1, phi2 = 0.95, 0.92
+    imb1_0, imb2_0 = 0.0, 0.0
+    p = 0.0                               # pas de position initiale
+    # Optimisation bucketisée (1 trade / 5 min)
+    res = optimise_positions(alpha, c, K1, K2, phi1, phi2,
+                             imb1_0, imb2_0, p,
+                             bucket=5)
+    print("Reward total :", res.reward)
+    print("Premier trade :", res.x[0])
