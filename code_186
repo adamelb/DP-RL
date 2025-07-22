@@ -1,0 +1,202 @@
+import numpy as np
+from typing import NamedTuple, Tuple, Union
+
+
+# ---------------------------------------------------------------------
+#  Named tuple for results
+# ---------------------------------------------------------------------
+class OptResult(NamedTuple):
+    x: np.ndarray       # trades minute-by-minute  (shape: T,)
+    y: np.ndarray       # imb1 path after each minute (shape: T,)
+    w: np.ndarray       # imb2 path after each minute (shape: T,)
+    z: np.ndarray       # aggregated imbalance (shape: T,)
+    reward: float       # total objective value
+
+
+# ---------------------------------------------------------------------
+#  Utilities
+# ---------------------------------------------------------------------
+def _last_T(vector: np.ndarray, T: int) -> np.ndarray:
+    """Return the last T elements of a 390-length reference vector."""
+    if len(vector) < 390:
+        raise ValueError("Reference vectors must be length-390.")
+    return vector[-T:] if len(vector) != T else vector
+
+
+# ---------------------------------------------------------------------
+#  Dynamics with νₜ * xₜ
+# ---------------------------------------------------------------------
+def _forward_path(x: np.ndarray,
+                  alpha: np.ndarray,
+                  c: np.ndarray,
+                  K1: float, K2: float,
+                  phi1: float, phi2: float,
+                  nu: np.ndarray,
+                  imb1_0: float, imb2_0: float,
+                  sqrt_vol: float
+                  ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """
+    Computes y,w,z minute by minute and total reward.
+    Returns (y[1:], w[1:], z, reward_sum).
+    """
+    T = len(x)
+    y = np.empty(T + 1)
+    w = np.empty(T + 1)
+    z = np.empty(T)
+    y[0], w[0] = imb1_0, imb2_0
+
+    # Reward accumulation
+    reward_sum = 0.0
+
+    for i in range(T):
+        y[i+1] = phi1 * y[i] + nu[i] * x[i]
+        w[i+1] = phi2 * w[i] + nu[i] * x[i]
+        z[i]   = K1 * y[i+1] + K2 * w[i+1]
+
+        penalty = sqrt_vol * np.sign(z[i]) * np.sqrt(abs(z[i])) * x[i]
+        reward_sum += alpha[i] * x[i] - c[i] * abs(x[i]) - penalty
+
+    return y[1:], w[1:], z, reward_sum
+
+
+# ---------------------------------------------------------------------
+#  Main optimiser (bucketised or not)
+# ---------------------------------------------------------------------
+def optimise_positions(alpha_full: np.ndarray,
+                       c_full: Union[np.ndarray, float],
+                       nu_full: np.ndarray,          # length 390
+                       K1: float, K2: float,
+                       phi1: float, phi2: float,
+                       imb1_0: float, imb2_0: float,
+                       p: float,
+                       bucket: int = 1,
+                       vol: float = 0.2/16,
+                       max_iter_mu: int = 40,
+                       tol_mu: float = 1e-10
+                       ) -> OptResult:
+    """
+    Fast approximate optimiser with per-bucket bang-bang solution and
+    bisection on the Lagrange multiplier μ.  Supports:
+       • variable ν[t] (execution weight)
+       • variable or scalar transaction costs c
+       • bucketisation for speed
+       • volatility factor in sqrt impact term
+    """
+    # ---------------- slicing to remaining horizon -----------------
+    T      = len(alpha_full)
+    alpha  = np.asarray(alpha_full, dtype=float)
+    nu     = _last_T(np.asarray(nu_full, dtype=float), T)
+    if np.isscalar(c_full):
+        c = np.full_like(alpha, float(c_full))
+    else:
+        c = _last_T(np.asarray(c_full, dtype=float), T)
+
+    # ---------------- bucket pre-aggregation -----------------------
+    groups        = np.arange(T) // bucket
+    n_bucket_vars = int(groups.max() + 1)
+    sizes         = np.array([(groups == g).sum() for g in range(n_bucket_vars)])
+
+    alpha_b = np.array([alpha[groups == g].mean() for g in range(n_bucket_vars)])
+    c_b     = np.array([c    [groups == g].mean() for g in range(n_bucket_vars)])
+    nu_b    = np.array([nu   [groups == g].mean() for g in range(n_bucket_vars)])
+
+    sqrt_vol = np.sqrt(vol)
+
+    # ---------------- helpers --------------------------------------
+    def simulate_given_mu(mu: float) -> np.ndarray:
+        """
+        Closed-form bang-bang for each bucket given μ, ignoring feedback of
+        x into sqrt term (approximation).
+        """
+        xb = np.zeros(n_bucket_vars)
+        for g in range(n_bucket_vars):
+            a = alpha_b[g] - mu
+            if   a >  c_b[g]:
+                xb[g] =  (a - c_b[g])
+            elif a < -c_b[g]:
+                xb[g] =  (a + c_b[g])
+            else:
+                xb[g] =  0.0
+        return xb
+
+    # ---------------- bracket μ so that g(μ)=p+Σx crosses zero -----
+    mu_lo, mu_hi = -10.0, 10.0
+    for _ in range(30):
+        if np.sign(simulate_given_mu(mu_lo).sum() + p) != \
+           np.sign(simulate_given_mu(mu_hi).sum() + p):
+            break
+        mu_lo *= 2.0
+        mu_hi *= 2.0
+    else:
+        raise RuntimeError("Failed to bracket μ")
+
+    # ---------------- bisection ------------------------------------
+    for _ in range(max_iter_mu):
+        mu_mid = 0.5 * (mu_lo + mu_hi)
+        sum_mid = simulate_given_mu(mu_mid).sum() + p
+        if abs(sum_mid) < tol_mu:
+            mu_lo = mu_hi = mu_mid
+            break
+        if np.sign(sum_mid) == np.sign(simulate_given_mu(mu_lo).sum() + p):
+            mu_lo = mu_mid
+        else:
+            mu_hi = mu_mid
+
+    xb_opt  = simulate_given_mu(mu_lo)
+    x_opt   = np.repeat(xb_opt, sizes)
+
+    # ---------------- forward pass for exact reward ---------------
+    y_opt, w_opt, z_opt, reward = _forward_path(
+        x_opt, alpha, c, K1, K2, phi1, phi2,
+        nu, imb1_0, imb2_0, sqrt_vol
+    )
+
+    return OptResult(x_opt, y_opt, w_opt, z_opt, reward)
+
+
+# ---------------------------------------------------------------------
+#  Convenience wrapper: one-step ahead
+# ---------------------------------------------------------------------
+def next_trade(alpha_today: np.ndarray,
+               c_today: Union[np.ndarray, float],
+               nu_full: np.ndarray,
+               K1: float, K2: float,
+               phi1: float, phi2: float,
+               imb1_0: float, imb2_0: float,
+               p: float,
+               bucket: int = 10,
+               vol: float = 0.2/16
+               ) -> Tuple[float, OptResult]:
+    """
+    Optimise on the remaining horizon, return only x₁ (and full OptResult
+    if you want diagnostics).
+    """
+    res = optimise_positions(alpha_today, c_today, nu_full,
+                             K1, K2, phi1, phi2,
+                             imb1_0, imb2_0, p,
+                             bucket=bucket, vol=vol)
+    return float(res.x[0]), res
+
+
+# ---------------------------------------------------------------------
+#  Minimal usage example
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+    # Remaining horizon: 200 minutes
+    T_remain = 200
+    alpha    = np.random.normal(0.0, 0.5, T_remain)
+    c        = 0.01                           # flat cost
+    nu_full  = np.linspace(0.5, 1.5, 390)     # reference νₜ
+    K1, K2   = 0.2, 0.3
+    phi1, phi2 = 0.95, 0.92
+    imb1_0 = imb2_0 = 0.0
+    p = 0.0
+
+    res = optimise_positions(alpha, c, nu_full,
+                             K1, K2, phi1, phi2,
+                             imb1_0, imb2_0, p,
+                             bucket=5,
+                             vol=0.2/16)
+
+    print("Total reward :", res.reward)
+    print("First trade   :", res.x[0])
