@@ -1,0 +1,167 @@
+import numpy as np
+from typing import NamedTuple, Tuple
+
+class OptResult(NamedTuple):
+    x: np.ndarray       # trades minute par minute
+    y: np.ndarray       # imb1
+    w: np.ndarray       # imb2
+    z: np.ndarray       # imbalance agrégé
+    reward: float       # reward total
+
+# ----------------------------------------------------------------------
+#  Fonctions utilitaires
+# ----------------------------------------------------------------------
+def _slice(vector: np.ndarray, T: int) -> np.ndarray:
+    """
+    Renvoie les T derniers éléments d'un vecteur taille 390, 
+    sans lever d'erreur si T == len(vector).
+    """
+    if len(vector) == T:
+        return vector
+    if len(vector) < 390:
+        raise ValueError("Le vecteur de référence doit faire 390 éléments")
+    return vector[-T:]
+
+# ----------------------------------------------------------------------
+#  Forward : dynamique avec nu[t] * x_t
+# ----------------------------------------------------------------------
+def forward_path(x: np.ndarray,
+                 alpha: np.ndarray, c: np.ndarray,
+                 K1: float, K2: float,
+                 phi1: float, phi2: float,
+                 nu: np.ndarray,
+                 imb1_0: float, imb2_0: float
+                 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Calcule y, w, z à partir des trades x et du nu[t] variable.
+    """
+    T = len(x)
+    y = np.empty(T + 1); w = np.empty(T + 1); z = np.empty(T)
+    y[0], w[0] = imb1_0, imb2_0
+    for i in range(T):
+        y[i+1] = phi1 * y[i] + nu[i] * x[i]
+        w[i+1] = phi2 * w[i] + nu[i] * x[i]
+        z[i]   = K1 * y[i+1] + K2 * w[i+1]
+    return y[1:], w[1:], z
+
+# ----------------------------------------------------------------------
+#  Optimiseur principal (bucketisé ou non)
+# ----------------------------------------------------------------------
+def optimise_positions(alpha_full: np.ndarray,
+                       c_full: np.ndarray | float,
+                       nu_full: np.ndarray,        # 390 éléments
+                       K1: float, K2: float,
+                       phi1: float, phi2: float,
+                       imb1_0: float, imb2_0: float,
+                       p: float,
+                       bucket: int = 1,
+                       max_iter_mu: int = 40,
+                       tol_mu: float = 1e-10) -> OptResult:
+    """
+    Même logique qu'avant, mais :
+      * on découpe nu_full pour prendre la bonne portion
+      * la dynamique utilise nu[t] * x_t
+    """
+    T = len(alpha_full)
+    # -------- slicing cohérent ----------
+    alpha = np.asarray(alpha_full, dtype=float)
+    nu    = _slice(np.asarray(nu_full, dtype=float), T)
+    if np.isscalar(c_full):
+        c = np.full_like(alpha, float(c_full))
+    else:
+        c = _slice(np.asarray(c_full, dtype=float), T)
+    # ------------------------------------
+    groups = np.arange(T) // bucket
+    n_var  = groups.max() + 1
+    # Moyennes pondérées (alpha, c, nu) par bucket
+    alpha_b = np.array([alpha[groups == g].mean() for g in range(n_var)])
+    c_b     = np.array([c    [groups == g].mean() for g in range(n_var)])
+    nu_b    = np.array([nu   [groups == g].mean() for g in range(n_var)])
+    bucket_sizes = np.array([(groups == g).sum() for g in range(n_var)])
+
+    # ---------- helpers -------------------------------------------------
+    def forward_bucket(xb: np.ndarray):
+        y = imb1_0; w = imb2_0
+        z_list = []
+        idx = 0
+        for g, xg in enumerate(xb):
+            bsz = bucket_sizes[g]
+            for k in range(bsz):
+                y = phi1 * y + nu[idx] * xg
+                w = phi2 * w + nu[idx] * xg
+                z_list.append(K1 * y + K2 * w)
+                idx += 1
+        return np.array(z_list)
+
+    def simulate_given_mu(mu: float):
+        xb = np.zeros(n_var)
+        for g in range(n_var):
+            a = alpha_b[g] - mu
+            if   a >  c_b[g]: xb[g] =  (a - c_b[g])
+            elif a < -c_b[g]: xb[g] =  (a + c_b[g])
+            else:             xb[g] =  0.0
+        return xb
+    # -------- recherche dichotomique sur mu ----------
+    mu_lo, mu_hi = -10.0, 10.0
+    for _ in range(30):
+        if np.sign(simulate_given_mu(mu_lo).sum() + p) != np.sign(simulate_given_mu(mu_hi).sum() + p):
+            break
+        mu_lo *= 2.; mu_hi *= 2.
+    for _ in range(max_iter_mu):
+        mu_mid = 0.5*(mu_lo+mu_hi)
+        s_mid  = simulate_given_mu(mu_mid).sum() + p
+        if abs(s_mid) < tol_mu:
+            mu_lo = mu_hi = mu_mid
+            break
+        if np.sign(s_mid) == np.sign(simulate_given_mu(mu_lo).sum() + p):
+            mu_lo = mu_mid
+        else:
+            mu_hi = mu_mid
+    xb_opt = simulate_given_mu(mu_lo)
+    x_opt  = np.repeat(xb_opt, bucket_sizes)
+    y_opt, w_opt, z_opt = forward_path(x_opt, alpha, c,
+                                       K1, K2, phi1, phi2, nu,
+                                       imb1_0, imb2_0)
+    penalty = np.sign(z_opt) * np.sqrt(np.abs(z_opt)) * x_opt
+    reward  = (alpha * x_opt - c * np.abs(x_opt) - penalty).sum()
+    return OptResult(x_opt, y_opt, w_opt, z_opt, reward)
+
+# ----------------------------------------------------------------------
+#  Interface temps-réel : ne renvoie que le premier trade
+# ----------------------------------------------------------------------
+def next_trade(alpha_today: np.ndarray,
+               c_today: np.ndarray | float,
+               nu_full: np.ndarray,      # toujours 390
+               K1: float, K2: float,
+               phi1: float, phi2: float,
+               imb1_0: float, imb2_0: float,
+               p: float,
+               bucket: int = 10):
+    """
+    Optimise sur le reste de journée puis renvoie x_1.
+    """
+    res = optimise_positions(alpha_today, c_today, nu_full,
+                             K1, K2, phi1, phi2,
+                             imb1_0, imb2_0, p, bucket=bucket)
+    return float(res.x[0]), res
+
+# ----------------------------------------------------------------------
+#  Exemple minimal
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    # horizon restant de 200 minutes  → T=200
+    T_remain  = 200
+    alpha     = np.random.normal(0, 0.5, T_remain)
+    c         = 0.01
+    K1, K2    = 0.2, 0.3
+    phi1, phi2= 0.95, 0.92
+    nu_full   = np.linspace(0.5, 1.5, 390)   # ex. nu[0]..nu[389]
+    imb1_0 = imb2_0 = 0.0
+    p = 0.0
+
+    res = optimise_positions(alpha, c, nu_full,
+                             K1, K2, phi1, phi2,
+                             imb1_0, imb2_0, p,
+                             bucket=5)
+    print("Reward total :", res.reward)
+    print("Premier trade:", res.x[0])
