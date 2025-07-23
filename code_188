@@ -1,0 +1,95 @@
+import numpy as np
+import time
+import matplotlib.pyplot as plt
+
+# Assuming TradingOptimizerNu class from previous cell already defined.
+# Re‑define objective jit inside class context already compiled.
+
+# ---------------- Simulation parameters ---------------- #
+T = 390
+rho = 0.95
+alpha_std = 5e-4
+
+vol  = 0.1 / 16
+K1   = 0.003
+K2   = 3/7 * K1
+phi1 = 0.99
+phi2 = 0.97
+
+# transaction costs
+c_full = np.full(T, 0.5e-4)
+c_full[-1] = 0.0
+
+# nu vector (constant ones for this test)
+nu_full = np.ones(T)
+
+# -------------- Simulate true alpha AR(1) -------------- #
+rng = np.random.default_rng(2025)
+sigma_eps = alpha_std * np.sqrt(1 - rho**2)
+alpha_true = np.empty(T)
+alpha_true[0] = rng.normal(0, alpha_std)
+for t in range(1, T):
+    alpha_true[t] = rho * alpha_true[t-1] + rng.normal(0, sigma_eps)
+
+# -------------- Optimiser instance -------------------- #
+opt_nu = TradingOptimizerNu(vol, K1, K2, phi1, phi2, full_nu=nu_full)
+
+# warm-up compile
+_ = opt_nu.optimize(alpha_true[:5], c_full[:5], nu=nu_full[:5])
+
+# -------------- Rolling day simulation ---------------- #
+imb1 = 0.0
+imb2 = 0.0
+pos  = 0.0
+
+reward_inst = np.zeros(T)
+pos_track   = np.zeros(T)
+
+start_time = time.perf_counter()
+
+for t in range(T):
+    H = T - t
+
+    # forecast alpha path
+    alpha_forecast = alpha_true[t] * (rho ** np.arange(H))
+    c_slice  = c_full[t:]
+    nu_slice = nu_full[t:]  # ones, but realistic slicing
+
+    x_plan, _ = opt_nu.optimize(alpha_forecast, c_slice,
+                                pos0=pos, imb1_0=imb1, imb2_0=imb2,
+                                nu=nu_slice)
+
+    trade = x_plan[0]
+
+    # execute trade
+    pos += trade
+    imb1 = phi1 * imb1 + nu_full[t] * trade
+    imb2 = phi2 * imb2 + nu_full[t] * trade
+    I_t = K1*imb1 + K2*imb2
+
+    reward_inst[t] = alpha_true[t]*trade - c_full[t]*abs(trade) - np.sqrt(vol)*np.sign(I_t)*np.sqrt(abs(I_t))*trade
+    pos_track[t] = pos
+
+elapsed = time.perf_counter() - start_time
+
+cum_reward = np.cumsum(reward_inst)
+
+# -------------- Plots ---------------- #
+plt.figure()
+plt.plot(pos_track)
+plt.title("Position path (rolling optimisation with ν)")
+plt.xlabel("Minute index")
+plt.ylabel("Position")
+plt.grid()
+plt.show()
+
+plt.figure()
+plt.plot(cum_reward)
+plt.title("Cumulative reward (AR(1) α, ν integrated)")
+plt.xlabel("Minute index")
+plt.ylabel("Cumulative reward")
+plt.grid()
+plt.show()
+
+print(f"Total runtime for 390 optimisations: {elapsed:.3f} s")
+print(f"Final P&L: {cum_reward[-1]:.3e}")
