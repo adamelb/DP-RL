@@ -1,0 +1,152 @@
+import numpy as np
+import numba as nb
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+import time
+
+# --------- NUMBA core with nu in imbalance only --------- #
+@nb.njit(cache=True, fastmath=True)
+def _obj_grad(vars_free, alpha, c, nu_slice, vol, K1, K2, phi1, phi2,
+             imb1_0, imb2_0, pos0):
+    T = alpha.size
+    x = np.empty(T)
+    x[:-1] = vars_free
+    x[-1] = -(pos0 + vars_free.sum())                     # unwind
+
+    imb1 = imb1_0
+    imb2 = imb2_0
+    sv = np.sqrt(vol)
+    I = np.empty(T)
+
+    # ---------- forward pass ---------- #
+    for i in range(T):
+        imb1 = phi1 * imb1 + nu_slice[i] * x[i]
+        imb2 = phi2 * imb2 + nu_slice[i] * x[i]
+        I[i] = K1 * imb1 + K2 * imb2
+
+    # ---------- backward pass ---------- #
+    grad = np.zeros(T)
+    J = 0.0
+    adj1 = 0.0
+    adj2 = 0.0
+
+    for i in range(T - 1, -1, -1):
+        nu_i = nu_slice[i]
+        Ii = I[i]
+        g = sv * np.sign(Ii) * np.sqrt(abs(Ii))
+        gprime = 0.0 if Ii == 0 else sv * 0.5 / np.sqrt(abs(Ii))
+
+        r_i = alpha[i] * x[i] - c[i] * np.abs(x[i]) - g * x[i]
+        J += r_i
+
+        signx = 0.0 if x[i] == 0 else np.sign(x[i])
+        dRdx_local = alpha[i] - c[i] * signx - g
+
+        dRdi1 = -x[i] * gprime * K1
+        dRdi2 = -x[i] * gprime * K2
+
+        tot1 = dRdi1 + adj1
+        tot2 = dRdi2 + adj2
+
+        dRdx = dRdx_local + nu_i * (tot1 + tot2)
+
+        grad[i] = -dRdx
+
+        adj1 = tot1 * phi1
+        adj2 = tot2 * phi2
+
+    grad_free = grad[:-1] - grad[-1]
+    return -J, grad_free
+
+
+# --------- Class TradingOptimizerNuV2 --------- #
+class TradingOptimizerNu:
+    def __init__(self, vol, K1, K2, phi1, phi2, full_nu=None):
+        """
+        full_nu : optional full-day nu vector (len 390). If None, assumed 1s.
+        """
+        self.vol = vol
+        self.K1 = K1
+        self.K2 = K2
+        self.phi1 = phi1
+        self.phi2 = phi2
+        self.full_nu = np.array(full_nu, dtype=np.float64) if full_nu is not None else None
+
+    def _slice_nu(self, alpha_len):
+        if self.full_nu is None:
+            return np.ones(alpha_len, dtype=np.float64)
+        if self.full_nu.size == alpha_len:
+            return self.full_nu
+        if self.full_nu.size == 390 and alpha_len <= 390:
+            return self.full_nu[-alpha_len:]
+        raise ValueError("Nu vector size incompatible with alpha length")
+
+    def optimize(self, alpha, c, pos0=0.0, imb1_0=0.0, imb2_0=0.0, nu=None, maxiter=80):
+        """
+        alpha, c: same length L.
+        nu: optional vector of length L (overrides internal slicing)
+        If nu is None, use internal rules: full_nu or ones.
+        """
+        alpha = np.asarray(alpha, dtype=np.float64)
+        c = np.asarray(c, dtype=np.float64)
+        T = alpha.size
+        if c.size != T:
+            raise ValueError("c length mismatch")
+        if nu is not None:
+            nu_slice = np.asarray(nu, dtype=np.float64)
+            if nu_slice.size != T:
+                raise ValueError("nu length mismatch with alpha")
+        else:
+            nu_slice = self._slice_nu(T)
+
+        if T == 1:
+            x_last = -pos0
+            return np.array([x_last]), alpha[0]*x_last - c[0]*abs(x_last)
+
+        vars0 = np.zeros(T - 1)
+
+        def fun(v):
+            f, g = _obj_grad(v, alpha, c, nu_slice,
+                             self.vol, self.K1, self.K2,
+                             self.phi1, self.phi2,
+                             imb1_0, imb2_0, pos0)
+            return f, g
+
+        res = minimize(fun, vars0, jac=True, method='L-BFGS-B',
+                       options={'maxiter': maxiter, 'ftol': 1e-12})
+
+        x = np.empty(T)
+        x[:-1] = res.x
+        x[-1] = -(pos0 + res.x.sum())
+        return x, -res.fun
+
+
+# -------------------- Test -------------------- #
+T = 390
+alpha_exp = 5e-4 * np.exp(-np.arange(T)/30)
+c_vec = np.full(T, 0.5e-4)
+c_vec[-1] = 0.0
+
+full_nu = np.ones(T)  # constant 1
+opt = TradingOptimizerNu(vol=0.1/16, K1=0.003, K2=3/7*0.003, phi1=0.99, phi2=0.97, full_nu=full_nu)
+
+# Warm-up
+_ = opt.optimize(alpha_exp[:5], c_vec[:5])
+
+start = time.perf_counter()
+x_opt, pnl = opt.optimize(alpha_exp, c_vec)
+runtime_ms = (time.perf_counter() - start)*1e3
+
+cum_pos = np.cumsum(x_opt)
+
+plt.figure()
+plt.plot(cum_pos)
+plt.title("Cumulative position with ν integrated in imbalance (exp-decay α)")
+plt.xlabel("Minute index")
+plt.ylabel("Position")
+plt.grid()
+plt.show()
+
+print(f"Runtime: {runtime_ms:.2f} ms")
+print(f"First trade: {x_opt[0]:.3e}")
+print(f"Total P&L: {pnl:.3e}")
