@@ -1,0 +1,125 @@
+import numpy as np
+import numba as nb
+from scipy.optimize import minimize
+
+# --------------------------------------------------
+#  Objective + gradient (Numba JIT, O(T))
+# --------------------------------------------------
+@nb.njit(cache=True, fastmath=True)
+def obj_grad_pos(vars_free, alpha, c, nu, vol, K1, K2, phi1, phi2,
+                 imb1_0, imb2_0, pos0):
+    """
+    vars_free : x_0 … x_{T-2}  (x_{T-1} imposé par l'unwind)
+    Retourne  (-reward_total, gradient w.r.t vars_free)
+    """
+    T = alpha.size
+    x = np.empty(T)
+    x[:-1] = vars_free
+    x[-1]  = -(pos0 + vars_free.sum())          # unwind
+
+    # ---------- forward pass ----------
+    imb1 = imb1_0
+    imb2 = imb2_0
+    pos  = pos0                                 # position *avant* le trade i
+    sv   = np.sqrt(vol)
+
+    I_arr     = np.empty(T)
+    pos_prev  = np.empty(T)                     # pour la reward
+    reward    = 0.0
+
+    for i in range(T):
+        pos_prev[i] = pos
+        imb1 = phi1*imb1 + nu[i]*x[i]
+        imb2 = phi2*imb2 + nu[i]*x[i]
+        I    = K1*imb1 + K2*imb2
+        I_arr[i] = I
+
+        # reward_i
+        reward += alpha[i]*pos - c[i]*abs(x[i]) - sv*np.sign(I)*np.sqrt(abs(I))*x[i]
+
+        pos += x[i]                            # mise à jour de la position
+
+    # ---------- backward pass ----------
+    grad = np.zeros(T)
+    adj1 = 0.0
+    adj2 = 0.0
+    suffix_alpha = 0.0                         # Σ_{j>i} α_j
+
+    for i in range(T-1, -1, -1):
+        Ii = I_arr[i]
+        g  = sv*np.sign(Ii)*np.sqrt(abs(Ii))
+        gprime = 0.0 if Ii == 0 else sv*0.5/np.sqrt(abs(Ii))
+
+        # dérivées de l'impact
+        dImpact_dx = -g                        # d(-g x)/dx = -g
+        dRdi1 = -x[i]*gprime*K1
+        dRdi2 = -x[i]*gprime*K2
+
+        tot1 = dRdi1 + adj1
+        tot2 = dRdi2 + adj2
+
+        # gradient du coût |x|
+        signx = 0.0 if x[i] == 0 else np.sign(x[i])
+        dC_dx = -c[i]*signx                   # d( -c|x| )/dx
+
+        # contribution α : -suffix_alpha (cf. explication)
+        dRdx = dImpact_dx + dC_dx - nu[i]*(tot1+tot2) - suffix_alpha
+
+        grad[i] = -dRdx                       # car on minimise -reward
+
+        adj1 = tot1 * phi1
+        adj2 = tot2 * phi2
+        suffix_alpha += alpha[i]              # mise à jour pour l’itération suivante
+
+    grad_free = grad[:-1] - grad[-1]          # ∂x_T/∂vars_free = -1
+    return -reward, grad_free
+
+
+# --------------------------------------------------
+#  Classe utilisateur
+# --------------------------------------------------
+class TradingOptimizerNu:
+    def __init__(self, vol, K1, K2, phi1, phi2):
+        self.vol  = vol
+        self.K1   = K1
+        self.K2   = K2
+        self.phi1 = phi1
+        self.phi2 = phi2
+
+    def optimize(self, alpha, c, nu=None,
+                 pos0=0.0, imb1_0=0.0, imb2_0=0.0,
+                 maxiter=80):
+        alpha = np.asarray(alpha, dtype=np.float64)
+        c     = np.asarray(c, dtype=np.float64)
+        T     = alpha.size
+
+        if nu is None:
+            nu = np.ones(T, dtype=np.float64)
+        else:
+            nu = np.asarray(nu, dtype=np.float64)
+            if nu.size != T:
+                raise ValueError("nu length mismatch")
+
+        if c.size != T:
+            raise ValueError("c length mismatch")
+
+        if T == 1:                            # cas dégénéré
+            x_last = -pos0
+            reward = alpha[0]*pos0 - c[0]*abs(x_last)
+            return np.array([x_last]), reward
+
+        vars0 = np.zeros(T-1)
+
+        def fun(v):
+            f, g = obj_grad_pos(v, alpha, c, nu, self.vol,
+                                 self.K1, self.K2, self.phi1, self.phi2,
+                                 imb1_0, imb2_0, pos0)
+            return f, g
+
+        res = minimize(fun, vars0, jac=True, method='L-BFGS-B',
+                       options={'maxiter': maxiter, 'ftol': 1e-12})
+
+        x = np.empty(T)
+        x[:-1] = res.x
+        x[-1]  = -(pos0 + res.x.sum())
+        return x, -res.fun
