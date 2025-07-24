@@ -1,0 +1,14 @@
+import numpy as np
+
+def solve_system(imb1, imb2, nu1, nu2, phi1, phi2):
+    # Construction du système Ax = b
+    A = np.array([
+        [phi1**2 * nu2, phi1 * nu1],
+        [0, phi2**2 * nu2 + phi2 * nu1]
+    ])
+    b = np.array([imb1, imb2])
+    
+    # Résolution du système
+    x = np.linalg.solve(A, b)
+    
+    return x[0], x[1]  # x1, x2
