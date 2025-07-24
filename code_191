@@ -1,0 +1,187 @@
+# fast_intraday.py  —  collez ce fichier tel quel
+
+import numpy as np, time
+from scipy.optimize import minimize
+
+class FastIntradayOptimizer:
+    def __init__(self, *, K1=3e-3, phi1=0.99,
+                 K2=None, phi2=0.97,
+                 vol=0.1/16,
+                 target_dim=40,       # nb. de buckets max
+                 maxiter=30,          # itérations L-BFGS-B
+                 c_template=None):    # vecteur coût par défaut
+        self.K1 = K1
+        self.K2 = (3/7)*K1 if K2 is None else K2
+        self.phi1, self.phi2 = phi1, phi2
+        self.vol   = vol
+        self.sv    = np.sqrt(vol)
+        self.dim   = target_dim
+        self.maxit = maxiter
+        self.c_tpl = c_template
+
+        # construits à la 1re résolution
+        self.T = None          # horizon courant
+        self.M = None          # matrice d’impact
+        self.buckets = None
+        self.bsz   = None      # tailles de bucket
+        self.bmap  = None      # minute -> bucket
+        self.B     = None
+        self._z_warm = None    # warm-start (B-1)
+
+    # -------------- buckets -----------------------------------------
+    @staticmethod
+    def _make_buckets(n, target):
+        if n <= 5:
+            return [np.arange(n)]
+        head = [np.array([0]), np.array([1]), np.array([2])]
+        tail = [np.array([n-2]), np.array([n-1])]
+        core_len = n-5
+        slots = target-5
+        step  = max(1, int(np.ceil(core_len/slots)))
+        core  = [np.arange(i, min(i+step, n-2))
+                 for i in range(3, n-2, step)]
+        return head+core+tail
+
+    # -------------- horizon-dependent pré-calc ----------------------
+    def _prep(self, T, cost_vec):
+        self.T = T
+        self.buckets   = self._make_buckets(T, self.dim)
+        self.bsz       = np.array([len(b) for b in self.buckets])
+        self.bmap      = np.empty(T, dtype=np.int32)
+        for k, b in enumerate(self.buckets):
+            self.bmap[b] = k
+        self.B = len(self.buckets)
+
+        # matrice M (impact cumulatif)
+        self.M = np.zeros((T, T))
+        for k in range(T):
+            self.M[k:, k] = ( self.K1 * self.phi1 ** np.arange(0, T-k)
+                             + self.K2 * self.phi2 ** np.arange(0, T-k) )
+
+        self.cost_full = cost_vec.copy()
+        self._z_warm = None
+
+    # -------------- utilitaires ------------------------------------
+    def _expand(self, y):
+        """bucket → minute"""
+        x = np.empty(self.T)
+        for v, idx in zip(y, self.buckets):
+            x[idx] = v
+        return x
+
+    # -------------- solve 1 optimisation ---------------------------
+    def solve(self, alpha, *, pos0=0., imb1_0=0., imb2_0=0.,
+              cost_vec=None):
+        alpha = np.asarray(alpha, float)
+        T = len(alpha)
+
+        # coûts
+        if cost_vec is None:
+            cost_vec = (self.c_tpl[:T] if self.c_tpl is not None
+                        else np.zeros(T))
+        cost_vec = np.asarray(cost_vec, float)
+
+        if self.T != T:                       # nouveau horizon
+            self._prep(T, cost_vec)
+        else:
+            self.cost_full = cost_vec
+
+        B, sizes, M  = self.B, self.bsz, self.M
+        last = B-1
+        eps  = 1e-9
+        sv   = self.sv
+        cost = self.cost_full
+        bmap = self.bmap
+
+        # pré-calc gradient de la partie alpha·s
+        sgrad = np.cumsum(alpha[::-1])[::-1]
+        sgrad_b = np.zeros(B)
+        for t in range(T):
+            sgrad_b[bmap[t]] += sgrad[t]
+
+        # terme constant dû aux imbalances initiaux
+        base = ( self.K1*imb1_0 * self.phi1**np.arange(1, T+1)
+               + self.K2*imb2_0 * self.phi2**np.arange(1, T+1) )
+
+        # ===== objectif et gradient wrt z (B-1 variables) ===========
+        def z2y(z):
+            y = np.empty(B)
+            y[:-1] = z
+            y[last] = -(pos0 + sizes[:-1]@z)/sizes[last]
+            return y
+
+        if self._z_warm is not None and len(self._z_warm)==B-1:
+            z0 = self._z_warm
+        else:
+            z0 = np.zeros(B-1)
+
+        def f_g(z):
+            y   = z2y(z)
+            x   = self._expand(y)
+            I   = base + M@x
+            si  = np.sqrt(np.abs(I)+eps)
+            sgn = np.sign(I)
+
+            # objective
+            cum = pos0 + np.cumsum(x)
+            J = ( alpha @ cum
+                  - cost @ np.abs(x)
+                  - sv * (sgn*si @ x) )
+
+            # grad w.r.t. x
+            grad_x = sgrad - cost* np.sign(x)
+            grad_x -= sv*sgn*si
+            grad_x -= sv*(M.T @ (0.5/si * x))
+
+            # agréger par bucket
+            g_y = np.zeros(B)
+            for t in range(T):
+                g_y[bmap[t]] += grad_x[t]
+
+            # ∂y/∂z
+            g_z = g_y[:-1] - g_y[last]*(sizes[:-1]/sizes[last])
+            return -J, -g_z          # maximise ⇒ minimise −J
+
+        t0 = time.perf_counter()
+        res = minimize(f_g, z0, method="L-BFGS-B", jac=True,
+                       options={"maxiter": self.maxit, "ftol": 1e-8})
+        dt = (time.perf_counter()-t0)*1000
+
+        self._z_warm = res.x                # warm-start
+        yopt = z2y(res.x)
+        xopt = self._expand(yopt)
+        return xopt, {"elapsed_ms": dt,
+                      "iterations": res.nit,
+                      "bucket_dim": B}
+
+# ------------------------------------------------------------------
+# ---------- démonstration sur une journée de 390 minutes ----------
+if __name__ == "__main__":
+    T = 390
+    alpha_day = 5e-4 * np.exp(-np.arange(T)/30)
+    cost_day  = np.full(T, 0.5e-4); cost_day[-1]=0
+
+    opt = FastIntradayOptimizer(target_dim=40, maxiter=30,
+                                c_template=cost_day)
+
+    pos = imb1 = imb2 = 0.0
+    cum_reward, cum_time = 0.0, 0.0
+    for t in range(T):
+        xplan, info = opt.solve(alpha_day[t:], pos0=pos,
+                                imb1_0=imb1, imb2_0=imb2,
+                                cost_vec=cost_day[t:])
+        x0  = xplan[0]
+        imb1 = opt.phi1*imb1 + x0
+        imb2 = opt.phi2*imb2 + x0
+        I    = opt.K1*imb1 + opt.K2*imb2
+        pos += x0
+
+        r = ( alpha_day[t]*pos
+              - cost_day[t]*abs(x0)
+              - opt.sv*np.sign(I)*np.sqrt(abs(I))*x0 )
+        cum_reward += r
+        cum_time   += info["elapsed_ms"]
+
+    print(f"→ reward cumulée : {cum_reward:.5e}")
+    print(f"→ temps total     : {cum_time/1000:.2f} s "
+          f"({cum_time/T:.1f} ms / re-opt)")
