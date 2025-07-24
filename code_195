@@ -1,0 +1,27 @@
+import numpy as np, time
+from fast_intraday_jit import FastIntradayOptimizerJIT
+
+# paramètres journée
+T = 390
+alpha_day = 5e-4*np.exp(-np.arange(T)/30)
+cost_day  = np.full(T, 0.5e-4); cost_day[-1] = 0
+
+opt = FastIntradayOptimizerJIT(target_dim=40, maxiter=20,
+                               c_template=cost_day)
+
+pos = imb1 = imb2 = 0.0
+z_warm = None
+tot_ms = 0.0
+for t in range(T):
+    plan, z_warm, dt = opt.solve(alpha_day[t:], pos, imb1, imb2,
+                                 cost_vec=cost_day[t:], z_warm=z_warm)
+    x0 = plan[0]
+
+    # mise à jour des états réels
+    imb1 = opt.phi1*imb1 + x0
+    imb2 = opt.phi2*imb2 + x0
+    pos += x0
+    tot_ms += dt
+
+print(f"Temps total journée : {tot_ms/1000:.2f} s "
+      f"(≈ {tot_ms/T:.1f} ms par re-opt)")
