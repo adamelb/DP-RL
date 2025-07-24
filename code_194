@@ -1,0 +1,155 @@
+import numpy as np, numba as nb, time
+from scipy.optimize import minimize
+
+# ------------------------------------------------------------------ #
+#  NUMBA kernels                                                     #
+# ------------------------------------------------------------------ #
+@nb.njit(fastmath=True, cache=True)
+def bucket_expand(y, minute_to_bucket):
+    """Copie y (B) → x (T) suivant le mapping minute → bucket."""
+    T = minute_to_bucket.size
+    x = np.empty(T, np.float64)
+    for t in range(T):
+        x[t] = y[minute_to_bucket[t]]
+    return x
+
+@nb.njit(fastmath=True, cache=True)
+def fg_kernel(z,                             # libres (B-1,)
+             pos0, sizes, last,              # infos bucket
+             minute_to_bucket,               # map minute→bucket
+             alpha, cost, M, base,           # constantes horizon+état
+             sgrad_b, sqrt_vol, eps):
+    # --- recompose y, x -------------------------------------------------
+    B = sizes.size
+    y = np.empty(B, np.float64)
+    for k in range(B-1):
+        y[k] = z[k]
+    y[last] = -(pos0 + (sizes[:-1] * z).sum()) / sizes[last]
+
+    x = bucket_expand(y, minute_to_bucket)
+
+    # --- métriques ------------------------------------------------------
+    I      = base + M @ x
+    sqrt_I = np.sqrt(np.abs(I) + eps)
+    cumpos = pos0 + np.cumsum(x)
+
+    # --- objectif à maximiser ------------------------------------------
+    J = ( alpha @ cumpos
+          - cost @ np.abs(x)
+          - sqrt_vol * (np.sign(I) * sqrt_I @ x) )
+
+    # --- gradient wrt x -------------------------------------------------
+    gx = sgrad_b.copy()                      # α-partie (bucketisée)
+    for t in range(x.size):
+        gx[ minute_to_bucket[t] ] -= cost[t]*np.sign(x[t])
+
+    # terme d'impact (lissé √)
+    fpI = 0.5 / sqrt_I
+    gx -= sqrt_vol * (np.sign(I)*0 + M.T @ (fpI * x))  # vectorisé
+
+    # --- passage à z (élimine la contrainte) ----------------------------
+    gz = np.empty(B-1, np.float64)
+    for k in range(B-1):
+        gz[k] = -(gx[k] - gx[last] * sizes[k] / sizes[last])
+
+    return -J, -gz                      # SciPy minimise
+
+# ------------------------------------------------------------------ #
+#  Optimiser objet                                                   #
+# ------------------------------------------------------------------ #
+class FastIntradayOptimizerJIT:
+    def __init__(self, *, K1=3e-3, phi1=0.99,
+                 K2=None, phi2=0.97,
+                 vol=0.1/16,
+                 target_dim=40,         # ≤40 buckets
+                 maxiter=20,            # itérations L-BFGS-B
+                 c_template=None):
+        self.K1 = K1
+        self.K2 = (3/7)*K1 if K2 is None else K2
+        self.phi1, self.phi2 = phi1, phi2
+        self.sqrt_vol = np.sqrt(vol)
+        self.dim      = target_dim
+        self.maxit    = maxiter
+        self.c_tpl    = c_template
+        self._cache   = {}              # clé = horizon T
+
+    # ---------- buckets (3 head, 2 tail, cœur auto) --------------------
+    @staticmethod
+    def _buckets(n, cap):
+        if n <= 5: return [np.arange(n)]
+        core_len = n-5
+        step = max(1, int(np.ceil(core_len/(cap-5))))
+        buckets = [np.array([0]), np.array([1]), np.array([2])]
+        buckets += [np.arange(i, min(i+step, n-2))
+                    for i in range(3, n-2, step)]
+        buckets += [np.array([n-2]), np.array([n-1])]
+        return buckets
+
+    # ---------- compile objets dépendant de T --------------------------
+    def _compile(self, T, cost_vec):
+        b = self._buckets(T, self.dim)
+        sizes = np.array([len(g) for g in b])
+        m2b   = np.empty(T, np.int32)
+        for k, idx in enumerate(b):
+            m2b[idx] = k
+
+        # matrice d'impact cumulatif
+        M = np.zeros((T, T))
+        for k in range(T):
+            M[k:, k] = ( self.K1*self.phi1**np.arange(T-k)
+                       + self.K2*self.phi2**np.arange(T-k) )
+
+        # store
+        self._cache[T] = dict(
+            buckets=b, sizes=sizes, last=len(b)-1,
+            minute_to_bucket=m2b,
+            alpha=np.zeros(T), cost=cost_vec.copy(), M=M,
+            sgrad_b=np.zeros(len(b)),
+            base=np.zeros(T))
+
+    # ---------- solve 1 optimisation -----------------------------------
+    def solve(self, alpha, pos0=0., imb1_0=0., imb2_0=0.,
+              cost_vec=None, z_warm=None):
+        alpha = np.asarray(alpha, float)
+        T = len(alpha)
+        if cost_vec is None:
+            cost_vec = self.c_tpl[:T] if self.c_tpl is not None else np.zeros(T)
+        cost_vec = np.asarray(cost_vec, float)
+
+        if T not in self._cache:
+            self._compile(T, cost_vec)
+
+        C = self._cache[T]
+        sizes, last = C["sizes"], C["last"]
+        m2b, M = C["minute_to_bucket"], C["M"]
+        eps, sv = 1e-9, self.sqrt_vol
+
+        # constantes état-dépendantes
+        base = ( self.K1*imb1_0 * self.phi1**np.arange(1,T+1)
+               + self.K2*imb2_0 * self.phi2**np.arange(1,T+1) )
+        sgrad = np.cumsum(alpha[::-1])[::-1]
+        sgrad_b = np.zeros_like(sizes)
+        for t in range(T):
+            sgrad_b[m2b[t]] += sgrad[t]
+
+        # SciPy wrapper (ferme sur constantes)
+        def _fg(z):
+            return fg_kernel(z, pos0, sizes, last,
+                             m2b,
+                             alpha, cost_vec, M, base,
+                             sgrad_b, sv, eps)
+
+        z0 = np.zeros(len(sizes)-1) if z_warm is None else z_warm
+        t0 = time.perf_counter()
+        res = minimize(_fg, z0, method="L-BFGS-B", jac=True,
+                       options={"maxiter": self.maxit, "ftol": 1e-8})
+        dt = (time.perf_counter()-t0)*1e3  # ms
+        if not res.success:
+            raise RuntimeError(res.message)
+
+        # reconstruire x minute-­par-minute
+        y = np.empty_like(sizes)
+        y[:-1] = res.x
+        y[last] = -(pos0 + (sizes[:-1]*res.x).sum())/sizes[last]
+        x = bucket_expand(y, m2b)
+        return x, res.x, dt                 # plan dé-bucketisé, warm-z, temps
