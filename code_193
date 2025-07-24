@@ -1,0 +1,19 @@
+T      = 390
+alpha  = 5e-4*np.exp(-np.arange(T)/30)
+cost   = np.full(T, 0.5e-4); cost[-1] = 0
+
+opt = FastIntradayOptimizerJIT(target_dim=40, maxiter=20,
+                               c_template=cost)
+
+pos = imb1 = imb2 = 0.0
+total_ms = 0.0
+for t in range(T):
+    xplan, zwarm, dt = opt.solve(alpha[t:], pos, imb1, imb2,
+                                 cost_vec=cost[t:])
+    x0 = xplan[0]
+    imb1 = opt.phi1*imb1 + x0
+    imb2 = opt.phi2*imb2 + x0
+    pos += x0
+    total_ms += dt
+print(f"Temps total : {total_ms/1000:.2f} s "
+      f"(≈ {total_ms/T:.1f} ms par optimisation)")
