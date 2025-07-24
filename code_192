@@ -1,0 +1,156 @@
+import numpy as np, numba as nb, time
+from scipy.optimize import minimize
+
+@nb.njit(cache=True, fastmath=True)
+def _bucket_expand(y, B, bucket_ptr, minute_to_bucket):
+    """Copie y (longueur B) dans x (longueur T) selon le mapping."""
+    T = minute_to_bucket.size
+    x = np.empty(T, dtype=np.float64)
+    for t in range(T):
+        x[t] = y[ minute_to_bucket[t] ]
+    return x
+
+@nb.njit(cache=True, fastmath=True)
+def _f_g_numba(z,                 # variables libres (B-1)
+              pos0, sizes, last,  # scalaires / vecteurs tailles B
+              minute_to_bucket, bucket_ptr,
+              alpha, cost, M, base,
+              sgrad_b,            # ∑_{j≥t} α_j agrégé par bucket
+              sqrt_vol, eps):
+    # --- reconstruire y (B) et x (T) ---
+    B = sizes.size
+    y = np.empty(B)
+    for k in range(B-1):
+        y[k] = z[k]
+    y[last] = -(pos0 + (sizes[:-1] * z).sum()) / sizes[last]
+
+    x = _bucket_expand(y, B, bucket_ptr, minute_to_bucket)
+
+    # --- objets utiles ---
+    I   = base + M @ x
+    absI= np.abs(I)+eps
+    sqrtI = np.sqrt(absI)
+    sgnI  = np.sign(I)
+    cum   = pos0 + np.cumsum(x)
+
+    # --- objectif J (à maximiser) ---
+    J = ( alpha @ cum
+          - cost @ np.abs(x)
+          - sqrt_vol * (sgnI*sqrtI @ x) )
+
+    # grad_x
+    gx = sgrad_b.copy()           # α-partie déjà agrégée
+    for t in range(x.size):
+        b = minute_to_bucket[t]
+        gx[b] -= cost[t]*np.sign(x[t])
+    gx -= sqrt_vol * (sgnI*sqrtI @ x).sum() * 0  # (pas bucketisé, neutre)
+    # terme d'impact lissé
+    fpI = 0.5 / sqrtI
+    gx -= sqrt_vol * (M.T @ (fpI * x))
+
+    # convertir en grad_z
+    gz = np.empty(B-1)
+    for k in range(B-1):
+        gz[k] = -(gx[k] - gx[last] * sizes[k] / sizes[last])
+
+    return -J, gz                # SciPy minimise
+
+class FastIntradayOptimizerJIT:
+    """Optimiseur intraday bucketisé JITé avec Numba."""
+    def __init__(self, *, K1=3e-3, phi1=0.99,
+                 K2=None, phi2=0.97,
+                 vol=0.1/16, target_dim=40,
+                 maxiter=20, c_template=None):
+        self.K1, self.K2 = K1, (3/7)*K1 if K2 is None else K2
+        self.phi1, self.phi2 = phi1, phi2
+        self.sqrt_vol = np.sqrt(vol)
+        self.dim, self.maxit = target_dim, maxiter
+        self.c_tpl = c_template
+        self._compiled_cache = {}      # clé = T
+
+    # ---- buckets ----
+    @staticmethod
+    def _buckets(n, cap):
+        if n <= 5: return [np.arange(n)]
+        h = [np.array([0]), np.array([1]), np.array([2])]
+        t = [np.array([n-2]), np.array([n-1])]
+        core = n-5
+        step = max(1, int(np.ceil(core/(cap-5))))
+        c = [np.arange(i, min(i+step, n-2))
+             for i in range(3, n-2, step)]
+        return h+c+t
+
+    # ---- compilation par horizon ----
+    def _compile(self, T, cost):
+        b = self._buckets(T, self.dim)
+        sizes = np.array([len(g) for g in b])
+        minute_to_bucket = np.empty(T, np.int32)
+        ptr = []
+        for k, idx in enumerate(b):
+            minute_to_bucket[idx] = k
+            ptr.extend(idx)
+        ptr = np.array(ptr, np.int32)   # pas utilisé directement
+
+        M = np.zeros((T, T))
+        for k in range(T):
+            M[k:, k] = ( self.K1*self.phi1**np.arange(T-k)
+                       + self.K2*self.phi2**np.arange(T-k) )
+
+        # stub arrays pour conformité Numba
+        alpha0 = np.zeros(T)
+        base0  = np.zeros(T)
+        sgrad0 = np.zeros(len(b))
+
+        # compile f_g
+        f_g_nb = nb.njit(_f_g_numba, fastmath=True, cache=True)
+
+        self._compiled_cache[T] = dict(
+            buckets=b, sizes=sizes, last=len(b)-1,
+            minute_to_bucket=minute_to_bucket,
+            bucket_ptr=ptr, M=M, cost=cost,
+            f=f_g_nb, eps=1e-9)
+
+    # ---- solve ----
+    def solve(self, alpha, pos0=0., imb1_0=0., imb2_0=0.,
+              cost_vec=None, warm_z=None):
+        alpha = np.asarray(alpha, float)
+        T = len(alpha)
+        cost = (self.c_tpl[:T] if cost_vec is None else cost_vec).astype(float)
+
+        if T not in self._compiled_cache:
+            self._compile(T, cost)
+
+        c = self._compiled_cache[T]
+        sizes, last = c["sizes"], c["last"]
+
+        # constantes dépendant de l'état
+        base = ( self.K1*imb1_0 * self.phi1**np.arange(1, T+1) +
+                 self.K2*imb2_0 * self.phi2**np.arange(1, T+1) )
+        sgrad = np.cumsum(alpha[::-1])[::-1]
+        sgrad_b = np.zeros_like(sizes, float)
+        for t in range(T):
+            sgrad_b[c["minute_to_bucket"][t]] += sgrad[t]
+
+        # fonction SciPy
+        def _fg(z):
+            return c["f"](z, pos0, sizes, last,
+                          c["minute_to_bucket"], c["bucket_ptr"],
+                          alpha, cost, c["M"], base,
+                          sgrad_b, self.sqrt_vol, c["eps"])
+
+        z0 = np.zeros(len(sizes)-1) if warm_z is None else warm_z
+        t0 = time.perf_counter()
+        res = minimize(_fg, z0, method="L-BFGS-B", jac=True,
+                       options={"maxiter": self.maxit, "ftol": 1e-8})
+        dt = (time.perf_counter()-t0)*1e3
+        if not res.success:
+            raise RuntimeError(res.message)
+
+        # reconstruire x complet
+        y = np.empty_like(sizes, float)
+        y[:-1] = res.x
+        y[last] = -(pos0 + (sizes[:-1]*res.x).sum())/sizes[last]
+        x = np.empty(T)
+        for t in range(T):
+            x[t] = y[ c["minute_to_bucket"][t] ]
+        return x, res.x, dt      # x, warm-start, temps ms
