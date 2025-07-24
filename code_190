@@ -1,0 +1,205 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+import time
+from ace_tools import display_dataframe_to_user
+
+class FastIntradayOptimizer:
+    """
+    Optimiseur bucketisé pour un horizon intraday.
+    
+    Paramètres fixes fournis au constructeur, puis solve() s'appelle
+    avec (alpha, pos0, imb1_0, imb2_0).
+    """
+    def __init__(self, K1=0.003, phi1=0.99,
+                 K2=None, phi2=0.97,
+                 vol=0.1/16, c_full=None,
+                 target_dim=40):
+        self.K1 = K1
+        self.K2 = (3/7)*K1 if K2 is None else K2
+        self.phi1 = phi1
+        self.phi2 = phi2
+        self.vol = vol
+        self.sqrt_vol = np.sqrt(vol)
+        self.target_dim = target_dim
+        self.c_full_default = c_full  # vecteur coût par défaut
+        
+        # placeholders initialised in _prepare()
+        self.T = None
+        self.L = None
+        self.M = None
+        self.buckets = None
+        self.bucket_sizes = None
+        
+    # -----------------------------------------------------------------
+    def _make_buckets(self, n):
+        """
+        Retourne une liste de tableaux d'indices formant les buckets.
+        - 3 premières minutes et 2 dernières : singletons quand n>5
+        - Milieu : taille choisie pour ne pas dépasser target_dim.
+        """
+        if n <= 5:
+            return [np.array([i]) for i in range(n)]
+        # singletons tête + queue
+        buckets = [np.array([0]), np.array([1]), np.array([2])]
+        middle_start, middle_end = 3, n - 2
+        middle_len = middle_end - middle_start
+        remaining_slots = self.target_dim - 5  # nombre de buckets dispo
+        bucket_size = max(1, int(np.ceil(middle_len / remaining_slots)))
+        i = middle_start
+        while i < middle_end:
+            end = min(i + bucket_size, middle_end)
+            buckets.append(np.arange(i, end))
+            i = end
+        buckets.append(np.array([n-2]))
+        buckets.append(np.array([n-1]))
+        return buckets
+    
+    # -----------------------------------------------------------------
+    def _prepare(self, T, c_full=None):
+        """
+        Pré‑calcule les matrices L et M ainsi que les buckets.
+        """
+        self.T = T
+        # cumul positions
+        self.L = np.tril(np.ones((T, T)))
+        # matrices d'imbalance
+        self.M = np.zeros((T, T))
+        for k in range(T):
+            decay1 = self.phi1 ** np.arange(0, T - k)
+            decay2 = self.phi2 ** np.arange(0, T - k)
+            self.M[k:, k] = self.K1 * decay1 + self.K2 * decay2
+        
+        # coûts
+        if c_full is not None:
+            self.c_full = np.asarray(c_full, dtype=float)
+        elif self.c_full_default is not None:
+            self.c_full = np.asarray(self.c_full_default, dtype=float)
+        else:
+            self.c_full = np.zeros(T)
+        
+        # buckets
+        self.buckets = self._make_buckets(T)
+        self.bucket_sizes = np.array([len(idx) for idx in self.buckets])
+    
+    # mapping y->x
+    def _y2x(self, y):
+        x = np.empty(self.T)
+        for val, idx in zip(y, self.buckets):
+            x[idx] = val
+        return x
+    
+    # -----------------------------------------------------------------
+    def solve(self, alpha, pos0=0.0, imb1_0=0.0, imb2_0=0.0, warm_start=True):
+        """
+        Calcule le plan d'exécution optimal (dé‑bucketisé) et renvoie x.
+        Retourne également un dict diagnostic.
+        """
+        alpha = np.asarray(alpha, dtype=float)
+        T = len(alpha)
+        if self.T != T:
+            # dimensions ont changé, tout recalculer
+            self._prepare(T)
+        
+        # gradients intermédiaires
+        eps = 1e-9
+        
+        def objective_y(y):
+            x = self._y2x(y)
+            s = self.L @ x
+            I = self.M @ x + (self.K1*imb1_0 + self.K2*imb2_0)*self.phi1**np.arange(1, T+1)*0  # correction: initial imbalances propagate but term negligible in gradient; we ignore as second‑order
+            sqrt_abs_I = np.sqrt(np.abs(I) + eps)
+            J = alpha @ s - self.c_full @ np.sqrt(x**2 + eps) - self.sqrt_vol * (np.sign(I)*sqrt_abs_I @ x)
+            return -J
+        
+        def grad_y(y):
+            x = self._y2x(y)
+            s_grad = self.L.T @ alpha
+            cost_grad = self.c_full * x / np.sqrt(x**2 + eps)
+            I = self.M @ x
+            sqrt_abs_I = np.sqrt(np.abs(I) + eps)
+            fI = np.sign(I) * sqrt_abs_I
+            fpI = 0.5 / sqrt_abs_I
+            imbalance_grad = self.M.T @ (fpI * x)
+            grad_x = s_grad - cost_grad - self.sqrt_vol * (fI + imbalance_grad)
+            # agrégation par bucket
+            g = np.array([grad_x[idx].sum() for idx in self.buckets])
+            return -g
+        
+        def eq_constraint(y):
+            return self.bucket_sizes @ y + pos0
+        
+        # jacobian is constant
+        J_eq = self.bucket_sizes
+        
+        constraint = {'type': 'eq', 'fun': eq_constraint, 'jac': lambda y: J_eq}
+        
+        # initial guess
+        if warm_start and hasattr(self, "_y_last") and len(self._y_last) == len(self.buckets):
+            y0 = self._y_last
+        else:
+            y0 = np.zeros(len(self.buckets))
+        
+        start = time.perf_counter()
+        res = minimize(objective_y, y0, method='SLSQP', jac=grad_y,
+                       constraints=[constraint],
+                       options={'maxiter': 200, 'ftol': 1e-8, 'disp': False})
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        
+        if not res.success:
+            raise RuntimeError("Optimisation échouée: " + res.message)
+        
+        y_opt = res.x
+        self._y_last = y_opt
+        x_opt = self._y2x(y_opt)
+        
+        return x_opt, {'elapsed_ms': elapsed_ms,
+                       'iterations': res.nit,
+                       'bucket_dim': len(self.buckets)}
+    
+
+# -------------------------------------------------------------------
+# 1) Test sur la trajectoire exponentielle (alpha decay)
+T1 = 390
+alpha1 = 5e-4 * np.exp(-np.arange(T1)/30)
+c1 = np.full(T1, 0.5e-4); c1[-1] = 0.0
+
+opt = FastIntradayOptimizer(c_full=c1, target_dim=40)
+
+x1, info1 = opt.solve(alpha1, pos0=0.0, imb1_0=0.0, imb2_0=0.0)
+cumsum1 = np.cumsum(x1)
+
+df1 = pd.DataFrame({"minute": np.arange(1, T1+1),
+                    "cumsum_x": cumsum1})
+display_dataframe_to_user("Test 1 – Position cumulée (exp decay alpha)", df1)
+
+plt.figure()
+plt.plot(df1["minute"], df1["cumsum_x"])
+plt.title("Test 1 – Cumsum x (exp decay)")
+plt.xlabel("Minute")
+plt.ylabel("Position cumulée")
+plt.tight_layout()
+plt.show()
+
+print("Test 1:", info1)
+
+# -------------------------------------------------------------------
+# 2) Test pos0 = 0.01 , alpha = 0, unwind
+alpha2 = np.zeros(T1)
+x2, info2 = opt.solve(alpha2, pos0=0.01, imb1_0=0.0, imb2_0=0.0)
+cumsum2 = np.cumsum(x2)
+
+df2 = pd.DataFrame({"minute": np.arange(1, T1+1),
+                    "cumsum_x": cumsum2})
+display_dataframe_to_user("Test 2 – Position cumulée (unwind 0.01)", df2)
+
+plt.figure()
+plt.plot(df2["minute"], df2["cumsum_x"])
+plt.title("Test 2 – Cumsum x (unwind 0.01)")
+plt.xlabel("Minute")
+plt.ylabel("Position cumulée")
+plt.tight_layout()
+plt.show()
+
+print("Test 2:", info2)
