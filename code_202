@@ -1,0 +1,27 @@
+import os
+import pickle
+
+# Set your directory path
+directory = '/path/to/your/directory'
+
+# List all files with full path
+all_files = [os.path.join(directory, f) for f in os.listdir(directory)]
+all_files = [f for f in all_files if os.path.isfile(f)]
+
+# Sort by last modification time (descending)
+all_files.sort(key=os.path.getmtime, reverse=True)
+
+# Take the 400 most recently modified files
+latest_files = all_files[:400]
+
+# Read them using pickle
+data_list = []
+for file in latest_files:
+    try:
+        with open(file, 'rb') as f:
+            data = pickle.load(f)
+            data_list.append(data)
+    except Exception as e:
+        print(f"Error reading {file}: {e}")
+
+# Now data_list holds the deserialized objects
