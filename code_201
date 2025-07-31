@@ -1,0 +1,55 @@
+import numba as nb
+import numpy as np
+
+# … your analytic gradient function body unchanged …
+def _full_cost_new_jac_x(vol, adv, w1, w2, K1, K2, x, nu):
+    n = x.shape[0]
+    imb1 = np.empty(n,      dtype=x.dtype)
+    imb2 = np.empty(n,      dtype=x.dtype)
+    curr1 = curr2 = x.dtype(0)
+    for i in range(n):
+        curr1 = curr1 * w1 + nu[i] * x[i]
+        curr2 = curr2 * w2 + nu[i] * x[i]
+        imb1[i] = curr1
+        imb2[i] = curr2
+
+    imb   = K1 * imb1 + K2 * imb2
+    f_imb = np.sign(imb) * np.sqrt(np.abs(imb))
+    fpr   = np.zeros_like(imb)
+    nz    = imb != 0
+    fpr[nz] = 1.0 / (2.0 * np.sqrt(np.abs(imb[nz])))
+
+    g = np.zeros(n, dtype=x.dtype)
+    for k in range(n):
+        direct = f_imb[k]
+        s = x.dtype(0)
+        for i in range(k, n):
+            coeff = K1 * (w1 ** (i - k)) + K2 * (w2 ** (i - k))
+            s += coeff * x[i] * fpr[i]
+        indirect = nu[k] * s
+        g[k] = direct + indirect
+
+    return adv * np.sqrt(vol) * g
+
+# here’s the Numba-jitted version:
+@nb.jit(
+    [
+      # double‐precision overload
+      nb.float64[:](
+        nb.float64, nb.float64, nb.float64, nb.float64,
+        nb.float64, nb.float64,       # vol, adv, w1, w2, K1, K2
+        nb.float64[:], nb.float64[:]   # x, nu
+      ),
+      # single‐precision overload
+      nb.float32[:](
+        nb.float32, nb.float32, nb.float32, nb.float32,
+        nb.float32, nb.float32,
+        nb.float32[:], nb.float32[:]
+      )
+    ],
+    nopython=True,
+    nogil=True,
+    fastmath=True
+)
+def full_cost_new_jac_x(vol, adv, w1, w2, K1, K2, x, nu):
+    return _full_cost_new_jac_x(vol, adv, w1, w2, K1, K2, x, nu)
