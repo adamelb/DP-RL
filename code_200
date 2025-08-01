@@ -1,0 +1,74 @@
+import numpy as np
+
+def create_buckets(t: int,
+                   total_minutes: int = 390,
+                   max_vars: int = 100,
+                   pre_one_cnt: int = 20,
+                   post_one_cnt: int = 2,
+                   big_bucket: int = 10,
+                   small_bucket: int = 2):
+    """
+    Build a bucket schedule of at most `max_vars` optimisation variables
+    that always
+ 
+        • starts with `t` × 1-min buckets   (already executed part)
+        • then  `pre_one_cnt` × 1-min buckets     (high-precision zone)
+        • then  some 2-min buckets                (medium precision)
+        • then  some 10-min buckets               (low precision)
+        • then  some 2-min buckets                (medium precision again)
+        • ends with `post_one_cnt` × 1-min buckets (un-winding zone)
+ 
+    The whole array must sum to `total_minutes`
+    and never contain more than `max_vars` elements.
+    """
+    if t > max_vars:
+        raise ValueError("t alone already exceeds the variable budget")
+
+    prev = [1] * t                       # minutes already gone
+    remaining = total_minutes - t        # minutes still to trade
+
+    # --- mandatory head/tail blocks -----------------------------------------
+    head_ones  = min(pre_one_cnt, max(0, remaining - post_one_cnt))
+    tail_ones  = post_one_cnt if remaining - head_ones >= post_one_cnt else 0
+
+    base_minutes = head_ones + tail_ones          # minutes already allocated
+    base_vars    = head_ones + tail_ones          # variables already allocated
+
+    rem_minutes  = remaining - base_minutes
+    vars_left    = max_vars - (len(prev) + base_vars)
+
+    # --- choose 10-min & 2-min blocks so that everything fits ----------------
+    # We prefer larger (10-min) buckets – they shrink the variable count fastest.
+    ten_max = min(rem_minutes // big_bucket, vars_left)  # hard upper bound
+
+    found = False
+    for tens in range(ten_max, -1, -1):                   # try big → small
+        minutes_after_tens = rem_minutes - big_bucket * tens
+        vars_after_tens    = vars_left - tens
+
+        # fill the rest with 2-min buckets, if it divides nicely
+        if minutes_after_tens % small_bucket == 0:
+            twos = minutes_after_tens // small_bucket
+            if twos <= vars_after_tens:
+                found = True
+                break
+
+    if not found:
+        raise ValueError("Cannot fit buckets under max_vars constraint")
+
+    # split the 2-min buckets: half before, half after the 10-min zone
+    early_twos = twos // 2
+    late_twos  = twos - early_twos
+
+    middle = (
+        [small_bucket] * early_twos +
+        [big_bucket]  * tens +
+        [small_bucket] * late_twos
+    )
+
+    buckets = prev + [1]*head_ones + middle + [1]*tail_ones
+
+    assert sum(buckets) == total_minutes, "Minute total mismatch"
+    assert len(buckets) <= max_vars,      "Variable budget exceeded"
+
+    return np.array(buckets)
