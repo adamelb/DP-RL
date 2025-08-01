@@ -3,72 +3,79 @@ import numpy as np
 def create_buckets(t: int,
                    total_minutes: int = 390,
                    max_vars: int = 100,
-                   pre_one_cnt: int = 20,
-                   post_one_cnt: int = 2,
-                   big_bucket: int = 10,
-                   small_bucket: int = 2):
+                   pre_one_cnt: int = 20,   # high-precision zone just after “now”
+                   post_one_cnt: int = 2,   # final unwinding minutes
+                   big_bucket: int = 10,    # coarse buckets in the middle
+                   medium_bucket: int = 2,  # medium-precision buckets
+                   odd_bucket: int = 3):    # helper to fix odd remainders
     """
-    Build a bucket schedule of at most `max_vars` optimisation variables
-    that always
- 
-        • starts with `t` × 1-min buckets   (already executed part)
-        • then  `pre_one_cnt` × 1-min buckets     (high-precision zone)
-        • then  some 2-min buckets                (medium precision)
-        • then  some 10-min buckets               (low precision)
-        • then  some 2-min buckets                (medium precision again)
-        • ends with `post_one_cnt` × 1-min buckets (un-winding zone)
- 
-    The whole array must sum to `total_minutes`
-    and never contain more than `max_vars` elements.
+    Build a bucket array such that:
+
+      • The first  t  minutes are already elapsed  →  [1]*t   (not optimised)
+      • Then up to 20 × 1-min buckets for high precision
+      • Then some 2-min, 10-min, (optionally one 3-min) buckets
+      • Ends with 2 × 1-min buckets (or less if <2 min remain)
+
+    – Future buckets (everything after minute t) ≤ 100
+    – Total always exactly 390 minutes
+    – Guaranteed to succeed for every 0 ≤ t ≤ 389
     """
-    if t > max_vars:
-        raise ValueError("t alone already exceeds the variable budget")
+    if not (0 <= t < total_minutes):
+        raise ValueError("t must be between 0 and total_minutes-1")
 
-    prev = [1] * t                       # minutes already gone
-    remaining = total_minutes - t        # minutes still to trade
+    prev = [1] * t                    # elapsed segment – no variables here
+    remaining = total_minutes - t     # minutes still to trade
 
-    # --- mandatory head/tail blocks -----------------------------------------
-    head_ones  = min(pre_one_cnt, max(0, remaining - post_one_cnt))
-    tail_ones  = post_one_cnt if remaining - head_ones >= post_one_cnt else 0
+    # --- mandatory tail -----------------------------------------------------
+    tail_ones = min(post_one_cnt, remaining)
+    remaining -= tail_ones
 
-    base_minutes = head_ones + tail_ones          # minutes already allocated
-    base_vars    = head_ones + tail_ones          # variables already allocated
+    # --- mandatory head -----------------------------------------------------
+    head_ones = min(pre_one_cnt, remaining)
+    remaining -= head_ones
 
-    rem_minutes  = remaining - base_minutes
-    vars_left    = max_vars - (len(prev) + base_vars)
+    # Nothing left?  We're done.
+    if remaining == 0:
+        return np.array(prev + [1]*head_ones + [1]*tail_ones)
 
-    # --- choose 10-min & 2-min blocks so that everything fits ----------------
-    # We prefer larger (10-min) buckets – they shrink the variable count fastest.
-    ten_max = min(rem_minutes // big_bucket, vars_left)  # hard upper bound
+    # How many optimisation variables are still allowed?
+    vars_budget = max_vars - (head_ones + tail_ones)
 
+    # Try to fill the middle with 10-min, 3-min (optional) and 2-min buckets
     found = False
-    for tens in range(ten_max, -1, -1):                   # try big → small
-        minutes_after_tens = rem_minutes - big_bucket * tens
-        vars_after_tens    = vars_left - tens
+    choice = None
+    max_10 = remaining // big_bucket
 
-        # fill the rest with 2-min buckets, if it divides nicely
-        if minutes_after_tens % small_bucket == 0:
-            twos = minutes_after_tens // small_bucket
-            if twos <= vars_after_tens:
+    for tens in range(max_10, -1, -1):               # prefer more 10-minute buckets
+        rem_after_10 = remaining - big_bucket * tens
+        for use_three in (0, 1):                     # add a single 3-min bucket if needed
+            rem = rem_after_10 - use_three * odd_bucket
+            if rem < 0 or rem % medium_bucket:
+                continue
+            twos = rem // medium_bucket
+            if head_ones + tail_ones + tens + twos + use_three <= max_vars:
+                choice = (tens, twos, use_three)
                 found = True
                 break
+        if found:
+            break
 
     if not found:
-        raise ValueError("Cannot fit buckets under max_vars constraint")
+        # Extreme edge-case fallback: lump the whole remainder into one bucket
+        tens, twos, use_three = 0, 0, 0
+        middle = [remaining]
+    else:
+        tens, twos, use_three = choice
+        early_twos = twos // 2
+        late_twos  = twos - early_twos
+        middle = (
+            [medium_bucket] * early_twos +
+            ([odd_bucket] if use_three else []) +
+            [big_bucket]  * tens +
+            [medium_bucket] * late_twos
+        )
 
-    # split the 2-min buckets: half before, half after the 10-min zone
-    early_twos = twos // 2
-    late_twos  = twos - early_twos
-
-    middle = (
-        [small_bucket] * early_twos +
-        [big_bucket]  * tens +
-        [small_bucket] * late_twos
-    )
-
-    buckets = prev + [1]*head_ones + middle + [1]*tail_ones
-
-    assert sum(buckets) == total_minutes, "Minute total mismatch"
-    assert len(buckets) <= max_vars,      "Variable budget exceeded"
-
-    return np.array(buckets)
+    future = [1]*head_ones + middle + [1]*tail_ones
+    assert sum(prev) + sum(future) == total_minutes
+    assert len(future) <= max_vars          # optimisation vars only!
+    return np.array(prev + future)
