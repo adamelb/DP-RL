@@ -1,0 +1,79 @@
+import numpy as np
+
+def dp_two_step(alpha0, vol0, vol1, grid_size=40001, grid_width=5.0):
+    """
+    Dynamic‑programming solution on a discretised position grid.
+
+    Parameters
+    ----------
+    alpha0 : float
+        Alpha at t=0 (mean‑zero AR(1) with rho=0.97, but only the first step matters
+        because we earn no alpha at the final time‑step).
+    vol0, vol1 : float
+        Volatilities (per‑minute) at t=0 and t=1.
+    grid_size : int
+        Number of grid points for the position search.
+    grid_width : float
+        Half‑width of the search interval for positions.
+
+    Returns
+    -------
+    u0_star : float
+        Optimal trade at t=0 (= optimal position at t=1).
+    value_star : float
+        Expected objective value.
+    """
+    # Position grid (pos_1 = u_0, because we start from pos_0 = 0)
+    pos_grid = np.linspace(-grid_width, grid_width, grid_size)
+
+    c0 = np.sqrt(vol0)
+    c1 = np.sqrt(vol1)
+
+    # Terminal minute (t=1): we must unwind → u1 = -pos1, reward = -c1 |u1|^{1.5}
+    V1 = -c1 * np.abs(pos_grid) ** 1.5
+
+    # Minute 0 total reward as a function of pos1
+    total = alpha0 * pos_grid - c0 * np.abs(pos_grid) ** 1.5 + V1
+
+    idx = np.argmax(total)
+    return pos_grid[idx], total[idx]
+
+
+def certainty_equivalence(alpha0, vol0, vol1):
+    """
+    Closed‑form solution of the deterministic convex optimisation that
+    replaces random variables by their expectations.
+
+    Returns
+    -------
+    u0_star : float
+        Optimal trade at t=0 (= optimal position at t=1).
+    value_star : float
+        Expected objective value.
+    """
+    c = np.sqrt(vol0) + np.sqrt(vol1)          # effective impact coefficient
+    u0_star = np.sign(alpha0) * (np.abs(alpha0) / (1.5 * c)) ** 2
+    value_star = alpha0 * u0_star - c * np.abs(u0_star) ** 1.5
+    return u0_star, value_star
+
+
+# Example parameters ----------------------------------------------------------
+alpha0 = 0.05       # instantaneous alpha at t=0
+rho    = 0.97       # AR(1) autocorrelation (only matters for alpha expectations)
+vol0   = 1.0
+vol1   = 1.0
+
+# DP on a grid
+u_dp, v_dp = dp_two_step(alpha0, vol0, vol1)
+
+# Certainty‑equivalent optimisation
+u_ce, v_ce = certainty_equivalence(alpha0, vol0, vol1)
+
+print("Dynamic programming solution")
+print(f"  u0* = {u_dp:.6e},  value = {v_dp:.6e}")
+print("\nCertainty‑equivalent (deterministic) solution")
+print(f"  u0* = {u_ce:.6e},  value = {v_ce:.6e}")
+
+print("\nAbsolute differences:")
+print(f"  |Δu0| = {abs(u_dp - u_ce):.3e}")
+print(f"  |Δvalue| = {abs(v_dp - v_ce):.3e}")
