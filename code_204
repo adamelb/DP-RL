@@ -1,0 +1,65 @@
+import numpy as np
+from scipy.optimize import minimize, minimize_scalar
+from numpy.polynomial.hermite import hermgauss
+
+# ---------- certainty-equivalent (deterministe, 3 pas) ------------------------
+def solve_ce(alpha0, rho, vol, beta, bound=1.0):
+    c = np.sqrt(vol)
+
+    def obj(x):                              # ­ →  minimiser –J
+        u0, u1  = x
+        p2      = u0 + u1
+        return -(alpha0*u0 + rho*alpha0*p2
+                 - c*(abs(u0)**beta + abs(u1)**beta + abs(p2)**beta))
+
+    res = minimize(obj, (0., 0.), method="Powell",
+                   bounds=[(-bound, bound), (-bound, bound)],
+                   options={'maxiter': 200, 'xtol': 1e-12, 'ftol': 1e-12})
+    u0, u1 = res.x
+    return u0, u1, -res.fun
+
+
+# ---------- programmation dynamique 3 pas (incertitude sur α₁) --------------
+def _v1_opt(pos1, alpha1, c, beta, um):
+    f = lambda u: -(alpha1*(pos1 + u)
+                    - c*(abs(u)**beta + abs(pos1 + u)**beta))
+    return -minimize_scalar(f, bracket=(-um, um), method="Brent").fun
+
+
+def solve_dp(alpha0, rho, sigma, vol, beta,
+             bound=1.0, n_pos=201, n_gh=15):
+    c          = np.sqrt(vol)
+    z, w       = hermgauss(n_gh)              # Gauss-Hermite nodes & weights
+    z          = z * np.sqrt(2.)              # N(0,1)  →  μ+σ√2 z
+    w         /= np.sqrt(np.pi)
+
+    pos_grid   = np.linspace(-bound, bound, n_pos)
+    best_val   = -1e30
+    best_u0    = 0.
+
+    for p1 in pos_grid:
+        ev1 = 0.
+        for zi, wi in zip(z, w):
+            a1  = rho*alpha0 + sigma*zi
+            ev1 += wi * _v1_opt(p1, a1, c, beta, bound)
+        val  = alpha0*p1 - c*abs(p1)**beta + ev1
+        if val > best_val:
+            best_val, best_u0 = val, p1
+    return best_u0, best_val
+
+
+# ------------------------- exemple numériquement parlant ---------------------
+if __name__ == "__main__":
+    # paramètres qui soulignent la différence DP / CE
+    alpha0   = 0.5
+    rho      = 0.90
+    sigma    = 0.50
+    vol      = 0.10
+    beta     = 1.0        # tester 1, 1.5, 2, …
+
+    u0_ce, u1_ce, v_ce = solve_ce(alpha0, rho, vol, beta)
+    u0_dp, v_dp        = solve_dp(alpha0, rho, sigma, vol, beta)
+
+    print("certainty-equivalent :", u0_ce, u1_ce, v_ce)
+    print("DP (adaptatif)      :", u0_dp,          v_dp)
+    print("écart               :", v_dp - v_ce)
