@@ -1,0 +1,109 @@
+import numpy as np
+
+def optimal_u1_given_pos_alpha(pos1, alpha1, c, u_grid):
+    """
+    For *one* pos1 and vector of alpha1 values, compute the optimal u1 and value
+    by brute‑force on a predefined grid (fast enough for demo sizes).
+
+    Returns
+    -------
+    val : ndarray, shape (len(alpha1),)
+        Optimal value for each alpha1 (including t=1 & 2 rewards).
+    """
+    # broadcast: alpha1[:,None] vs u_grid[None,:]
+    pos2 = pos1 + u_grid[None, :]          # shape (n_alpha, n_u)
+    costs = c * (np.abs(u_grid)**1.5 + np.abs(pos2)**1.5)
+    vals  = alpha1[:, None] * pos2 - costs
+    # max over axis 1
+    best = np.max(vals, axis=1)
+    return best
+
+def dp_three_step(alpha0, rho, sigma_eta, vol=1.0,
+                  pos_grid_size=201, pos_grid_width=1.0,
+                  u_grid_size=201, u_grid_width=1.0,
+                  n_alpha_samples=101, seed=0):
+    """
+    3‑step DP with stochastic alpha_1 ~ N(rho*alpha0, sigma_eta^2).
+
+    alpha_2 has no reward. Vol is constant, c=sqrt(vol).
+
+    Returns
+    -------
+    u0_star : float
+        Optimal initial trade.
+    value_star : float
+        Expected objective value.
+    """
+    rng = np.random.default_rng(seed)
+    c = np.sqrt(vol)
+
+    # grids
+    pos1_grid = np.linspace(-pos_grid_width, pos_grid_width, pos_grid_size)
+    u1_grid   = np.linspace(-u_grid_width,  u_grid_width,  u_grid_size)
+
+    # Monte‑Carlo samples of alpha1 (known at t=1)
+    alpha1_samples = rho*alpha0 + sigma_eta * rng.standard_normal(n_alpha_samples)
+
+    # Pre‑compute expected V1 for each pos1
+    V1_expect = np.zeros(pos1_grid.shape)
+    for i, p1 in enumerate(pos1_grid):
+        vals = optimal_u1_given_pos_alpha(p1, alpha1_samples, c, u1_grid)
+        V1_expect[i] = vals.mean()  # expectation over alpha1
+
+    # t=0: choose u0 (=pos1) on same grid
+    u0_candidates = pos1_grid
+    V0 = alpha0 * u0_candidates - c * np.abs(u0_candidates)**1.5 + V1_expect
+    idx = np.argmax(V0)
+    return u0_candidates[idx], V0[idx]
+
+def certainty_equivalence(alpha0, rho, vol=1.0,
+                          pos_grid_size=201, pos_grid_width=1.0,
+                          u1_grid_size=201, u1_grid_width=1.0):
+    """
+    Deterministic 3‑step optimisation where alpha1 is replaced by its expectation ρ*alpha0.
+    """
+    c = np.sqrt(vol)
+    m = rho * alpha0  # expected alpha1
+
+    u0_grid = np.linspace(-pos_grid_width, pos_grid_width, pos_grid_size)
+    u1_grid = np.linspace(-u1_grid_width, u1_grid_width, u1_grid_size)
+
+    best_val = -np.inf
+    best_pair = (0.0, 0.0)
+    for u0 in u0_grid:
+        for u1 in u1_grid:
+            pos2 = u0 + u1
+            val = alpha0*u0 + m*pos2 - c*(np.abs(u0)**1.5 + np.abs(u1)**1.5 + np.abs(pos2)**1.5)
+            if val > best_val:
+                best_val = val
+                best_pair = (u0, u1)
+    return best_pair, best_val
+
+
+# ------------------------------ demo -----------------------------------------
+alpha0 = 0.05
+rho    = 0.97
+sigma_eta = 0.02  # volatility of the alpha process
+
+u0_dp, v_dp = dp_three_step(alpha0, rho, sigma_eta,
+                            pos_grid_size=161,      # keep runtime small
+                            pos_grid_width=0.5,
+                            u_grid_size=161,
+                            u_grid_width=0.5,
+                            n_alpha_samples=201)
+
+(u0_ce, u1_ce), v_ce = certainty_equivalence(alpha0, rho,
+                                             pos_grid_size=161,
+                                             pos_grid_width=0.5,
+                                             u1_grid_size=161,
+                                             u1_grid_width=0.5)
+
+print("3‑step DP (stochastic, adaptive)")
+print(f"  u0* = {u0_dp:.6e},  value = {v_dp:.6e}")
+
+print("\nCertainty ‑ equivalent (deterministic, non‑adaptive)")
+print(f"  u0* = {u0_ce:.6e},  u1* = {u1_ce:.6e},  value = {v_ce:.6e}")
+
+print("\nGap due to alpha uncertainty:")
+print(f"  |Δu0|    = {abs(u0_dp - u0_ce):.3e}")
+print(f"  |Δvalue| = {abs(v_dp - v_ce):.3e}")
