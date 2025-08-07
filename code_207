@@ -1,0 +1,40 @@
+import numpy as np
+from scipy.optimize import minimize
+
+def solve_ce(alpha0, rho, vol, beta, bound=1.0):
+    c = np.sqrt(vol)
+    def loss(x):
+        u0, u1 = x
+        p2 = u0 + u1
+        return -(alpha0*u0 + rho*alpha0*p2
+                 - c*(abs(u0)**beta + abs(u1)**beta + abs(p2)**beta))
+    res = minimize(loss, [0, 0], method='Powell',
+                   bounds=[(-bound, bound), (-bound, bound)],
+                   options={'maxiter':200, 'xtol':1e-12, 'ftol':1e-12})
+    u0, u1 = res.x
+    return u0, u1, -res.fun
+
+def solve_dp(alpha0, rho, sigma, vol, beta,
+             bound=1.0, n_grid=201, n_samples=1000):
+    c = np.sqrt(vol)
+    pos1 = np.linspace(-bound, bound, n_grid)
+    u1   = np.linspace(-bound, bound, n_grid)
+    pos2 = pos1[:, None] + u1[None, :]
+    alpha1 = rho*alpha0 + sigma * np.random.randn(n_samples)
+    Q = np.zeros((n_grid, n_grid))
+    for a in alpha1:
+        Q += a * pos2 - c * (abs(u1)[None, :]**beta + abs(pos2)**beta)
+    Q /= n_samples
+    u1_idx = Q.argmax(axis=1)
+    V1 = Q.max(axis=1)
+    V0 = alpha0*pos1 - c * abs(pos1)**beta + V1
+    i0 = V0.argmax()
+    return pos1[i0], u1[u1_idx[i0]], V0[i0]
+
+if __name__ == "__main__":
+    alpha0, rho, sigma, vol, beta = 0.5, 0.90, 0.50, 0.10, 1.0
+    u0_ce, u1_ce, v_ce = solve_ce(alpha0, rho, vol, beta)
+    u0_dp, u1_dp, v_dp = solve_dp(alpha0, rho, sigma, vol, beta)
+    print("CE :", u0_ce, u1_ce, v_ce)
+    print("DP :", u0_dp, u1_dp, v_dp)
+    print("Δval:", v_dp - v_ce)
