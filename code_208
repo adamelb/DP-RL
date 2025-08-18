@@ -1,0 +1,133 @@
+import torch
+import torch.nn as nn
+from itertools import combinations
+
+class QuadraticExpansion(nn.Module):
+    """
+    Construit toutes les features quadratiques d'ordre 2 :
+      - termes au carré x_i^2
+      - termes croisés x_i * x_j pour i < j
+    Optionnel: inclure les termes linéaires et un biais explicite.
+    """
+    def __init__(self, in_features, include_linear=False, include_bias=False):
+        super().__init__()
+        self.in_features = in_features
+        self.include_linear = include_linear
+        self.include_bias = include_bias
+
+        # indices pour les termes croisés
+        self.cross_idx = list(combinations(range(in_features), 2))
+
+        # nombre total de features quadratiques
+        self.n_squares = in_features
+        self.n_cross = len(self.cross_idx)
+        extra = (in_features if include_linear else 0) + (1 if include_bias else 0)
+        self.out_features = self.n_squares + self.n_cross + extra
+
+    def forward(self, x):  # x: (B, d)
+        squares = x * x  # (B, d)
+        if self.n_cross > 0:
+            cross = [x[:, i] * x[:, j] for (i, j) in self.cross_idx]  # liste de (B,)
+            cross = torch.stack(cross, dim=1)  # (B, n_cross)
+        else:
+            cross = x.new_zeros((x.size(0), 0))
+
+        feats = [squares, cross]
+        if self.include_linear:
+            feats.append(x)  # (B, d)
+        if self.include_bias:
+            feats.append(torch.ones(x.size(0), 1, device=x.device, dtype=x.dtype))  # (B, 1)
+
+        return torch.cat(feats, dim=1)  # (B, out_features)
+
+    def monomial_names(self):
+        names = [f"x{i+1}^2" for i in range(self.in_features)]
+        names += [f"x{i+1}*x{j+1}" for (i, j) in self.cross_idx]
+        if self.include_linear:
+            names += [f"x{i+1}" for i in range(self.in_features)]
+        if self.include_bias:
+            names += ["1"]
+        return names
+
+
+class MLP(nn.Module):
+    def __init__(self, in_features, hidden=(64, 64), out_features=1, act=nn.ReLU):
+        super().__init__()
+        layers = []
+        d = in_features
+        for h in hidden:
+            layers += [nn.Linear(d, h), act()]
+            d = h
+        layers += [nn.Linear(d, out_features)]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class QuadPlusNoise(nn.Module):
+    """
+    y(x) = sum_k a_k * phi_k(x)  +  epsilon(x)
+           ^^^^^^^^^^^^^^^^^^^     ^^^^^^^^^^^
+           partie quadratique       MLP bruit / résidu
+
+    - La partie quadratique est purement linéaire sur l'expansion des monômes d'ordre 2
+      (interprétable : on peut lire les coefficients a_k).
+    - epsilon(x) est un petit MLP (par défaut sortie scalaire).
+    - Option epsilon_zero_mean: on centre epsilon sur le batch en entraînement
+      pour l'encourager à modéliser un bruit de moyenne ~0.
+    """
+    def __init__(self, in_features, hidden_eps=(64, 64),
+                 include_linear=False, include_bias=False,
+                 epsilon_zero_mean=True):
+        super().__init__()
+        self.expander = QuadraticExpansion(in_features,
+                                           include_linear=include_linear,
+                                           include_bias=include_bias)
+        self.alpha = nn.Linear(self.expander.out_features, 1, bias=False)  # a_k
+        self.eps_net = MLP(in_features, hidden=hidden_eps, out_features=1)
+        self.epsilon_zero_mean = epsilon_zero_mean
+
+    @property
+    def monomial_names(self):
+        return self.expander.monomial_names()
+
+    def forward(self, x, return_parts=False):
+        # Partie quadratique
+        q = self.expander(x)                  # (B, m)
+        quad = self.alpha(q)                  # (B, 1)
+
+        # Epsilon
+        eps = self.eps_net(x)                 # (B, 1)
+        if self.epsilon_zero_mean and self.training:
+            eps = eps - eps.mean(dim=0, keepdim=True)
+
+        y = quad + eps                        # (B, 1)
+        if return_parts:
+            return y, quad, eps
+        return y
+
+    def coefficients(self):
+        """
+        Renvoie les coefficients a_k (dans le même ordre que monomial_names).
+        Utile pour l'interprétation une fois entraîné.
+        """
+        with torch.no_grad():
+            return self.alpha.weight.squeeze(0).detach().cpu()  # (m,)
+
+
+# --- Exemple d'utilisation ---
+if __name__ == "__main__":
+    d = 3  # nombre de features (x1, x2, x3)
+    model = QuadPlusNoise(in_features=d,
+                          hidden_eps=(64, 64),
+                          include_linear=False,  # si tu veux ajouter des termes linéaires
+                          include_bias=False,    # si tu veux un terme constant
+                          epsilon_zero_mean=True)
+
+    x = torch.randn(5, d)         # batch de 5 samples
+    y_pred, quad, eps = model(x, return_parts=True)
+    print("y_pred:", y_pred.shape)  # (5, 1)
+    print("quad :", quad.shape)     # (5, 1)
+    print("eps  :", eps.shape)      # (5, 1)
+    print("monômes:", model.monomial_names)
