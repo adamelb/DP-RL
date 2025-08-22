@@ -1,0 +1,277 @@
+# Dynamic Programming for Unwind with AR(1) signal
+# Author: ChatGPT for Hamza Majioud
+# Language: French (comments & docstrings)
+#
+# Ce script résout un problème de contrôle optimal discret (DP) à pas d'une minute, horizon T.
+# État: (q_t, α_t) avec q_t = inventaire restant à vendre (doit être 0 à T), α_t suit un AR(1).
+# Action: x_t ∈ {0, dq, 2*dq, …, q_t} quantité vendue à t.
+# Récompense instantanée: R(α_t, x_t) = α_t*(p + x_t) - λ * x_t^{1.5}
+# Transition: q_{t+1} = q_t - x_t ; α_{t+1} = ρ α_t + sqrt(1-ρ^2) * ε_{t+1}, ε ~ N(0,1)
+# Terminal (unwind): q_T = 0 obligatoire (sinon grosse pénalité).
+#
+# Le solveur renvoie la valeur et la règle de décision optimale à chaque minute.
+#
+# Utilisation rapide (exemple à la fin du fichier):
+#   res = solve_unwind_dp()
+#   x_star = decision_rule(res, t=0, q=20.0, alpha=0.3)  # quantité à vendre maintenant
+#
+# Vous pouvez ajuster T, Q0, ρ, λ, p, granularités via solve_unwind_dp(...).
+
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+import pandas as pd
+from typing import Dict, Any
+
+# ====== Utils Tauchen pour AR(1) ======
+def _norm_cdf(x: np.ndarray) -> np.ndarray:
+    return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0))) if np.isscalar(x) else 0.5 * (1.0 + np.erf(x / np.sqrt(2.0)))
+
+def tauchen_ar1(rho: float, sigma_eps: float, N: int = 41, m: float = 3.0):
+    """
+    Approximation de Tauchen pour un AR(1): a_{t+1} = rho*a_t + eps_t, eps ~ N(0, sigma_eps^2).
+    Renvoie (grille des alphas, matrice de transition P (N x N)).
+    La variance stationnaire vaut sigma_eps^2 / (1 - rho^2).
+    """
+    sigma_y = sigma_eps / np.sqrt(max(1e-12, 1.0 - rho**2))  # écart-type stationnaire
+    a_max = m * sigma_y
+    a_min = -a_max
+    grid = np.linspace(a_min, a_max, N)
+    step = (a_max - a_min) / (N - 1)
+
+    P = np.zeros((N, N))
+    for i in range(N):
+        for j in range(N):
+            if j == 0:
+                z = (grid[0] - rho * grid[i] + step / 2.0) / sigma_eps
+                P[i, j] = _norm_cdf(z)
+            elif j == N - 1:
+                z = (grid[-1] - rho * grid[i] - step / 2.0) / sigma_eps
+                P[i, j] = 1.0 - _norm_cdf(z)
+            else:
+                z_upper = (grid[j] - rho * grid[i] + step / 2.0) / sigma_eps
+                z_lower = (grid[j] - rho * grid[i] - step / 2.0) / sigma_eps
+                P[i, j] = _norm_cdf(z_upper) - _norm_cdf(z_lower)
+    # Stabilisation numérique
+    P /= P.sum(axis=1, keepdims=True)
+    return grid, P
+
+# ====== Solveur DP ======
+def solve_unwind_dp(
+    T: int = 150,
+    Q0: float = 50.0,
+    dq: float = 1.0,
+    rho: float = 0.90,
+    lam: float = 0.10,
+    p: float = 0.0,
+    N_alpha: int = 41,
+    m: float = 3.0,
+    beta: float = 1.0,
+    penalty: float = 1e12,
+    random_seed: int = 0
+) -> Dict[str, Any]:
+    """
+    Résout le DP d'unwind.
+    - T: horizon (en minutes)
+    - Q0: inventaire initial à vendre
+    - dq: pas d'inventaire / granularité des actions
+    - rho: coefficient AR(1) pour α_t
+    - lam: λ dans la pénalité de trading λ * x^{1.5}
+    - p: niveau de prix (constante ici, mais pourrait être interprété comme spread/valeur exogène)
+    - N_alpha: # de points dans la grille de α
+    - m: demi-étendue de la grille en multiples d'écart-type stationnaire
+    - beta: facteur d'actualisation (1 par défaut en minutes)
+    - penalty: pénalité si q_T != 0
+    Retourne dict avec grilles, matrice P, valeurs, et politique (actions optimales).
+    """
+    np.random.seed(random_seed)
+
+    # Innovation telle que spécifiée: sqrt(1 - rho^2) * N(0,1)
+    sigma_eps = np.sqrt(max(0.0, 1.0 - rho**2))
+    alpha_grid, P = tauchen_ar1(rho, sigma_eps, N=N_alpha, m=m)
+
+    # Grille d'inventaire (assure Q0 multiple de dq)
+    Q0_units = int(round(Q0 / dq))
+    q_grid = np.arange(Q0_units + 1) * dq
+    Nq = len(q_grid)
+
+    # Pré-calcul de la récompense instantanée pour toutes (alpha, action_units)
+    a_units = np.arange(Nq)  # 0..Q0_units
+    x_grid = a_units * dq
+    # r(α, x) = α*(p + x) - λ x^{1.5}
+    R_inst = np.outer(alpha_grid, p + x_grid) - lam * (x_grid ** 1.5)  # shape (N_alpha, Nq)
+
+    # Tenseur des valeurs: V[t, q_idx, alpha_idx]
+    V = np.empty((T + 1, Nq, N_alpha), dtype=np.float64)
+    V.fill(-penalty)
+    V[T, 0, :] = 0.0  # valeur 0 si unwind fait
+    # politique: nb d'unités à vendre (entier de 0 à q_idx)
+    policy_units = np.zeros((T, Nq, N_alpha), dtype=np.int16)
+
+    # Rétro-induction
+    for t in range(T - 1, -1, -1):
+        # EV[q, j] = E[V_{t+1}(q, α_{t+1}) | α_t = α_j] = sum_k V_{t+1}(q, k) * P[j, k]
+        EV = V[t + 1] @ P.T  # shape (Nq, N_alpha)
+
+        # Pour chaque niveau d'inventaire, on considère actions 0..q_units
+        for qi in range(Nq):
+            # sous-ensembles des actions possibles
+            possible_units = np.arange(qi + 1)  # 0..qi
+            # récompenses instantanées correspondantes: shape (qi+1, N_alpha)
+            r_sub = R_inst[:, possible_units].T  # (qi+1, N_alpha)
+            # états suivants en inventaire
+            q_next_idx = qi - possible_units  # (qi+1,)
+            EV_sub = EV[q_next_idx, :]        # (qi+1, N_alpha)
+            cand = r_sub + beta * EV_sub      # (qi+1, N_alpha)
+
+            # max sur les actions (ligne)
+            best_a_idx = np.argmax(cand, axis=0)        # (N_alpha,)
+            best_val = cand[best_a_idx, np.arange(N_alpha)]
+
+            V[t, qi, :] = best_val
+            policy_units[t, qi, :] = possible_units[best_a_idx]
+
+    return {
+        "T": T,
+        "dq": dq,
+        "Q0": Q0_units * dq,
+        "q_grid": q_grid,
+        "rho": rho,
+        "lam": lam,
+        "p": p,
+        "alpha_grid": alpha_grid,
+        "P": P,
+        "V": V,
+        "policy_units": policy_units,
+        "beta": beta,
+    }
+
+def decision_rule(result: Dict[str, Any], t: int, q: float, alpha: float) -> float:
+    """
+    Donne la quantité optimale x*_t à vendre (en unités réelles) pour (t, q, alpha) via plus proches voisins.
+    """
+    T = result["T"]
+    dq = result["dq"]
+    q_grid = result["q_grid"]
+    alpha_grid = result["alpha_grid"]
+    policy_units = result["policy_units"]
+
+    if not (0 <= t < T):
+        raise ValueError("t doit être dans [0, T-1].")
+    # clamp q sur la grille
+    qi = int(np.clip(round(q / dq), 0, len(q_grid) - 1))
+    # alpha idx
+    ai = int(np.clip(np.abs(alpha_grid - alpha).argmin(), 0, len(alpha_grid) - 1))
+    a_units = int(policy_units[t, qi, ai])
+    return a_units * dq
+
+def simulate_policy(result: Dict[str, Any], alpha0: float, Q0: float = None, seed: int = 0) -> Dict[str, Any]:
+    """
+    Simule un chemin (q_t, α_t, x_t) en appliquant la politique optimale.
+    """
+    rng = np.random.default_rng(seed)
+    T = result["T"]
+    dq = result["dq"]
+    q_grid = result["q_grid"]
+    alpha_grid = result["alpha_grid"]
+    P = result["P"]
+    policy_units = result["policy_units"]
+
+    # init
+    if Q0 is None:
+        q_units = int(round(result["Q0"] / dq))
+    else:
+        q_units = int(round(Q0 / dq))
+
+    # α index initial
+    ai = int(np.clip(np.abs(alpha_grid - alpha0).argmin(), 0, len(alpha_grid) - 1))
+
+    q_hist = np.zeros(T + 1)
+    a_hist = np.zeros(T)
+    alpha_hist = np.zeros(T + 1)
+
+    q_hist[0] = q_units * dq
+    alpha_hist[0] = alpha_grid[ai]
+
+    for t in range(T):
+        a_units = int(policy_units[t, q_units, ai])
+        a_hist[t] = a_units * dq
+        q_units = q_units - a_units
+        q_hist[t + 1] = q_units * dq
+
+        # tirer α_{t+1}
+        probs = P[ai, :]
+        ai = int(rng.choice(len(alpha_grid), p=probs))
+        alpha_hist[t + 1] = alpha_grid[ai]
+
+    return {"q": q_hist, "alpha": alpha_hist, "x": a_hist}
+
+# ====== Démo courte ======
+if __name__ == "__main__":
+    # Paramètres défauts proposés
+    res = solve_unwind_dp(
+        T=150,     # minutes
+        Q0=50.0,   # inventaire initial
+        dq=1.0,
+        rho=0.90,
+        lam=0.10,
+        p=0.0,
+        N_alpha=41,
+        m=3.0,
+        beta=1.0
+    )
+    # Visualisation: action optimale à t=0 pour différents q (fractions)
+    t_show = 0
+    qs_to_show = [50.0, 25.0, 10.0, 5.0, 1.0]
+    data = []
+    for q in qs_to_show:
+        xs = []
+        for a in res["alpha_grid"]:
+            xs.append(decision_rule(res, t=t_show, q=q, alpha=a))
+        data.append(xs)
+    df = pd.DataFrame(
+        np.array(data),
+        index=[f"q={int(q)}" for q in qs_to_show],
+        columns=[f"{a:.2f}" for a in res["alpha_grid"]]
+    )
+    # Affiche un aperçu tableau décisionnel (x* en unités) pour t=0
+    from caas_jupyter_tools import display_dataframe_to_user
+    display_dataframe_to_user("Règle de décision (t=0): x* en fonction de α et q", df)
+
+    # Courbe d'une trajectoire simulée
+    sim = simulate_policy(res, alpha0=0.0, seed=42)
+    plt.figure()
+    plt.plot(sim["q"])
+    plt.title("Inventaire restant au cours du temps (simulation de la politique)")
+    plt.xlabel("Minute t")
+    plt.ylabel("q_t")
+    plt.show()
+
+    plt.figure()
+    plt.plot(sim["x"])
+    plt.title("Quantité vendue x_t (simulation)")
+    plt.xlabel("Minute t")
+    plt.ylabel("x_t")
+    plt.show()
+
+    # Sauvegarde du module pour réutilisation
+    with open("/mnt/data/dp_unwind.py", "w", encoding="utf-8") as f:
+        import inspect
+        f.write(inspect.getsource(_norm_cdf))
+        f.write("\n")
+        f.write(inspect.getsource(tauchen_ar1))
+        f.write("\n")
+        f.write(inspect.getsource(solve_unwind_dp))
+        f.write("\n")
+        f.write(inspect.getsource(decision_rule))
+        f.write("\n")
+        f.write(inspect.getsource(simulate_policy))
+        f.write("\n")
+        f.write("""
+# Exemple d'utilisation
+if __name__ == "__main__":
+    res = solve_unwind_dp(T=150, Q0=50.0, dq=1.0, rho=0.90, lam=0.10, p=0.0, N_alpha=41)
+    print("Exemple: x* à t=0, q=20, alpha=0.3 ->", decision_rule(res, t=0, q=20.0, alpha=0.3))
+""")
+
+    print("Fichier exporté: /mnt/data/dp_unwind.py")
