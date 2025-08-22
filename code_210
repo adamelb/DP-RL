@@ -1,0 +1,135 @@
+# DP simple et clair : Q(t, p, alpha, x) avec unwind à T
+# - Grilles: p ∈ [-1,1], x ∈ [-1,1], alpha ∈ [-2,2]
+# - Dynamique: p' = p + x (on interdit de sortir de [-1,1])
+#              alpha' = rho*alpha + sqrt(1-rho^2)*N(0,1) (transition par Monte Carlo)
+# - Récompense: R = alpha * (p + x) - lam * |x|^{1.5}
+# - Terminal: Q_T(p, x=-p) = 0 ; Q_T(p, x≠-p) = -100
+# - Récursion: Q_t = R + beta * E[ max_{x'} Q_{t+1}(p', alpha', x') ]
+#
+# Le code ci-dessous calcule la matrice Q complète puis expose une règle greedy (argmax sur x).
+
+import numpy as np
+
+def build_grids(Np=41, Na=41, Nx=41):
+    p_grid = np.linspace(-1.0, 1.0, Np)
+    x_grid = np.linspace(-1.0, 1.0, Nx)
+    a_grid = np.linspace(-2.0, 2.0, Na)
+    return p_grid, a_grid, x_grid
+
+def alpha_transition_matrix(a_grid, rho=0.9, n_mc=5000, seed=0):
+    # Monte Carlo: pour chaque alpha_i, on simule n_mc alpha_{t+1} et on bucketise sur la grille
+    rng = np.random.default_rng(seed)
+    Na = len(a_grid)
+    P = np.zeros((Na, Na), dtype=float)
+    step = (a_grid[-1] - a_grid[0]) / (Na - 1)
+    inv_step = 1.0 / step
+    a0 = a_grid[0]
+    sigma = np.sqrt(max(0.0, 1.0 - rho**2))
+    for i in range(Na):
+        eps = rng.normal(size=n_mc)
+        a_next = rho * a_grid[i] + sigma * eps
+        # index du plus proche point de grille
+        idx = np.rint((a_next - a0) * inv_step).astype(int)
+        idx = np.clip(idx, 0, Na-1)
+        counts = np.bincount(idx, minlength=Na)
+        P[i, :] = counts / counts.sum()
+    return P
+
+def compute_rewards(p_grid, a_grid, x_grid, lam=0.1):
+    # R(p, alpha, x) = alpha * (p + x) - lam * |x|^{1.5}
+    P, A, X = np.meshgrid(p_grid, a_grid, x_grid, indexing="ij")
+    R = A * (P + X) - lam * np.abs(X) ** 1.5
+    return R  # shape (Np, Na, Nx)
+
+def dp_q_matrix(T=100, rho=0.9, lam=0.1, beta=1.0, 
+                Np=41, Na=41, Nx=41, n_mc=5000, seed=0, penalty=-100.0):
+    p_grid, a_grid, x_grid = build_grids(Np, Na, Nx)
+    # transitions alpha par MC
+    P_alpha = alpha_transition_matrix(a_grid, rho=rho, n_mc=n_mc, seed=seed)
+    # récompense immédiate
+    R = compute_rewards(p_grid, a_grid, x_grid, lam=lam)
+
+    # mapping p' = p + x -> index sur la grille p
+    step_p = (p_grid[-1] - p_grid[0]) / (Np - 1)
+    inv_step_p = 1.0 / step_p
+    p0 = p_grid[0]
+    # index p' et masque d'actions valides (on interdit de sortir de [-1,1])
+    P_next_idx = np.empty((Np, Nx), dtype=int)
+    valid = np.ones((Np, Nx), dtype=bool)
+    for i in range(Np):
+        p = p_grid[i]
+        pp = p + x_grid  # vecteur p' pour toutes actions x
+        valid[i, :] = (pp >= -1.0) & (pp <= 1.0)
+        idx = np.rint((np.clip(pp, -1.0, 1.0) - p0) * inv_step_p).astype(int)
+        idx = np.clip(idx, 0, Np-1)
+        P_next_idx[i, :] = idx
+
+    # Q-matrix: Q[t, p, alpha, x]
+    Q = np.empty((T+1, Np, Na, Nx), dtype=float)
+    Q.fill(penalty)  # valeur par défaut
+
+    # Terminal: unwind forcé -> x = -p (attention: il faut que grilles p et x soient symétriques mêmes pas)
+    # Si Nx == Np et mêmes bornes, l'index de -p est j = (Np-1) - i
+    if (Np == Nx) and (abs(p_grid[0] + 1.0) < 1e-12) and (abs(p_grid[-1] - 1.0) < 1e-12) \
+       and (abs(x_grid[0] + 1.0) < 1e-12) and (abs(x_grid[-1] - 1.0) < 1e-12):
+        for i in range(Np):
+            j_unwind = (Np - 1) - i
+            Q[T, i, :, :] = penalty
+            Q[T, i, :, j_unwind] = 0.0
+    else:
+        # Si les grilles diffèrent, on prend l'action la plus proche de -p
+        for i in range(Np):
+            j_unwind = np.argmin(np.abs(x_grid + p_grid[i]))
+            Q[T, i, :, :] = penalty
+            Q[T, i, :, j_unwind] = 0.0
+
+    # Backward
+    for t in range(T-1, -1, -1):
+        # Valeur continuation V_{t+1}(p, alpha) = max_x Q[t+1, p, alpha, x]
+        V_next = Q[t+1].max(axis=2)  # (Np, Na)
+        # Pour chaque alpha courant (ligne de P_alpha), on calcule l'espérance sur alpha'
+        for ai in range(Na):
+            # S[p] = E_{alpha'|alpha=ai}[ V_next(p, alpha') ]
+            S = V_next @ P_alpha[ai]  # (Np,)
+            # Étendre sur actions via mapping p' = p+x
+            EV = S[P_next_idx]        # (Np, Nx)
+            Q[t, :, ai, :] = R[:, ai, :] + beta * EV
+        # Invalider les actions qui sortent de la borne en p
+        Q[t, ~valid] = -1e9  # très négatif pour écarter
+
+    return {
+        "Q": Q,                 # Q[t, p, alpha, x]
+        "p_grid": p_grid,
+        "a_grid": a_grid,
+        "x_grid": x_grid,
+        "P_alpha": P_alpha,
+        "valid": valid
+    }
+
+def greedy_policy(Q_pack):
+    # Politique gloutonne: argmax_x Q[t, p, alpha, x]
+    Q = Q_pack["Q"]
+    x_grid = Q_pack["x_grid"]
+    x_idx = Q.argmax(axis=3)  # (T+1, Np, Na)
+    return x_grid[x_idx]      # même shape
+
+# ====== Démo courte ======
+if __name__ == "__main__":
+    res = dp_q_matrix(T=100, rho=0.95, lam=0.1, beta=1.0, Np=41, Na=41, Nx=41, n_mc=8000, seed=1)
+    Q = res["Q"]
+    print("Q shape:", Q.shape)  # (T+1, Np, Na, Nx)
+    pol = greedy_policy(res)
+    print("Politique greedy shape:", pol.shape)
+    # Exemple: action optimale au début t=0, pour p=0.2 (~index), alpha=0.5
+    p_idx = np.argmin(np.abs(res["p_grid"] - 0.2))
+    a_idx = np.argmin(np.abs(res["a_grid"] - 0.5))
+    x_star = pol[0, p_idx, a_idx]
+    print("x* (t=0, p≈0.2, alpha≈0.5) =", float(x_star))
+
+# Export du fichier prêt à l'emploi
+code_text = open(__file__, 'r', encoding='utf-8').read() if '__file__' in globals() else None
+path = "/mnt/data/simple_dp_q.py"
+if code_text:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(code_text)
+    print("Fichier exporté:", path)
