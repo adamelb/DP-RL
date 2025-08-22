@@ -1,0 +1,35 @@
+import numpy as np
+from scipy.optimize import minimize
+
+def certainty_equiv_policy_step(p, alpha, rho, lam, H=50):
+    """
+    Optimisation de type certainty equivalence.
+    Renvoie le vecteur x_opt et la valeur de l'objectif.
+    """
+    # trajectoire déterministe de alpha
+    alpha_path = np.array([ (rho**h)*alpha for h in range(H) ])
+
+    # objectif à maximiser (on met signe - pour minimizer)
+    def obj(x):
+        p_path = np.cumsum(np.concatenate([[p], x]))[:-1]  # inventaire avant chaque trade
+        reward = alpha_path * (p_path + x) - lam * np.abs(x)**1.5
+        return -reward.sum()
+
+    # contrainte de unwind terminal
+    cons = {"type":"eq", "fun": lambda x: p + x.sum()}
+
+    # init: répartir linéairement
+    x0 = -p/H * np.ones(H)
+
+    res = minimize(obj, x0, constraints=[cons])
+    return res.x, -res.fun
+
+# Exemple d'utilisation:
+p0 = 5.0
+alpha0 = 0.8
+rho = 0.95
+lam = 0.1
+H = 20
+
+x_opt, val = certainty_equiv_policy_step(p0, alpha0, rho, lam, H)
+print("Première action optimale:", x_opt[0], " ; Valeur totale:", val)
