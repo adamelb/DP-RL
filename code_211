@@ -1,0 +1,158 @@
+# Re-définition rapide des fonctions DP (au cas où le module n'est pas présent),
+# puis simulation d'un chemin alpha et tracé de la reward cumulée.
+
+import numpy as np, matplotlib.pyplot as plt, pandas as pd
+from caas_jupyter_tools import display_dataframe_to_user
+
+def build_grids(Np=41, Na=41, Nx=41):
+    p_grid = np.linspace(-1.0, 1.0, Np)
+    a_grid = np.linspace(-2.0, 2.0, Na)
+    x_grid = np.linspace(-1.0, 1.0, Nx)
+    return p_grid, a_grid, x_grid
+
+def alpha_transition_matrix(a_grid, rho=0.9, n_mc=5000, seed=0):
+    rng = np.random.default_rng(seed)
+    Na = len(a_grid)
+    P = np.zeros((Na, Na))
+    step = (a_grid[-1] - a_grid[0]) / (Na - 1)
+    inv_step = 1.0 / step
+    a0 = a_grid[0]
+    sigma = np.sqrt(max(0.0, 1.0 - rho**2))
+    for i in range(Na):
+        a_next = rho * a_grid[i] + sigma * rng.normal(size=n_mc)
+        idx = np.rint((a_next - a0) * inv_step).astype(int)
+        idx = np.clip(idx, 0, Na-1)
+        counts = np.bincount(idx, minlength=Na)
+        P[i] = counts / counts.sum()
+    return P
+
+def compute_rewards(p_grid, a_grid, x_grid, lam=0.1):
+    Pm, Am, Xm = np.meshgrid(p_grid, a_grid, x_grid, indexing="ij")
+    return Am * (Pm + Xm) - lam * np.abs(Xm) ** 1.5  # (Np, Na, Nx)
+
+def dp_q_matrix(T=100, rho=0.9, lam=0.1, beta=1.0, 
+                Np=41, Na=41, Nx=41, n_mc=5000, seed=0, penalty=-100.0):
+    p_grid, a_grid, x_grid = build_grids(Np, Na, Nx)
+    P_alpha = alpha_transition_matrix(a_grid, rho=rho, n_mc=n_mc, seed=seed)
+    R = compute_rewards(p_grid, a_grid, x_grid, lam=lam)
+
+    # mapping p' = p + x -> index p-grid (et validité)
+    step_p = (p_grid[-1] - p_grid[0]) / (Np - 1)
+    inv_step_p = 1.0 / step_p
+    p0 = p_grid[0]
+    P_next_idx = np.empty((Np, Nx), dtype=int)
+    valid = np.ones((Np, Nx), dtype=bool)
+    for i in range(Np):
+        pp = p_grid[i] + x_grid
+        valid[i] = (pp >= -1.0) & (pp <= 1.0)
+        idx = np.rint((np.clip(pp, -1.0, 1.0) - p0) * inv_step_p).astype(int)
+        idx = np.clip(idx, 0, Np-1)
+        P_next_idx[i] = idx
+
+    Q = np.empty((T+1, Np, Na, Nx))
+    Q.fill(penalty)
+
+    # terminal: unwind -> x = -p
+    for i in range(Np):
+        j_unwind = (Np - 1) - i if (Np == Nx) else np.argmin(np.abs(x_grid + p_grid[i]))
+        Q[T, i, :, :] = penalty
+        Q[T, i, :, j_unwind] = 0.0
+
+    # backward
+    for t in range(T-1, -1, -1):
+        V_next = Q[t+1].max(axis=2)  # (Np, Na)
+        for ai in range(Na):
+            cont = V_next @ P_alpha[ai]        # (Np,)
+            EV = cont[P_next_idx]              # (Np, Nx)
+            Q[t, :, ai, :] = R[:, ai, :] + beta * EV
+        Q[t, ~valid] = -1e9
+    return {"Q": Q, "p_grid": p_grid, "a_grid": a_grid, "x_grid": x_grid}
+
+# --- Paramètres de simulation ---
+T = 100
+rho = 0.95
+lam = 0.10
+beta = 1.0
+Np = Na = Nx = 41
+n_mc = 8000
+seed_dp = 1
+seed_sim = 123
+p0 = 0.0
+alpha0 = 0.0
+
+# Calcule DP
+res = dp_q_matrix(T=T, rho=rho, lam=lam, beta=beta, Np=Np, Na=Na, Nx=Nx, n_mc=n_mc, seed=seed_dp)
+Q = res["Q"]
+p_grid, a_grid, x_grid = res["p_grid"], res["a_grid"], res["x_grid"]
+
+# Simulation
+rng = np.random.default_rng(seed_sim)
+sigma = np.sqrt(max(0.0, 1.0 - rho**2))
+
+p_series = np.zeros(T+1)
+a_series = np.zeros(T+1)
+x_series = np.zeros(T)
+r_series = np.zeros(T)
+cum_series = np.zeros(T)
+
+p_idx = int(np.argmin(np.abs(p_grid - p0)))
+p_series[0] = p_grid[p_idx]
+a_val = float(alpha0)
+a_series[0] = a_val
+
+for t in range(T):
+    a_idx = int(np.argmin(np.abs(a_grid - a_val)))
+    x_idx = int(np.argmax(Q[t, p_idx, a_idx, :]))
+    x = float(x_grid[x_idx])
+    x_series[t] = x
+
+    r_series[t] = a_val * (p_series[t] + x) - lam * (abs(x) ** 1.5)
+    cum_series[t] = r_series[:t+1].sum()
+
+    p_next = np.clip(p_series[t] + x, -1.0, 1.0)
+    p_idx = int(np.argmin(np.abs(p_grid - p_next)))
+    p_series[t+1] = p_grid[p_idx]
+
+    a_val = rho * a_val + sigma * rng.normal()
+    a_series[t+1] = a_val
+
+total_cum_reward = float(cum_series[-1])
+print("Cumulative reward (t=0..T-1) =", total_cum_reward)
+
+# table + affichage
+traj = pd.DataFrame({
+    "t": np.arange(T+1),
+    "p_t": p_series,
+    "alpha_t": a_series,
+    "x_t": np.append(x_series, np.nan),
+    "reward_t": np.append(r_series, np.nan),
+    "cum_reward_t": np.append(cum_series, np.nan)
+})
+display_dataframe_to_user("Trajectoire simulée & rewards", traj)
+
+# Graphiques
+plt.figure()
+plt.plot(a_series)
+plt.title("Chemin simulé de alpha_t")
+plt.xlabel("t")
+plt.ylabel("alpha_t")
+plt.show()
+
+plt.figure()
+plt.plot(x_series)
+plt.title("Action décidée x_t (politique DP)")
+plt.xlabel("t")
+plt.ylabel("x_t")
+plt.show()
+
+plt.figure()
+plt.plot(cum_series)
+plt.title("Reward cumulée")
+plt.xlabel("t")
+plt.ylabel("Somme_{0..t} R_t")
+plt.show()
+
+# Export CSV
+csv_path = "/mnt/data/dp_trajectory.csv"
+traj.to_csv(csv_path, index=False)
+print("CSV exporté:", csv_path)
