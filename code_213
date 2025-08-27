@@ -1,0 +1,132 @@
+# Intraday Control with Terminal Unwind — Reward, Dynamics, and Parametrized Value Iteration
+
+## Problem Setup
+
+We consider intraday trading with **mandatory unwind at the close**.
+
+- **State:**  
+  \[
+  s_t=(p_t,\ \mathrm{imb}_{1,t},\ \mathrm{imb}_{2,t})
+  \]  
+  where \(p_t\) = inventory, and \(\mathrm{imb}_{i,t}\) are order-flow imbalances.
+
+- **Action:**  
+  Trade \(x_t\) (signed quantity, buy/sell).
+
+- **Imbalance projection and intensity:**  
+  \[
+  I_t = K_1\,\mathrm{imb}_{1,t} + K_2\,\mathrm{imb}_{2,t}, \qquad
+  r_t = \sqrt{|I_t|}, \qquad
+  \operatorname{sgn}_t = \mathrm{sign}(I_t).
+  \]
+
+- **Dynamics:**  
+  \[
+  p_{t+1}=p_t+x_t, \qquad
+  \mathrm{imb}_{1,t+1}=\phi_1\,\mathrm{imb}_{1,t}+\gamma\,x_t.
+  \]
+
+---
+
+## Reward Function
+
+At each step:
+\[
+R(s_t,x_t) = \alpha (p_t+x_t) \;-\; c_1 |x_t| \;-\; c_{3/2} |x_t|^{3/2}
+\;-\; \eta\,r_t\,x_t\,\operatorname{sgn}_t.
+\]
+
+- \(\alpha\): alpha exposure on inventory.  
+- \(c_1 |x|\), \(c_{3/2} |x|^{3/2}\): linear + superlinear execution costs.  
+- \(\eta\,r_t\,x_t\,\operatorname{sgn}_t\): trading impact (penalizes trading **with** the imbalance).
+
+**Terminal condition (unwind at \(T\)):**
+\[
+V_T(s_T) = \eta_T\,r_T\,|p_T| \;-\; \alpha_T\,p_T \;+\; \lambda_T\,p_T\,\operatorname{sgn}_T\,r_T.
+\]
+
+---
+
+## Parametrization of Value Function
+
+We approximate
+\[
+V_t(s) = B_t(s;\theta_t) + \varepsilon_t(s;\phi_t),
+\]
+with a **structured basis** \(B_t\) + **small residual NN** \(\varepsilon_t\).
+
+### Normalized variables
+\[
+\bar p = \tfrac{p}{P_0},\quad 
+z_i = \tfrac{\mathrm{imb}_i}{Z_{i,0}},\quad
+\bar I = \tfrac{I}{I_0},\quad 
+\bar r = \tfrac{r}{R_0}.
+\]
+
+### Basis Features
+
+- **Inventory costs (convex):**
+  \[
+  f_1(\bar p)=\mathrm{Huber}(\bar p),\quad 
+  f_2(\bar p)=(\mathrm{Huber}(\bar p))^{3/4},\quad 
+  f_3(\bar p)=\bar p.
+  \]
+
+- **Imbalances:**
+  \[
+  g_1=z_1,\; g_2=z_2,\; g_3=\bar I,\; g_4=\bar r,\; g_5=z_1^2+z_2^2.
+  \]
+
+- **Cross terms (impact & unwind):**
+  \[
+  h_1=|\bar p|\,\bar r,\quad 
+  h_2=\bar p\,\operatorname{sgn}_t\,\bar r,\quad
+  h_3=\bar p\,\bar I,\quad
+  h_4=|\bar p|\,|\bar I|.
+  \]
+
+**Linear combination:**
+\[
+B_t = \beta_{0,t} + \sum_{i=1}^3 \beta_{i,t} f_i
++ \sum_{i=1}^5 \gamma_{i,t} g_i
++ \sum_{j=1}^4 \rho_{j,t} h_j.
+\]
+
+Constraints: \(\beta_{1,t},\beta_{2,t},\rho_{1,t}\ge0\) to enforce monotonicity.
+
+### Residual Network
+Small MLP (2 layers, 16–32 units), strong regularization.  
+Captures residual structure only (\(<10\%\) variance explained).
+
+---
+
+## Backward Value Iteration
+
+For \(t=T\): set \(V_T(s)=B_T(s)\).  
+
+For \(t=T-1,\dots,0\):
+1. Sample states \(s=(p,z)\).  
+2. Compute
+   \[
+   Q_t(s,x) = R(s,x) + \mathbb E[V_{t+1}(s')].
+   \]
+3. Optimize over \(x\) (1D grid + refinement).  
+4. Target: \(y(s)=\max_x Q_t(s,x)\).  
+5. Fit \(B_t\) (constrained regression), then residual NN on \(y(s)-B_t(s)\).  
+6. Validate convexity in \(|p|\) and monotonicity in \(\bar r\).
+
+---
+
+## Minimal Feature Set
+
+Often sufficient:
+\[
+\{1,\ \bar p,\ \mathrm{Huber}(\bar p),\ \mathrm{Huber}(\bar p)^{3/4},\ z_1,\ z_2,\ \bar I,\ \bar r,\ |\bar p|\,\bar r,\ \bar p\,\operatorname{sgn}_t\,\bar r,\ \bar p\,\bar I\}.
+\]
+
+---
+
+## Motivation
+
+- Basis captures **execution cost convexity**, **impact scaling \(\sqrt{|I|}\)**, and **terminal unwind**.  
+- NN only corrects small smooth deviations → **sample efficiency** + **stability** in value iteration.
