@@ -1,0 +1,281 @@
+import torch
+import torch.nn as nn
+from itertools import combinations
+from collections import OrderedDict
+from typing import Iterable, List, Callable, Optional, Sequence, Tuple
+
+
+# ---- Custom features ---------------------------------------------------------
+class CustomFeature(nn.Module):
+    """
+    Wrap any callable f(x) -> (B,) or (B,1) into a module with a readable name.
+    The output must be a single scalar feature per sample.
+    """
+    def __init__(self, fn: Callable[[torch.Tensor], torch.Tensor], name: str):
+        super().__init__()
+        self.fn = fn
+        self.name = name
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.fn(x)
+        if out.dim() == 1:
+            out = out.unsqueeze(1)
+        return out  # (B,1)
+
+
+# ---- Epsilon (residual) network ---------------------------------------------
+class EpsilonMLP(nn.Module):
+    """
+    Small MLP for the residual epsilon(x). Default: scalar output.
+    """
+    def __init__(
+        self,
+        in_features: int,
+        hidden: Sequence[int] = (64, 64),
+        out_features: int = 1,
+        act: Callable[[], nn.Module] = nn.ReLU,
+    ):
+        super().__init__()
+        layers: List[nn.Module] = []
+        d = in_features
+        for h in hidden:
+            layers += [nn.Linear(d, h), act()]
+            d = h
+        layers += [nn.Linear(d, out_features)]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+# ---- Explicit (interpretable) part ------------------------------------------
+class SelectiveExplicit(nn.Module):
+    """
+    Builds an explicit linear model on top of selected engineered features:
+
+      y_explicit(x) = sum_k alpha_k * phi_k(x)
+
+    where phi_k include:
+      - Quadratic squares x_i^2 for i in quadratic_idx
+      - Cross terms x_i * x_j for (i,j) in cross_pairs (if None: all i<j among quadratic_idx)
+      - Linear terms x_l for l in linear_idx
+      - Custom scalar features (each a nn.Module returning (B,1))
+      - Optional bias 1
+
+    The whole explicit block is just a Linear(...) over the concatenated features,
+    so you can inspect the learned coefficients easily.
+    """
+    def __init__(
+        self,
+        in_features: int,
+        quadratic_idx: Iterable[int] = (),
+        cross_pairs: Optional[Iterable[Tuple[int, int]]] = None,
+        linear_idx: Iterable[int] = (),
+        custom_features: Iterable[nn.Module] = (),
+        include_bias: bool = False,
+        out_features: int = 1,
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.quadratic_idx = sorted(set(int(i) for i in quadratic_idx))
+        self.linear_idx = list(dict.fromkeys(int(i) for i in linear_idx))
+        self.include_bias = include_bias
+        self.out_features = out_features
+
+        # Validate indices
+        for idx in self.quadratic_idx + self.linear_idx:
+            if not (0 <= idx < in_features):
+                raise ValueError(f"Index {idx} is outside 0..{in_features-1}")
+
+        # Cross pairs: if None, generate all i<j within quadratic_idx
+        if cross_pairs is None:
+            cp = list(combinations(self.quadratic_idx, 2))
+        else:
+            qs = set(self.quadratic_idx)
+            norm = []
+            for i, j in cross_pairs:
+                if i == j:
+                    continue
+                if i > j:
+                    i, j = j, i
+                if (i in qs) and (j in qs):
+                    norm.append((int(i), int(j)))
+            cp = sorted(set(norm))
+        self.cross_pairs: List[Tuple[int, int]] = cp
+
+        # Feature names (in the exact order of concatenation)
+        names: List[str] = []
+        names += [f"x{idx+1}^2" for idx in self.quadratic_idx]
+        names += [f"x{i+1}*x{j+1}" for (i, j) in self.cross_pairs]
+        names += [f"x{idx+1}" for idx in self.linear_idx]
+        self.custom = nn.ModuleList(custom_features)
+        names += [m.name for m in self.custom]
+        if include_bias:
+            names += ["1"]
+        self._names = names
+
+        self.n_features = len(self._names)
+        self.alpha = nn.Linear(self.n_features, out_features, bias=False)
+
+        # Cache index tensors for vectorization
+        if self.quadratic_idx:
+            self.register_buffer(
+                "_quad_idx_tensor",
+                torch.tensor(self.quadratic_idx, dtype=torch.long),
+                persistent=False,
+            )
+        else:
+            self._quad_idx_tensor = None
+
+        if self.cross_pairs:
+            self.register_buffer(
+                "_cross_i",
+                torch.tensor([i for (i, _) in self.cross_pairs], dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_cross_j",
+                torch.tensor([j for (_, j) in self.cross_pairs], dtype=torch.long),
+                persistent=False,
+            )
+        else:
+            self._cross_i = None
+            self._cross_j = None
+
+    @property
+    def feature_names(self) -> List[str]:
+        return list(self._names)
+
+    def build_features(self, x: torch.Tensor) -> torch.Tensor:
+        B, _ = x.shape
+        feats: List[torch.Tensor] = []
+        device, dtype = x.device, x.dtype
+
+        # Squares
+        if self._quad_idx_tensor is not None:
+            qi = self._quad_idx_tensor.to(device)
+            feats.append(x.index_select(1, qi) ** 2)
+
+        # Cross terms
+        if self._cross_i is not None:
+            xi = x.index_select(1, self._cross_i.to(device))
+            xj = x.index_select(1, self._cross_j.to(device))
+            feats.append(xi * xj)
+
+        # Linear
+        if self.linear_idx:
+            li = torch.tensor(self.linear_idx, dtype=torch.long, device=device)
+            feats.append(x.index_select(1, li))
+
+        # Custom features (each returns (B,1))
+        for m in self.custom:
+            feats.append(m(x))
+
+        # Bias
+        if self.include_bias:
+            feats.append(torch.ones(B, 1, device=device, dtype=dtype))
+
+        return torch.cat(feats, dim=1) if feats else x.new_zeros((B, 0))
+
+    def forward(self, x: torch.Tensor, return_features: bool = False):
+        phi = self.build_features(x)              # (B, m)
+        y = self.alpha(phi)                       # (B, out)
+        return (y, phi) if return_features else y
+
+    @torch.no_grad()
+    def coefficients(self) -> torch.Tensor:
+        """
+        Returns the fitted alpha coefficients.
+        Shape: (m,) if out_features==1, else (out_features, m)
+        """
+        w = self.alpha.weight.detach().cpu()
+        return w.squeeze(0) if w.shape[0] == 1 else w
+
+    @torch.no_grad()
+    def coefficients_dict(self):
+        """
+        Returns an OrderedDict{name -> coeff} (or a list of dicts if multi-output).
+        """
+        w = self.coefficients()
+        if w.ndim == 1:
+            return OrderedDict((n, float(v)) for n, v in zip(self.feature_names, w.tolist()))
+        else:
+            return [
+                OrderedDict((n, float(v)) for n, v in zip(self.feature_names, row.tolist()))
+                for row in w
+            ]
+
+
+# ---- Full model: explicit + epsilon -----------------------------------------
+class QuadLinearCustomPlusEps(nn.Module):
+    """
+    Final model:
+
+        y(x) =  [explicit quadratic/linear/custom features]  +  [epsilon MLP]
+
+    The explicit part is linear in hand-crafted features and fully interpretable;
+    the epsilon part captures the residual (optionally centered to ~zero mean on batch).
+    """
+    def __init__(
+        self,
+        in_features: int,
+        quadratic_idx: Iterable[int] = (),
+        cross_pairs: Optional[Iterable[Tuple[int, int]]] = None,
+        linear_idx: Iterable[int] = (),
+        custom_features: Iterable[nn.Module] = (),
+        include_bias: bool = False,
+        eps_hidden: Sequence[int] = (64, 64),
+        eps_zero_mean: bool = True,
+        out_features: int = 1,
+        act: Callable[[], nn.Module] = nn.ReLU,
+    ):
+        super().__init__()
+        self.explicit = SelectiveExplicit(
+            in_features=in_features,
+            quadratic_idx=quadratic_idx,
+            cross_pairs=cross_pairs,
+            linear_idx=linear_idx,
+            custom_features=custom_features,
+            include_bias=include_bias,
+            out_features=out_features,
+        )
+        self.eps = EpsilonMLP(
+            in_features=in_features,
+            hidden=eps_hidden,
+            out_features=out_features,
+            act=act,
+        )
+        self.eps_zero_mean = eps_zero_mean
+
+    @property
+    def feature_names(self) -> List[str]:
+        return self.explicit.feature_names
+
+    @torch.no_grad()
+    def coefficients(self) -> torch.Tensor:
+        return self.explicit.coefficients()
+
+    @torch.no_grad()
+    def coefficients_dict(self):
+        return self.explicit.coefficients_dict()
+
+    @torch.no_grad()
+    def explicit_contributions(self, x: torch.Tensor):
+        """
+        Returns:
+          - contrib: (B, m, out) per-feature contribution = phi_k(x) * alpha_k
+          - y_exp:  (B, out)     explicit output
+          - names:  list[str]    feature names (length m)
+        """
+        y_exp, phi = self.explicit(x, return_features=True)     # (B,out), (B,m)
+        w = self.explicit.alpha.weight.detach().t()             # (m,out)
+        contrib = phi.unsqueeze(-1) * w                         # (B,m,out)
+        return contrib, y_exp, self.feature_names
+
+    def forward(self, x: torch.Tensor, return_parts: bool = False):
+        y_exp, phi = self.explicit(x, return_features=True)     # (B,out), (B,m)
+        y_eps = self.eps(x)                                     # (B,out)
+        if self.eps_zero_mean and self.training:
+            y_eps = y_eps - y_eps.mean(dim=0, keepdim=True)
+        y = y_exp + y_eps
+        return (y, y_exp, y_eps, phi) if return_parts else y
