@@ -1,0 +1,53 @@
+import torch
+
+# 1) Choose which features get which treatment (0-based indices)
+quadratic_idx = [0, 2, 5]          # squares + cross terms among these
+# cross_pairs=None means "all pairs among quadratic_idx"; you can also pass specific pairs:
+# cross_pairs = [(0, 2)]  # only x1*x3
+
+linear_idx = [1, 4]                # only these get a linear term
+
+# 2) Define custom scalar features (each returns (B,) or (B,1))
+#    NOTE: sqrt requires non-negative input; clamp for safety if needed.
+c1 = CustomFeature(
+    lambda x: torch.sqrt(torch.clamp(x[:, 0], min=0)) * torch.abs(x[:, 2]),
+    name="sqrt(x1)*|x3|",
+)
+c2 = CustomFeature(
+    lambda x: x[:, 6]**3,  # another example
+    name="x7^3",
+)
+
+# 3) Build the model
+model = QuadLinearCustomPlusEps(
+    in_features=7,
+    quadratic_idx=quadratic_idx,
+    cross_pairs=None,         # or a list like [(0,2), (2,5)]
+    linear_idx=linear_idx,
+    custom_features=[c1, c2],
+    include_bias=True,        # adds an explicit bias term '1'
+    eps_hidden=(64, 64),
+    eps_zero_mean=True,       # centers epsilon on the batch during training
+    out_features=1,           # scalar regression
+)
+
+# 4) Forward pass (get parts if you like)
+x = torch.randn(32, 7)
+y, y_exp, y_eps, phi = model(x, return_parts=True)
+print(y.shape, y_exp.shape, y_eps.shape, phi.shape)
+# -> torch.Size([32, 1]) torch.Size([32, 1]) torch.Size([32, 1]) torch.Size([32, m])
+
+# 5) Train as usual
+target = torch.randn(32, 1)
+opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+loss = nn.MSELoss()(y, target)
+loss.backward()
+opt.step()
+
+# 6) Interpretability: names & coefficients of the explicit part
+print(model.feature_names)                 # ordered feature names
+print(model.coefficients_dict())           # {name: alpha} for out_features==1
+
+# 7) Per-feature contributions for a small batch
+contrib, y_explicit, names = model.explicit_contributions(x[:4])
+# contrib: (B, m, out) so contrib[b, k, 0] is the kth feature contribution on sample b
