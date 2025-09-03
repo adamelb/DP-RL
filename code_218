@@ -1,0 +1,38 @@
+/ helper: split `val` equally across `n` slots; safe when n=0 (returns empty list)
+split:{[n;val] $[n>0; n#(val % n); 0#0f] };
+
+alphaProfile:{
+  [t; alphas]
+  if[(t<0) or (t>388); '"t must be integer in 0..388"];
+
+  / promote to float for stable division
+  a: 1f * alphas;
+  a1: a 0;  a2: a 1;  a3: a 2;
+
+  / index constants
+  CLOSE10: 379; / 15:50
+  LAST:    388; / 15:59
+
+  / segment lengths
+  / alpha1: t..min(t+29, 378)
+  l1: 0 | (30 & (CLOSE10 - t));         / max(0; min(30; 379 - t))
+
+  / alpha2: from (t+30) to 378  => N = max(0; 349 - t)
+  l2: 0 | (349 - t);
+
+  / alpha3 minute buckets (15:50..15:58) => 9 minutes max, truncated by t
+  start3: t | CLOSE10;
+  l3m: 0 | (387 - start3 + 1);          / max(0; 388 - start3) = up to 9
+
+  / build the weights
+  w1: split[l1; a1];                    / each = a1/l1
+  w2: split[l2; a2];                    / each = a2/l2
+  w3m: $[l3m>0; l3m#(a3 % 70); 0#0f];   / each = a3/70
+  wClose: enlist 60*a3 % 70;            / last minute (15:59) treated as "close 60min"
+
+  w: w1, w2, w3m, wClose;
+
+  / length sanity check
+  if[count w <> 389 - t; '"internal length mismatch"];
+  w
+};
