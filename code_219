@@ -1,0 +1,36 @@
+/ helper pour répartir val sur n slots
+split:{[n;val] $[n>0; n#(val % n); 0#0f] };
+
+alphaProfile:{
+  [t; alphas]
+  if[(t<0) or (t>388); '"t must be integer in 0..388"];
+
+  a: 1f * alphas;
+  a1: a 0; a2: a 1; a3: a 2;
+
+  CLOSE10: 379; / 15:50
+  LAST:    388; / 15:59
+
+  / longueur alpha1
+  l1: 0 | (30 & (CLOSE10 - t));
+  / longueur alpha2
+  l2: 0 | (349 - t);
+
+  / alpha3 minutes: max(t,379)..388
+  start3: t | CLOSE10;
+  l3m: 0 | (LAST - start3 + 1);
+
+  / pondérations
+  w1: split[l1; a1];
+  w2: split[l2; a2];
+
+  / dénominateur dynamique
+  D: 60 + l3m;
+  w3m: $[l3m>0; l3m#(a3 % D); 0#0f];
+  wClose: enlist 60*a3 % D;
+
+  w: w1, w2, w3m, wClose;
+
+  if[count w <> 390 - t; '"internal length mismatch"];
+  w
+};
