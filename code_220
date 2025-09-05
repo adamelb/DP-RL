@@ -1,0 +1,38 @@
+/ q function for alpha forecast
+/ Inputs: t (int), z (list of 3 floats)
+/ Globals used: rho (3x3), rates (390x3)
+
+alphaForecast:{[t;z]
+  / number of steps
+  n: count rates;
+  steps: n - t;
+
+  / initialize results
+  res: ();
+
+  / identity matrix
+  rpow: 1f rho * 0; / identity
+
+  do[steps;
+    / vector at step k
+    v: rpow mmu z;     / multiply rho^k @ z
+
+    / elementwise product with rates row
+    term: v * rates[t+ x];
+
+    / sum across columns
+    res,: enlist sum term;
+
+    / update rho^k -> rho^(k+1)
+    rpow: rpow mmu rho;
+  ];
+
+  res
+};
+
+/ define rho, rates, z
+rho: 3 3#1 0 0 0 1 0 0 0 1f;   / identity for test
+rates: 390 3#til 1170;         / dummy rates matrix
+z: 1 2 3f;
+
+alphaForecast[0; z]
