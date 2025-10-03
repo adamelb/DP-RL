@@ -1,0 +1,154 @@
+# --- Math-friendly LaTeX you can copy to your notes is below this cell in my next message. ---
+# This cell defines a reference implementation that computes:
+# 1) Backward recursions for (a_t, b_t) closed-form coefficients
+# 2) Optimal policy x_t*(p_t, alpha_t)
+# 3) Forward simulation of the AR(1) state and positions with random example data
+#
+# Notes:
+# - Horizon: decisions at t=0,...,T-1 with T=389 (so last decision is t=388), terminal at t=T
+# - p_{t+1} = p_t + x_t
+# - alpha_{t+1} = rho @ alpha_t + eps_{t+1},   eps ~ N(0, Sigma)
+# - Instantaneous reward (t <= T-1):  r_t = (rate_t^T alpha_t) * (p_t + x_t) - (lambda + lambda_t) * x_t^2
+# - Terminal reward (t = T):          r_T = -(lambda + lambda_T) * p_T^2
+#
+# The optimal policy uses the closed-form coefficients derived in the LaTeX below.
+
+import numpy as np
+from dataclasses import dataclass
+from typing import Tuple, Dict, Any, Optional
+
+@dataclass
+class LQParams:
+    T: int                         # terminal index (number of *time points*); decisions at 0..T-1
+    rho: np.ndarray                # (3x3) AR(1) matrix for alpha
+    Sigma: np.ndarray              # (3x3) innovation covariance
+    rate: np.ndarray               # (T x 3) matrix with rows rate_t for t=0..T-1 (no rate needed at T)
+    lam0: float                    # scalar lambda >= 0
+    lam_t: np.ndarray              # length T+1 vector (0..T) of nonnegative costs; k_t = lam0 + lam_t[t]
+
+@dataclass
+class LQSolution:
+    a: np.ndarray                  # length T+1, with a_T = k_T
+    b: np.ndarray                  # shape (T+1, 3), with b_T = 0
+    def policy(self, t: int, p: float, alpha: np.ndarray, params: LQParams) -> float:
+        """
+        Optimal trade x_t^*(p, alpha) at time t.
+        """
+        assert 0 <= t <= params.T-1
+        k_t = params.lam0 + params.lam_t[t]
+        a_next = self.a[t+1]
+        b_next = self.b[t+1]
+        # s_t = rate_t' alpha_t
+        s_t = float(params.rate[t].dot(alpha))
+        # m_{t+1} = (rho' b_{t+1})' alpha_t = b_{t+1}' (rho alpha_t)
+        m_next = float((params.rho.T @ b_next).dot(alpha))
+        x_star = (s_t + m_next - 2.0 * a_next * p) / (2.0 * (k_t + a_next))
+        return x_star
+
+def backward_recursions(params: LQParams) -> LQSolution:
+    T = params.T
+    a = np.zeros(T+1)
+    b = np.zeros((T+1, 3))
+    # terminal
+    k_T = params.lam0 + params.lam_t[T]
+    a[T] = k_T
+    b[T, :] = 0.0
+
+    # backward in time
+    for t in range(T-1, -1, -1):
+        k_t = params.lam0 + params.lam_t[t]
+        A = a[t+1]
+        # a_t = (A * k_t) / (A + k_t)
+        a[t] = (A * k_t) / (A + k_t)
+        # b_t = (k_t / (k_t + A)) * ( rate_t + rho' b_{t+1} )
+        b[t, :] = (k_t / (k_t + A)) * (params.rate[t] + params.rho.T @ b[t+1, :])
+    return LQSolution(a=a, b=b)
+
+def simulate(params: LQParams, sol: LQSolution, p0: float, alpha0: np.ndarray, seed: Optional[int]=0
+            ) -> Dict[str, Any]:
+    rng = np.random.default_rng(seed)
+    T = params.T
+
+    p = np.zeros(T+1)         # positions p_0..p_T
+    x = np.zeros(T)           # trades x_0..x_{T-1}
+    alpha = np.zeros((T+1, 3))
+    r = np.zeros(T+1)         # rewards including terminal
+
+    p[0] = p0
+    alpha[0, :] = alpha0
+
+    # decisions & evolution up to T-1
+    for t in range(T):
+        x[t] = sol.policy(t, p[t], alpha[t, :], params)
+        p[t+1] = p[t] + x[t]
+        # reward at t
+        k_t = params.lam0 + params.lam_t[t]
+        s_t = float(params.rate[t].dot(alpha[t, :]))
+        r[t] = s_t * (p[t] + x[t]) - k_t * x[t]**2
+        # evolve alpha
+        eps = rng.multivariate_normal(mean=np.zeros(3), cov=params.Sigma)
+        alpha[t+1, :] = params.rho @ alpha[t, :] + eps
+
+    # terminal reward at T (unwind / penalty on remaining position)
+    k_T = params.lam0 + params.lam_t[T]
+    r[T] = - k_T * (p[T]**2)
+
+    out = {
+        "p": p,              # positions
+        "x": x,              # trades
+        "alpha": alpha,      # signals
+        "rewards": r,        # rewards incl terminal
+        "total_reward": float(r.sum()),
+    }
+    return out
+
+# -------------------------
+# Create a fully random example to show usage
+# -------------------------
+T = 389  # terminal index, so last decision t=388
+rng = np.random.default_rng(42)
+
+# Random stable rho (scale a random matrix to have spectral radius < 1)
+A = rng.normal(size=(3,3))
+# stabilize:
+eigvals = np.linalg.eigvals(A)
+rad = max(abs(eigvals))
+rho = (0.8 / rad) * A
+
+# Positive semidefinite Sigma
+B = rng.normal(size=(3,3))
+Sigma = B @ B.T * 0.05
+
+# rate (T x 3)
+rate = rng.normal(size=(T, 3))
+
+# lambda pieces (nonnegative)
+lam0 = abs(rng.normal()) * 0.1 + 0.05
+lam_t = abs(rng.normal(size=T+1)) * 0.2
+
+# package
+params = LQParams(T=T, rho=rho, Sigma=Sigma, rate=rate, lam0=lam0, lam_t=lam_t)
+
+# solve backward recursions
+solution = backward_recursions(params)
+
+# demo policy call at some state/time
+t_demo = 100
+p_demo = 0.7
+alpha_demo = rng.normal(size=3)
+x_demo = solution.policy(t_demo, p_demo, alpha_demo, params)
+
+# simulate from random initial state
+sim = simulate(params, solution, p0=0.0, alpha0=rng.normal(size=3), seed=7)
+
+# Small summary dict so you can quickly inspect key items
+summary = {
+    "lam0": lam0,
+    "a_terminal": float(solution.a[-1]),
+    "a_first": float(solution.a[0]),
+    "b_first": solution.b[0].tolist(),
+    "x_demo_at_t100": float(x_demo),
+    "total_reward_sim": sim["total_reward"],
+    "final_position": float(sim["p"][-1]),
+}
+summary
