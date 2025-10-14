@@ -14,3 +14,7 @@ GERER LES EXEAQUO
   INDEX(Liste_Etab!B:B;EQUIV(1;INDEX((Liste_Etab!A:A=A2)*(Liste_Etab!C:C=MAX.SI.ENS(Liste_Etab!C:C;Liste_Etab!A:A;A2));0);0))
  );
 "")
+
+exeaquo V2
+
+=SIERREUR(LET(grp;A2;sous;FILTRE(Liste_Etab!B:C;Liste_Etab!A:A=grp);colB;INDEX(sous;;1);colC;INDEX(sous;;2);m;MAX(colC);gagnants;FILTRE(colB;colC=m);SI(LIGNES(gagnants)>1;"EXEAQUO";INDEX(gagnants;1)));"")
