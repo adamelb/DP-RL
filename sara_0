@@ -1,0 +1,6 @@
+=LET(
+  c; SUPPRESPACE($A2);
+  noms; FILTRE(Liste_Etab!$B:$B; SUPPRESPACE(Liste_Etab!$A:$A)=c);
+  nmed; FILTRE(--Liste_Etab!$C:$C; SUPPRESPACE(Liste_Etab!$A:$A)=c);
+  SIERREUR( INDEX( TRIERPAR(noms; nmed; -1; noms; 1); 1 ); «  » )
+)
