@@ -4,3 +4,13 @@
   nmed; FILTRE(--Liste_Etab!$C:$C; SUPPRESPACE(Liste_Etab!$A:$A)=c);
   SIERREUR( INDEX( TRIERPAR(noms; nmed; -1; noms; 1); 1 ); «  » )
 )
+
+GERER LES EXEAQUO
+
+=SIERREUR(
+ SI(
+  SOMMEPROD((Liste_Etab!A:A=A2)*(Liste_Etab!C:C=MAX.SI.ENS(Liste_Etab!C:C;Liste_Etab!A:A;A2)))>1;
+  "EXEAQUO";
+  INDEX(Liste_Etab!B:B;EQUIV(1;INDEX((Liste_Etab!A:A=A2)*(Liste_Etab!C:C=MAX.SI.ENS(Liste_Etab!C:C;Liste_Etab!A:A;A2));0);0))
+ );
+"")
