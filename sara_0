@@ -1,3 +1,6 @@
+
+
+
 =LET(
   c; SUPPRESPACE($A2);
   noms; FILTRE(Liste_Etab!$B:$B; SUPPRESPACE(Liste_Etab!$A:$A)=c);
@@ -18,3 +21,15 @@ GERER LES EXEAQUO
 exeaquo V2
 
 =SIERREUR(LET(grp;A2;sous;FILTRE(Liste_Etab!B:C;Liste_Etab!A:A=grp);colB;INDEX(sous;;1);colC;INDEX(sous;;2);m;MAX(colC);gagnants;FILTRE(colB;colC=m);SI(LIGNES(gagnants)>1;"EXEAQUO";INDEX(gagnants;1)));"")
+
+
+
+
+
+v3
+
+=SIERREUR(SI(LIGNES(FILTRE(Liste_Etab!B:B;(Liste_Etab!A:A=A2)*(Liste_Etab!C:C=MAX.SI.ENS(Liste_Etab!C:C;Liste_Etab!A:A;A2))))>1;"EXEAQUO";INDEX(FILTRE(Liste_Etab!B:B;(Liste_Etab!A:A=A2)*(Liste_Etab!C:C=MAX.SI.ENS(Liste_Etab!C:C;Liste_Etab!A:A;A2)));1));"")
+
+
+
+
