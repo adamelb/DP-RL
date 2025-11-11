@@ -1,0 +1,122 @@
+from pathlib import Path
+import re
+import pandas as pd
+
+# ---------- CONFIG ----------
+ROOT = Path("normalized")   # root folder containing date folders like 2025.01.15
+EXPECTED_COLS = ["exchange", "symbol", "timestamp", "local_timestamp", "id", "side", "price", "amount"]
+
+# Filename pattern: BTC-31JAN25-120000-C_trades_2025.01.15.csv.gz
+FNAME_RE = re.compile(
+    r'^(?P<underlying>BTC)-(?P<expiry>\d{2}[A-Z]{3}\d{2})-(?P<strike>\d+)-(?P<cp>[CP])_trades_(?P<filedate>\d{4}\.\d{2}\.\d{2})\.csv\.gz$'
+)
+
+def _safe_read_csv(path: Path) -> pd.DataFrame | None:
+    """Read gz CSV; return None for empty files or unreadable ones."""
+    try:
+        if path.stat().st_size == 0:
+            return None
+        df = pd.read_csv(path, compression="gzip", low_memory=False)
+        if df.empty:
+            return None
+        return df
+    except pd.errors.EmptyDataError:
+        # valid gzip/CSV but no rows/headers
+        return None
+    except Exception:
+        # unreadable or corrupted -> skip
+        return None
+
+def load_trades_for_date(date_str: str, root: Path = ROOT) -> pd.DataFrame:
+    """
+    Load all BTC *_trades_{date_str}.csv.gz files inside normalized/{date_str}/...
+    Returns a single normalized DataFrame.
+    """
+    date_dir = root / date_str
+    if not date_dir.exists():
+        raise FileNotFoundError(f"Date directory not found: {date_dir}")
+
+    frames: list[pd.DataFrame] = []
+
+    for p in date_dir.rglob("*.csv.gz"):
+        m = FNAME_RE.match(p.name)
+        if not m:
+            continue  # not a BTC trade file in the required format
+        meta = m.groupdict()
+        if meta["filedate"] != date_str:
+            continue  # ensure file actually belongs to the requested date
+
+        df = _safe_read_csv(p)
+        if df is None:
+            continue
+
+        # Ensure required columns exist (your files always have these)
+        missing = [c for c in EXPECTED_COLS if c not in df.columns]
+        if missing:
+            # If your data always has them, we can just skip; otherwise adapt here
+            continue
+
+        # Keep only the requested/needed columns
+        df = df[EXPECTED_COLS].copy()
+
+        # Rename amount -> quantity; normalize capitalization for your target layout
+        df = df.rename(columns={
+            "exchange": "Exchange",
+            "symbol": "Symbol",
+            "amount": "quantity"
+        })
+
+        # Parse filename metadata
+        df["underlying"]   = meta["underlying"]      # BTC
+        df["expiry"]       = meta["expiry"]          # e.g., 31JAN25 (always 7 chars)
+        df["strike"]       = int(meta["strike"])
+        df["option_type"]  = meta["cp"]              # 'C' or 'P'
+        df["file_date"]    = meta["filedate"]
+        df["source_file"]  = str(p)
+
+        # (Optional) ensure numeric types for price/quantity
+        df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
+        df = df.dropna(subset=["price", "quantity"])
+
+        frames.append(df)
+
+    if not frames:
+        # empty result with correct schema
+        cols = ["Exchange", "timestamp", "local_timestamp", "Symbol", "side", "price", "quantity",
+                "underlying", "expiry", "strike", "option_type", "file_date", "source_file", "id"]
+        return pd.DataFrame(columns=cols)
+
+    out = pd.concat(frames, ignore_index=True)
+
+    # Order columns: the layout you want first, then the helpful metadata
+    col_order = ["Exchange", "timestamp", "local_timestamp", "Symbol", "side", "price", "quantity",
+                 "underlying", "expiry", "strike", "option_type", "file_date", "source_file", "id"]
+    out = out[[c for c in col_order if c in out.columns]]
+    return out
+
+# -------- Load a single day example --------
+# day_df = load_trades_for_date("2025.01.15")
+# display(day_df.head())
+
+def load_trades_all_dates(root: Path = ROOT) -> pd.DataFrame:
+    """
+    Iterate over all date folders (YYYY.MM.DD) under `root` and stack them.
+    Only BTC trade files are read; empty/corrupt files are skipped.
+    """
+    date_dir_pattern = re.compile(r"^\d{4}\.\d{2}\.\d{2}$")
+    all_frames: list[pd.DataFrame] = []
+    for child in sorted(root.iterdir()):
+        if child.is_dir() and date_dir_pattern.match(child.name):
+            df = load_trades_for_date(child.name, root=root)
+            if not df.empty:
+                all_frames.append(df)
+    if not all_frames:
+        return pd.DataFrame(columns=["Exchange","timestamp","local_timestamp","Symbol","side","price","quantity",
+                                     "underlying","expiry","strike","option_type","file_date","source_file","id"])
+    return pd.concat(all_frames, ignore_index=True)
+
+# -------- Load all dates example --------
+# all_df = load_trades_all_dates()
+# all_df.to_parquet("btc_trades_all.parquet", index=False)  # quick to reload later
+# all_df.to_csv("btc_trades_all.csv.gz", index=False, compression="gzip")
