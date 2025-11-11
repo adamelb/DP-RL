@@ -1,0 +1,183 @@
+from pathlib import Path
+import re
+import pandas as pd
+
+# ---------- CONFIG ----------
+ROOT = Path("normalized")   # root containing date folders like 2025.01.15
+TRADE_COLS = ["exchange", "symbol", "timestamp", "local_timestamp", "id", "side", "price", "amount"]
+
+# Filename patterns (BTC only)
+TRADE_RE = re.compile(
+    r'^(?P<underlying>BTC)-(?P<expiry>\d{2}[A-Z]{3}\d{2})-(?P<strike>\d+)-(?P<cp>[CP])_trades_(?P<filedate>\d{4}\.\d{2}\.\d{2})\.csv\.gz$'
+)
+CHAIN_RE = re.compile(
+    r'^(?P<underlying>BTC)-(?P<expiry>\d{2}[A-Z]{3}\d{2})-(?P<strike>\d+)-(?P<cp>[CP])_options_chain_(?P<filedate>\d{4}\.\d{2}\.\d{2})\.csv\.gz$'
+)
+
+# desired chain fields (case-insensitive match)
+CHAIN_FIELDS = ["underlying_price", "delta", "gamma", "vega", "theta", "rho"]
+
+def _safe_read_csv(path: Path) -> pd.DataFrame | None:
+    """Read gz CSV; return None for empty/unreadable files."""
+    try:
+        if path.stat().st_size == 0:
+            return None
+        df = pd.read_csv(path, compression="gzip", low_memory=False)
+        if df.empty:
+            return None
+        return df
+    except pd.errors.EmptyDataError:
+        return None
+    except Exception:
+        return None
+
+def _get_ci(df: pd.DataFrame, name: str) -> str | None:
+    """Return the column name matching `name` case-insensitively, else None."""
+    lookup = {c.lower(): c for c in df.columns}
+    return lookup.get(name.lower())
+
+def load_trades_with_chain_for_date(date_str: str, root: Path = ROOT) -> pd.DataFrame:
+    """
+    For a given date folder (YYYY.MM.DD), read all BTC *_trades_*.csv.gz and *_options_chain_*.csv.gz,
+    then merge last options_chain tick before each trade (by Symbol, backward as-of merge).
+    Returns a normalized DataFrame.
+    """
+    date_dir = root / date_str
+    if not date_dir.exists():
+        raise FileNotFoundError(f"Date directory not found: {date_dir}")
+
+    trade_frames: list[pd.DataFrame] = []
+    chain_frames: list[pd.DataFrame] = []
+
+    # ---------- Load TRADES ----------
+    for p in date_dir.rglob("*.csv.gz"):
+        m = TRADE_RE.match(p.name)
+        if not m:
+            continue
+        meta = m.groupdict()
+        if meta["filedate"] != date_str:
+            continue
+
+        df = _safe_read_csv(p)
+        if df is None:
+            continue
+
+        # Ensure expected trade columns are present exactly as specified by you
+        if any(c not in df.columns for c in TRADE_COLS):
+            continue
+
+        # Keep only expected cols; rename amount->quantity & normalize casing you want
+        df = df[TRADE_COLS].copy()
+        df = df.rename(columns={
+            "exchange": "Exchange",
+            "symbol": "Symbol",
+            "amount": "quantity"
+        })
+
+        # parse filename metadata
+        df["underlying"]  = meta["underlying"]   # BTC
+        df["expiry"]      = meta["expiry"]       # like 31JAN25
+        df["strike"]      = int(meta["strike"])
+        df["option_type"] = meta["cp"]           # C/P
+        df["file_date"]   = meta["filedate"]
+        df["source_file"] = str(p)
+
+        # Ensure numeric price/quantity
+        df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
+        df = df.dropna(subset=["price", "quantity"])
+
+        # Parse timestamps to UTC-aware datetime for merging
+        df["timestamp_utc"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+
+        trade_frames.append(df)
+
+    if not trade_frames:
+        # Return empty with schema (including Greek columns)
+        cols = ["Exchange","timestamp","local_timestamp","Symbol","side","price","quantity",
+                "underlying","expiry","strike","option_type","file_date","source_file","id",
+                "underlying_price","delta","gamma","vega","theta","rho"]
+        return pd.DataFrame(columns=cols)
+
+    trades = pd.concat(trade_frames, ignore_index=True)
+    # Keep only rows with proper timestamps
+    trades = trades.dropna(subset=["timestamp_utc"])
+
+    # ---------- Load OPTIONS_CHAIN ----------
+    for p in date_dir.rglob("*.csv.gz"):
+        m = CHAIN_RE.match(p.name)
+        if not m:
+            continue
+        meta = m.groupdict()
+        if meta["filedate"] != date_str:
+            continue
+
+        df = _safe_read_csv(p)
+        if df is None:
+            continue
+
+        # We need at least symbol and timestamp to merge; others are optional
+        sym_col = _get_ci(df, "symbol")
+        ts_col  = _get_ci(df, "timestamp")
+        if sym_col is None or ts_col is None:
+            continue
+
+        # Keep only columns we care about (case-insensitive)
+        keep_cols = [sym_col, ts_col]
+        for f in CHAIN_FIELDS:
+            c = _get_ci(df, f)
+            if c is not None:
+                keep_cols.append(c)
+        keep_cols = list(dict.fromkeys(keep_cols))  # unique, preserve order
+        df = df[keep_cols].copy()
+
+        # Normalize column names to exact targets
+        rename_map = {sym_col: "Symbol", ts_col: "chain_timestamp"}
+        for f in CHAIN_FIELDS:
+            c = _get_ci(df, f)
+            if c:
+                rename_map[c] = f
+        df = df.rename(columns=rename_map)
+
+        # Parse chain timestamps
+        df["chain_timestamp_utc"] = pd.to_datetime(df["chain_timestamp"], utc=True, errors="coerce")
+        df = df.dropna(subset=["chain_timestamp_utc", "Symbol"])
+
+        # Sort for as-of merge
+        df = df.sort_values(["Symbol", "chain_timestamp_utc"])
+
+        chain_frames.append(df)
+
+    if not chain_frames:
+        # No chain data; just return trades without Greeks/underlying
+        out_cols = ["Exchange","timestamp","local_timestamp","Symbol","side","price","quantity",
+                    "underlying","expiry","strike","option_type","file_date","source_file","id"]
+        return trades[out_cols]
+
+    chain = pd.concat(chain_frames, ignore_index=True)
+    chain = chain.sort_values(["Symbol", "chain_timestamp_utc"])
+
+    # ---------- Efficient as-of merge: last chain tick before each trade ----------
+    trades = trades.sort_values(["Symbol", "timestamp_utc"])
+
+    merged = pd.merge_asof(
+        left=trades,
+        right=chain,
+        left_on="timestamp_utc",
+        right_on="chain_timestamp_utc",
+        by="Symbol",
+        direction="backward",
+        allow_exact_matches=True
+    )
+
+    # Final tidy-up: choose column order
+    col_order = [
+        "Exchange", "timestamp", "local_timestamp", "Symbol", "side", "price", "quantity",
+        "underlying_price", "delta", "gamma", "vega", "theta", "rho",
+        "underlying", "expiry", "strike", "option_type", "file_date", "source_file", "id"
+    ]
+    # ensure columns exist (some Greeks may be missing in files)
+    col_order = [c for c in col_order if c in merged.columns]
+    merged = merged[col_order].copy()
+
+    return merged
