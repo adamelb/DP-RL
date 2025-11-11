@@ -1,0 +1,176 @@
+from pathlib import Path
+import re
+import pandas as pd
+from tqdm import tqdm
+
+# ---------- CONFIG ----------
+ROOT = Path("normalized")   # contains subfolders like 2025.01.15
+TRADE_COLS = ["exchange", "symbol", "timestamp", "local_timestamp", "id", "side", "price", "amount"]
+CHAIN_KEEP = ["symbol", "timestamp", "underlying_price", "delta", "gamma", "vega", "theta", "rho"]
+
+# Filename patterns (BTC only)
+TRADE_RE = re.compile(
+    r'^(?P<underlying>BTC)-(?P<expiry>\d{2}[A-Z]{3}\d{2})-(?P<strike>\d+)-(?P<cp>[CP])_trades_(?P<filedate>\d{4}\.\d{2}\.\d{2})\.csv\.gz$'
+)
+CHAIN_RE_FMT = "{underlying}-{expiry}-{strike}-{cp}_options_chain_{date}.csv.gz"
+
+def _safe_read_csv(path: Path, usecols=None) -> pd.DataFrame | None:
+    """Read gz CSV; return None on empty/corrupted/unreadable files."""
+    try:
+        if path.stat().st_size == 0:
+            return None
+        df = pd.read_csv(path, compression="gzip", low_memory=False,
+                         usecols=(usecols if usecols is None else (lambda c: c in set(usecols))))
+        if df.empty:
+            return None
+        return df
+    except pd.errors.EmptyDataError:
+        return None
+    except Exception:
+        return None
+
+def load_trades_with_chain_for_date_filewise(
+    date_str: str,
+    root: Path = ROOT,
+    tolerance: str | None = None  # e.g. "10min" to ignore chain ticks older than 10 minutes
+) -> pd.DataFrame:
+    """
+    For a given date folder (YYYY.MM.DD):
+      - iterate over each BTC *_trades_{date}.csv.gz file,
+      - read the matching *_options_chain_{date}.csv.gz file,
+      - as-of merge (last before) by Symbol to add underlying_price & Greeks,
+      - return one compact DataFrame of merged trades.
+    """
+    date_dir = root / date_str
+    if not date_dir.exists():
+        raise FileNotFoundError(f"Date directory not found: {date_dir}")
+
+    # Discover all trade files first (for progress bar)
+    trade_files = []
+    for p in date_dir.rglob("*.csv.gz"):
+        m = TRADE_RE.match(p.name)
+        if m and m.group("filedate") == date_str:
+            trade_files.append((p, m.groupdict()))
+    trade_files.sort(key=lambda x: x[0].name)
+
+    merged_frames: list[pd.DataFrame] = []
+    if not trade_files:
+        # Empty schema if nothing to load
+        return pd.DataFrame(columns=[
+            "Exchange","timestamp","local_timestamp","Symbol","side","price","quantity",
+            "underlying_price","delta","gamma","vega","theta","rho",
+            "underlying","expiry","strike","option_type","file_date","source_file","id"
+        ])
+
+    # Progress bar over each trade file
+    for p, meta in tqdm(trade_files, desc=f"Processing {date_str}", unit="file"):
+        # ---- read trades (only your fixed columns) ----
+        tdf = _safe_read_csv(p, usecols=TRADE_COLS)
+        if tdf is None:
+            continue
+
+        # Normalize trade columns
+        if any(c not in tdf.columns for c in TRADE_COLS):
+            # if any required column is missing, skip this file (as you said your files are uniform this is rare)
+            continue
+        tdf = tdf[TRADE_COLS].copy()
+        tdf = tdf.rename(columns={
+            "exchange": "Exchange",
+            "symbol": "Symbol",
+            "amount": "quantity"
+        })
+        tdf["price"] = pd.to_numeric(tdf["price"], errors="coerce")
+        tdf["quantity"] = pd.to_numeric(tdf["quantity"], errors="coerce")
+        tdf = tdf.dropna(subset=["price", "quantity"])
+        if tdf.empty:
+            continue
+
+        # Parse timestamps for merge
+        tdf["timestamp_utc"] = pd.to_datetime(tdf["timestamp"], utc=True, errors="coerce")
+        tdf = tdf.dropna(subset=["timestamp_utc"])
+        if tdf.empty:
+            continue
+        tdf = tdf.sort_values(["Symbol", "timestamp_utc"])
+
+        # Add filename metadata
+        tdf["underlying"]  = meta["underlying"]
+        tdf["expiry"]      = meta["expiry"]
+        tdf["strike"]      = int(meta["strike"])
+        tdf["option_type"] = meta["cp"]
+        tdf["file_date"]   = meta["filedate"]
+        tdf["source_file"] = str(p)
+
+        # ---- read matching options_chain file (minimal columns) ----
+        chain_name = CHAIN_RE_FMT.format(
+            underlying=meta["underlying"],
+            expiry=meta["expiry"],
+            strike=meta["strike"],
+            cp=meta["cp"],
+            date=meta["filedate"]
+        )
+        chain_path = p.parent / chain_name
+        cdf = _safe_read_csv(chain_path, usecols=CHAIN_KEEP)
+        if cdf is None:
+            # no chain file or empty -> attach NaNs for Greeks/underlying and keep trades
+            tdf["underlying_price"] = pd.NA
+            for g in ("delta","gamma","vega","theta","rho"):
+                tdf[g] = pd.NA
+            merged_frames.append(tdf)
+            continue
+
+        # keep only the columns that actually exist
+        keep = [c for c in CHAIN_KEEP if c in cdf.columns]
+        cdf = cdf[keep].copy()
+
+        # Normalize chain cols (Symbol, chain_timestamp_utc)
+        cdf = cdf.rename(columns={"symbol": "Symbol", "timestamp": "chain_timestamp"})
+        cdf["chain_timestamp_utc"] = pd.to_datetime(cdf["chain_timestamp"], utc=True, errors="coerce")
+        cdf = cdf.dropna(subset=["chain_timestamp_utc", "Symbol"]).sort_values(["Symbol","chain_timestamp_utc"])
+        if cdf.empty:
+            # no usable ticks -> attach NaNs
+            tdf["underlying_price"] = pd.NA
+            for g in ("delta","gamma","vega","theta","rho"):
+                tdf[g] = pd.NA
+            merged_frames.append(tdf)
+            continue
+
+        # ---- merge_asof: last chain tick at/before trade ----
+        kwargs = dict(
+            left=tdf,
+            right=cdf,
+            left_on="timestamp_utc",
+            right_on="chain_timestamp_utc",
+            by="Symbol",
+            direction="backward",
+            allow_exact_matches=True
+        )
+        if tolerance:
+            kwargs["tolerance"] = pd.Timedelta(tolerance)
+
+        m = pd.merge_asof(**kwargs)
+
+        # Keep tidy columns (trade layout first, then chain fields, then metadata)
+        col_order = [
+            "Exchange","timestamp","local_timestamp","Symbol","side","price","quantity",
+            "underlying_price","delta","gamma","vega","theta","rho",
+            "underlying","expiry","strike","option_type","file_date","source_file","id"
+        ]
+        m = m[[c for c in col_order if c in m.columns]].copy()
+        merged_frames.append(m)
+
+        # Optional: update progress bar postfix with current file name
+        tqdm.write(f"merged: {p.name}")
+
+    if not merged_frames:
+        return pd.DataFrame(columns=[
+            "Exchange","timestamp","local_timestamp","Symbol","side","price","quantity",
+            "underlying_price","delta","gamma","vega","theta","rho",
+            "underlying","expiry","strike","option_type","file_date","source_file","id"
+        ])
+
+    result = pd.concat(merged_frames, ignore_index=True)
+    return result
+
+# Example usage:
+# df = load_trades_with_chain_for_date_filewise("2025.01.15", tolerance="10min")
+# df.to_parquet("btc_trades_with_greeks_2025-01-15.parquet", index=False)
