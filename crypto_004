@@ -1,0 +1,31 @@
+from pathlib import Path
+import pandas as pd
+from tqdm import tqdm  # progress bar
+
+# Path to your folder
+ROOT = Path("trades_per_date")
+
+# List all .parquet files
+files = sorted(ROOT.glob("*.parquet"))
+
+# Load and concatenate with a progress bar
+frames = []
+for f in tqdm(files, desc="Loading trades", unit="file"):
+    try:
+        df = pd.read_parquet(f)
+        if not df.empty:
+            df["file_date"] = f.stem  # e.g. '2024.10.15'
+            frames.append(df)
+    except Exception as e:
+        tqdm.write(f"❌ Skipped {f.name}: {e}")
+
+# Combine everything
+if frames:
+    all_trades = pd.concat(frames, ignore_index=True)
+    print(f"✅ Loaded {len(all_trades):,} rows from {len(frames)} files.")
+else:
+    all_trades = pd.DataFrame()
+    print("⚠️ No valid parquet files found or all were empty.")
+
+# Optional: save combined dataset
+# all_trades.to_parquet("all_trades.parquet", index=False)
