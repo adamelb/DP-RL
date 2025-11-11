@@ -1,0 +1,148 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+def make_btc_option_volume_plots(df_clean: pd.DataFrame):
+    df = df_clean.copy()
+
+    # --- Harmonize columns / basics ---
+    cols = {c.lower(): c for c in df.columns}
+    # handle gamma/galma
+    if "gamma" not in cols and "galma" in cols:
+        df = df.rename(columns={cols["galma"]: "gamma"})
+        cols["gamma"] = "gamma"
+    # ensure required numeric columns
+    num_cols = ["price","quantity","underlying_price","delta","vega","theta","time_to_expiry",
+                "notional_usd","notional_btc","root_vega"]
+    for c in num_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # combine day + timestamp to a single datetime (naive OK; set UTC if you want)
+    df["ts"] = pd.to_datetime(df["day"].astype(str) + " " + df["timestamp"].astype(str), errors="coerce")
+    df["date"] = df["ts"].dt.date
+
+    # helpful derived fields
+    df["days_to_expiry"] = df["time_to_expiry"] * 365.0
+    # vega traded (absolute vega flow)
+    df["vega_flow"] = (df["vega"] * df["quantity"]).abs()
+    # root vega traded
+    if "root_vega" in df.columns:
+        df["root_vega_flow"] = (df["root_vega"] * df["quantity"]).abs()
+    # side sign (+1 buy, -1 sell) for net exposures
+    side_sign = np.where(df["side"].str.lower().eq("buy"), 1, np.where(df["side"].str.lower().eq("sell"), -1, 0))
+    df["net_delta_flow_btc"] = df["delta"] * df["quantity"] * side_sign  # BTC-equivalent net flow
+
+    # tenor buckets
+    tenor_bins = [0, 7, 30, 90, 180, 365, 9999]
+    tenor_lbls = ["<1w", "1w–1m", "1–3m", "3–6m", "6–12m", ">12m"]
+    df["tenor_bucket"] = pd.cut(df["days_to_expiry"], bins=tenor_bins, labels=tenor_lbls, right=False)
+
+    # moneyness buckets (only if strike & underlying_price available)
+    has_moneyness = ("strike" in df.columns) and ("underlying_price" in df.columns)
+    if has_moneyness:
+        df["moneyness"] = df["strike"] / df["underlying_price"]
+        df["moneyness_bucket"] = pd.cut(df["moneyness"], [0, 0.9, 1.0, 1.1, np.inf],
+                                        labels=["ITM", "ATM", "OTM", "DeepOTM"], right=False)
+
+    # --- Aggregations ---
+    daily_usd = df.groupby("date")["notional_usd"].sum().sort_index()
+    daily_vega = df.groupby("date")["vega_flow"].sum().sort_index()
+    daily_root_vega = df.groupby("date")["root_vega_flow"].sum().sort_index() if "root_vega_flow" in df else None
+    daily_net_delta = df.groupby("date")["net_delta_flow_btc"].sum().sort_index()
+
+    tenor_usd = df.groupby("tenor_bucket")["notional_usd"].sum().reindex(tenor_lbls)
+    tenor_vega = df.groupby("tenor_bucket")["vega_flow"].sum().reindex(tenor_lbls)
+
+    call_put_side = df.groupby(["option_type","side"])["notional_usd"].sum().unstack(fill_value=0)
+    by_exchange = df.groupby("Exchange")["notional_usd"].sum().sort_values(ascending=False) if "Exchange" in df.columns else None
+
+    if has_moneyness:
+        money_table = df.groupby(["option_type","moneyness_bucket"])["notional_usd"].sum().unstack(fill_value=0)
+
+    # --- Plotting (Matplotlib only) ---
+    # 1) Daily USD notional
+    plt.figure(figsize=(10,4))
+    daily_usd.plot()
+    plt.title("Daily BTC Options USD Volume")
+    plt.xlabel("Date"); plt.ylabel("USD Notional")
+    plt.tight_layout()
+
+    # 2) Daily Vega flow + 7D rolling
+    plt.figure(figsize=(10,4))
+    daily_vega.plot(label="Daily vega flow")
+    daily_vega.rolling(7, min_periods=1).mean().plot(label="7D MA")
+    plt.title("Daily Vega Exposure Traded")
+    plt.xlabel("Date"); plt.ylabel("Abs(vega × quantity)")
+    plt.legend(); plt.tight_layout()
+
+    # 3) Daily Root-Vega flow (if available)
+    if daily_root_vega is not None:
+        plt.figure(figsize=(10,4))
+        daily_root_vega.plot()
+        plt.title("Daily Root-Vega Exposure Traded")
+        plt.xlabel("Date"); plt.ylabel("Abs(root_vega × quantity)")
+        plt.tight_layout()
+
+    # 4) Volume by tenor (USD)
+    plt.figure(figsize=(7,4))
+    tenor_usd.plot(kind="bar")
+    plt.title("USD Volume by Maturity Bucket")
+    plt.xlabel("Tenor"); plt.ylabel("USD Notional")
+    plt.tight_layout()
+
+    # 5) Vega flow by tenor
+    plt.figure(figsize=(7,4))
+    tenor_vega.plot(kind="bar")
+    plt.title("Vega Traded by Maturity Bucket")
+    plt.xlabel("Tenor"); plt.ylabel("Abs(vega × quantity)")
+    plt.tight_layout()
+
+    # 6) Call vs Put — Buy/Sell stacked
+    if not call_put_side.empty:
+        plt.figure(figsize=(7,4))
+        call_put_side.plot(kind="bar", stacked=True)
+        plt.title("Buy/Sell Breakdown per Option Type (USD)")
+        plt.xlabel("Option Type"); plt.ylabel("USD Notional")
+        plt.tight_layout()
+
+    # 7) Net delta flow (BTC eq.)
+    plt.figure(figsize=(10,4))
+    daily_net_delta.plot()
+    plt.title("Net Delta Flow (BTC Equivalent)")
+    plt.xlabel("Date"); plt.ylabel("BTC Δ-equivalent (buy positive)")
+    plt.axhline(0, linestyle="--")
+    plt.tight_layout()
+
+    # 8) Volume by exchange (if available)
+    if by_exchange is not None and not by_exchange.empty:
+        plt.figure(figsize=(8,4))
+        by_exchange.plot(kind="bar")
+        plt.title("USD Volume by Exchange")
+        plt.xlabel("Exchange"); plt.ylabel("USD Notional")
+        plt.tight_layout()
+
+    # 9) Volume by moneyness bucket (if possible)
+    if has_moneyness and not df["moneyness_bucket"].isna().all():
+        plt.figure(figsize=(8,4))
+        money_table.plot(kind="bar")
+        plt.title("USD Volume by Moneyness Bucket")
+        plt.xlabel("Option Type"); plt.ylabel("USD Notional")
+        plt.tight_layout()
+
+    plt.show()
+
+    # --- Return useful summary tables in case you want to inspect/save them ---
+    outputs = {
+        "daily_usd": daily_usd,
+        "daily_vega": daily_vega,
+        "daily_root_vega": daily_root_vega,
+        "daily_net_delta_btc": daily_net_delta,
+        "tenor_usd": tenor_usd,
+        "tenor_vega": tenor_vega,
+        "call_put_side_usd": call_put_side,
+        "by_exchange_usd": by_exchange,
+    }
+    if has_moneyness:
+        outputs["by_moneyness_usd"] = money_table
+    return outputs
