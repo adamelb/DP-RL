@@ -1,0 +1,40 @@
+from pathlib import Path
+import pandas as pd
+import numpy as np
+
+def quotes_by_tenor_day(day_str: str, root=Path("quotes_per_date")) -> pd.DataFrame:
+    """
+    Read <day_str>.parquet (quotes file containing 'days_to_expiry')
+    and return counts of quotes per tenor bucket for that day.
+    Example output columns: tenor_bucket, quote_count, date
+    """
+    file_path = root / f"{day_str}.parquet"
+    if not file_path.exists():
+        return pd.DataFrame(columns=["tenor_bucket", "quote_count", "date"])
+    
+    # load only what we need
+    df = pd.read_parquet(file_path, columns=["days_to_expiry"])
+    if df.empty:
+        return pd.DataFrame(columns=["tenor_bucket", "quote_count", "date"])
+    
+    df = df.dropna(subset=["days_to_expiry"])
+    
+    # define tenor buckets (in days)
+    bins = [0, 1, 2, 5, 7, 10, 20, 30, 60, 90, 180, 365, np.inf]
+    labels = ["≤1d","1–2d","2–5d","5–7d","7–10d","10–20d","20–30d",
+              "30–60d","60–90d","90–180d","180–365d",">1y"]
+    
+    df["tenor_bucket"] = pd.cut(df["days_to_expiry"], bins=bins, labels=labels, right=False)
+    
+    # count number of quotes per bucket
+    counts = (df["tenor_bucket"]
+              .value_counts()
+              .reindex(labels, fill_value=0)
+              .reset_index())
+    counts.columns = ["tenor_bucket", "quote_count"]
+    counts["date"] = day_str
+    return counts
+
+# Example usage:
+# summary_2024_01_15 = quotes_by_tenor_day("2024.01.15")
+# print(summary_2024_01_15.head())
