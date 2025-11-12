@@ -1,0 +1,45 @@
+from pathlib import Path
+import pandas as pd
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+def mean_quotes_by_tenor(root=Path("tenor_counts")) -> pd.DataFrame:
+    """
+    Charge tous les fichiers <date>.parquet (avec colonnes 'tenor_bucket' et 'quote_count')
+    et calcule la moyenne du nombre de quotes par bucket sur toutes les dates.
+    """
+    frames = []
+    for f in tqdm(sorted(root.glob("*.parquet")), desc="Loading tenor files", unit="file"):
+        try:
+            df = pd.read_parquet(f, columns=["tenor_bucket","quote_count"])
+            if not df.empty:
+                frames.append(df)
+        except Exception as e:
+            tqdm.write(f"⚠️ Skipped {f.name}: {e}")
+
+    if not frames:
+        return pd.DataFrame(columns=["tenor_bucket","mean_quote_count"])
+
+    # concat et moyenne par bucket
+    all_counts = pd.concat(frames, ignore_index=True)
+    mean_counts = (all_counts.groupby("tenor_bucket")["quote_count"]
+                              .mean()
+                              .reset_index(name="mean_quote_count")
+                              .sort_values("tenor_bucket")
+                              .reset_index(drop=True))
+
+    # Plot simple
+    plt.figure(figsize=(8,4))
+    plt.bar(mean_counts["tenor_bucket"], mean_counts["mean_quote_count"])
+    plt.title("Mean Number of Quotes per Tenor Bucket")
+    plt.xlabel("Tenor Bucket (days to expiry)")
+    plt.ylabel("Mean Quotes Count")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+    return mean_counts
+
+# Exemple :
+# df_mean_tenor = mean_quotes_by_tenor(Path("quotes_by_tenor"))
+# print(df_mean_tenor)
