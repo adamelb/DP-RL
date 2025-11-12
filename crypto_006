@@ -1,0 +1,64 @@
+from pathlib import Path
+import re
+import pandas as pd
+
+def load_btc_quotes_with_expiry_buckets(date_str: str, root=Path("normalized")) -> pd.DataFrame:
+    """
+    Lit normalized/OPTIONS_quotes_<date_str>.csv.gz (ex: 2024.01.15),
+    filtre les quotes BTC-...-C/P, extrait l'expiry, crée expiration (08:00 UTC),
+    days_to_expiry et expiry_bucket (daily/weekly/monthly).
+    """
+    f = root / f"OPTIONS_quotes_{date_str}.csv.gz"
+    if not f.exists() or f.stat().st_size == 0:
+        return pd.DataFrame(columns=["timestamp","local_timestamp","symbol","expiry","expiration",
+                                     "days_to_expiry","expiry_bucket"])
+
+    # ne charge que ce qu'il faut
+    usecols = ["timestamp","local_timestamp","symbol"]
+    try:
+        df = pd.read_csv(f, compression="gzip", usecols=usecols, low_memory=False)
+    except Exception:
+        return pd.DataFrame(columns=["timestamp","local_timestamp","symbol","expiry","expiration",
+                                     "days_to_expiry","expiry_bucket"])
+    if df.empty:
+        return pd.DataFrame(columns=["timestamp","local_timestamp","symbol","expiry","expiration",
+                                     "days_to_expiry","expiry_bucket"])
+
+    # Filtre : BTC-<DDMMMYY>-<strike>-C|P
+    pat = re.compile(r"^(BTC)-(?P<exp>\d{2}[A-Z]{3}\d{2})-(?P<strike>\d+)-[CP]$")
+    mask = df["symbol"].astype(str).str.match(pat)
+    df = df.loc[mask].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["timestamp","local_timestamp","symbol","expiry","expiration",
+                                     "days_to_expiry","expiry_bucket"])
+
+    # Extraire l'expiry depuis symbol
+    df["expiry"] = df["symbol"].str.extract(r"^(?:BTC)-(\d{2}[A-Z]{3}\d{2})-")
+    # expiration = date d'expiration à 08:00 UTC
+    exp_date = pd.to_datetime(df["expiry"], format="%d%b%y", errors="coerce", utc=True)
+    df["expiration"] = exp_date + pd.Timedelta(hours=8)
+
+    # timestamp en UTC (quotes)
+    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    # days_to_expiry (peut être négatif si quote post-expiration)
+    df["days_to_expiry"] = (df["expiration"] - ts).dt.total_seconds() / 86400.0
+
+    # Buckets: daily (<=2 j), weekly (<=20 j), sinon monthly
+    def bucket(d):
+        if pd.isna(d):
+            return pd.NA
+        if d <= 2:
+            return "daily"
+        if d <= 20:
+            return "weekly"
+        return "monthly"
+
+    df["expiry_bucket"] = df["days_to_expiry"].map(bucket)
+
+    # Colonnes utiles en sortie (on se concentre sur les expiries)
+    return df[["timestamp","local_timestamp","symbol","expiry","expiration",
+               "days_to_expiry","expiry_bucket"]]
+
+# Exemple :
+# quotes = load_btc_quotes_with_expiry_buckets("2024.01.15")
+# quotes["expiry"].value_counts(), quotes["expiry_bucket"].value_counts()
