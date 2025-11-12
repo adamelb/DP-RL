@@ -1,0 +1,1 @@
+df["timestamp"] = pd.to_datetime(df["timestamp"], unit="us", utc=True, errors="coerce"); df["minute"] = df["timestamp"].dt.floor("T"); keys = ["symbol"] + (["side"] if "side" in df.columns else []); df = df.sort_values("timestamp").drop_duplicates(keys + ["minute"], keep="last")
