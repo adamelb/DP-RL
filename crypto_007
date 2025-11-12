@@ -1,0 +1,5 @@
+summary = (quotes.loc[quotes["expiry_bucket"].notna()]
+                  .groupby("expiry")["expiry_bucket"].first()
+                  .value_counts()
+                  .reindex(["daily","weekly","monthly"], fill_value=0)
+                  .to_frame().T.assign(date=date_str))
