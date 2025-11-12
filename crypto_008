@@ -1,0 +1,36 @@
+from pathlib import Path
+import pandas as pd
+
+def quotes_per_minute(date_str: str, root=Path("quotes_per_date")) -> pd.DataFrame:
+    """
+    Read <date_str>.parquet (e.g., 2023.03.12.parquet) and return a DataFrame
+    of number of quotes per minute.
+    """
+    file_path = root / f"{date_str}.parquet"
+    if not file_path.exists():
+        raise FileNotFoundError(f"{file_path} not found")
+    
+    # read parquet
+    df = pd.read_parquet(file_path, columns=["timestamp"])
+    if df.empty:
+        return pd.DataFrame(columns=["minute", "quote_count"])
+    
+    # ensure datetime
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df.dropna(subset=["timestamp"])
+    
+    # extract hour:minute
+    df["minute"] = df["timestamp"].dt.strftime("%H:%M")
+    
+    # count quotes per minute
+    counts = (df.groupby("minute")
+                .size()
+                .reset_index(name="quote_count")
+                .sort_values("minute")
+                .reset_index(drop=True))
+    
+    return counts
+
+# Example usage:
+# minute_counts = quotes_per_minute("2023.03.12")
+# print(minute_counts.head())
