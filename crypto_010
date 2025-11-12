@@ -1,0 +1,50 @@
+from pathlib import Path
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+def mean_quotes_by_tenor(root=Path("quotes_per_date")) -> pd.DataFrame:
+    """
+    Load all quotes parquet files containing 'days_to_expiry',
+    and compute mean number of quotes per tenor bin across all days.
+    """
+    bins = [0, 1, 2, 5, 7, 10, 20, 30, 60, 90, 180, 365]
+    labels = ["≤1d","1–2d","2–5d","5–7d","7–10d","10–20d","20–30d",
+              "30–60d","60–90d","90–180d","180–365d"]
+
+    results = []
+
+    for f in tqdm(sorted(root.glob("*.parquet")), desc="Loading quotes by tenor", unit="file"):
+        try:
+            df = pd.read_parquet(f, columns=["days_to_expiry"])
+            if df.empty:
+                continue
+            df = df.dropna(subset=["days_to_expiry"])
+            df["tenor_bucket"] = pd.cut(df["days_to_expiry"], bins=bins, labels=labels, right=False)
+            counts = df["tenor_bucket"].value_counts().reindex(labels, fill_value=0)
+            results.append(counts)
+        except Exception as e:
+            tqdm.write(f"⚠️ Skipped {f.name}: {e}")
+
+    if not results:
+        return pd.DataFrame(columns=["tenor_bucket","mean_quotes"])
+
+    # combine all days and compute mean number of quotes per tenor bin
+    mean_counts = pd.concat(results, axis=1).fillna(0).mean(axis=1).reset_index()
+    mean_counts.columns = ["tenor_bucket", "mean_quotes"]
+    return mean_counts
+
+# Example usage
+tenor_df = mean_quotes_by_tenor(Path("quotes_per_date"))
+print(tenor_df)
+
+# Visualization
+plt.figure(figsize=(9,4))
+plt.bar(tenor_df["tenor_bucket"], tenor_df["mean_quotes"])
+plt.title("Average Number of Quotes per Tenor (Time to Maturity)")
+plt.xlabel("Tenor Bucket (days)")
+plt.ylabel("Mean Number of Quotes")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
