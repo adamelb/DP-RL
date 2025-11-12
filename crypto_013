@@ -1,0 +1,43 @@
+from pathlib import Path
+import pandas as pd
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+def mean_quotes_by_tenor(root=Path("tenor_counts")) -> pd.DataFrame:
+    labels = ["≤1d","1–2d","2–5d","5–7d","7–10d","10–20d","20–30d",
+              "30–60d","60–90d","90–180d","180–365d",">1y"]
+
+    frames = []
+    for f in tqdm(sorted(root.glob("*.parquet")), desc="Loading tenor files", unit="file"):
+        try:
+            df = pd.read_parquet(f, columns=["tenor_bucket","quote_count"])
+            if not df.empty:
+                frames.append(df)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.DataFrame(columns=["tenor_bucket","mean_quote_count"])
+
+    all_counts = pd.concat(frames, ignore_index=True)
+
+    # ⚠️ imposer l'ordre catégoriel
+    all_counts["tenor_bucket"] = pd.Categorical(all_counts["tenor_bucket"],
+                                                categories=labels, ordered=True)
+
+    mean_counts = (all_counts.groupby("tenor_bucket")["quote_count"]
+                              .mean()
+                              .reindex(labels)  # garantit l'ordre
+                              .reset_index(name="mean_quote_count"))
+
+    # Plot avec l'ordre imposé
+    plt.figure(figsize=(8,4))
+    plt.bar(mean_counts["tenor_bucket"].astype(str), mean_counts["mean_quote_count"])
+    plt.title("Mean Number of Quotes per Tenor Bucket")
+    plt.xlabel("Tenor Bucket (days to expiry)")
+    plt.ylabel("Mean Quotes Count")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+    return mean_counts
