@@ -1,0 +1,54 @@
+import pandas as pd
+import pyarrow as pa, pyarrow.parquet as pq
+
+def btc_minute_parquet(path_csv_gz: str, out_parquet: str, chunksize=1_000_000):
+    # discover columns (handles misspelled underlying)
+    cols = pd.read_csv(path_csv_gz, compression="gzip", nrows=0, engine="pyarrow").columns
+    ucol = "underlying_price" if "underlying_price" in cols else ("unerlying_price" if "unerlying_price" in cols else None)
+    wanted = {"symbol","timestamp","delta","gamma","vega"} | ({ucol} if ucol else set())
+
+    reader = pd.read_csv(
+        path_csv_gz, compression="gzip", engine="pyarrow",
+        usecols=lambda c: c in wanted, chunksize=chunksize, dtype_backend="pyarrow",
+        on_bad_lines="skip"
+    )
+
+    writer, carry = None, pd.DataFrame(columns=list(wanted))
+
+    for ch in reader:
+        # early filter & minimal typing
+        ch = ch[ch["symbol"].astype("string[pyarrow]").str.startswith("BTC", na=False)]
+        if ch.empty and carry.empty: 
+            continue
+
+        ch["timestamp"] = pd.to_datetime(ch["timestamp"], unit="us", errors="coerce")
+        ch = ch.dropna(subset=["timestamp"])
+        ch["minute"] = ch["timestamp"].dt.floor("min")
+
+        work = ch if carry.empty else pd.concat([carry, ch], ignore_index=True)
+
+        # complete minutes within this batch (strictly < max minute per symbol)
+        maxm = work.groupby("symbol", observed=True)["minute"].transform("max")
+        done = work.loc[work["minute"] < maxm]
+
+        if not done.empty:
+            last = done.groupby(["symbol","minute"], observed=True).tail(1)
+            out = last.drop(columns="minute").assign(timestamp=last["minute"])
+            for c in ["delta","gamma","vega", ucol]:
+                if c and c in out: out[c] = out[c].astype("float32")
+            tbl = pa.Table.from_pandas(out, preserve_index=False)
+            if writer is None: writer = pq.ParquetWriter(out_parquet, tbl.schema, compression="zstd")
+            writer.write_table(tbl)
+
+        # keep only the trailing (open) minute per symbol for next chunk
+        carry = work.loc[work["minute"] == maxm]
+
+    # flush last partial minutes
+    if not carry.empty:
+        last = carry.groupby(["symbol","minute"], observed=True).tail(1)
+        out = last.drop(columns="minute").assign(timestamp=last["minute"])
+        tbl = pa.Table.from_pandas(out, preserve_index=False)
+        if writer is None: writer = pq.ParquetWriter(out_parquet, tbl.schema, compression="zstd")
+        writer.write_table(tbl)
+
+    if writer: writer.close()
