@@ -1,0 +1,36 @@
+from pathlib import Path
+import pandas as pd
+from tqdm import tqdm
+
+def mean_quotes_per_minute(root=Path("minute_counts")) -> pd.DataFrame:
+    """
+    Load all <date>.parquet files (with columns 'minute' and 'quote_count')
+    from 'root' directory and compute mean quote_count per minute across all days.
+    Skips missing / empty files gracefully.
+    """
+    frames = []
+    for f in tqdm(list(root.glob("*.parquet")), desc="Loading per-minute files", unit="file"):
+        try:
+            df = pd.read_parquet(f, columns=["minute", "quote_count"])
+            if not df.empty:
+                frames.append(df)
+        except Exception as e:
+            tqdm.write(f"⚠️ Skipped {f.name}: {e}")
+
+    if not frames:
+        return pd.DataFrame(columns=["minute", "mean_quote_count"])
+
+    # concatenate all days (small DataFrames, memory-friendly)
+    all_counts = pd.concat(frames, ignore_index=True)
+
+    # groupby minute -> mean count
+    mean_counts = (all_counts.groupby("minute")["quote_count"]
+                              .mean()
+                              .reset_index(name="mean_quote_count")
+                              .sort_values("minute")
+                              .reset_index(drop=True))
+    return mean_counts
+
+# Example:
+# mean_df = mean_quotes_per_minute(Path("quotes_per_minute"))
+# print(mean_df.head())
