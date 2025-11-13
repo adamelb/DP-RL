@@ -1,0 +1,35 @@
+from pathlib import Path
+import pandas as pd
+import numpy as np
+
+def quotes_per_delta_day(day_str: str, root=Path("quotes_per_date")) -> pd.DataFrame:
+    """
+    Read <day_str>.parquet containing 'delta' column and return a continuous
+    distribution of quotes by delta for that day.
+    Output: DataFrame with columns: delta_center, quote_count, date.
+    """
+    file_path = root / f"{day_str}.parquet"
+    if not file_path.exists():
+        return pd.DataFrame(columns=["delta_center", "quote_count", "date"])
+
+    # read only delta column for memory efficiency
+    df = pd.read_parquet(file_path, columns=["delta"])
+    if df.empty:
+        return pd.DataFrame(columns=["delta_center", "quote_count", "date"])
+
+    df = df.dropna(subset=["delta"])
+
+    # continuous histogram (fine bins)
+    bins = np.linspace(-1.0, 1.0, 200)   # 200 bins → smooth line
+    counts, edges = np.histogram(df["delta"], bins=bins)
+
+    # bin centers for smooth line plots
+    centers = 0.5 * (edges[:-1] + edges[1:])
+
+    out = pd.DataFrame({
+        "delta_center": centers,
+        "quote_count": counts,
+        "date": day_str
+    })
+
+    return out
