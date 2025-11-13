@@ -1,0 +1,52 @@
+from pathlib import Path
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+def mean_quantiles_quotes_by_delta(root=Path("quotes_by_delta")) -> pd.DataFrame:
+    """
+    Load all per-day delta parquet outputs containing delta_center & quote_count,
+    and compute mean + 25/50/75 quantiles per delta bin.
+    """
+
+    frames = []
+    for f in tqdm(sorted(root.glob("*.parquet")), desc="Loading delta files", unit="file"):
+        try:
+            df = pd.read_parquet(f, columns=["delta_center", "quote_count"])
+            if not df.empty:
+                frames.append(df)
+        except Exception as e:
+            tqdm.write(f"⚠️ Skipped:", f.name, e)
+
+    if not frames:
+        return pd.DataFrame(columns=["delta_center","mean","q25","q50","q75"])
+
+    all_counts = pd.concat(frames, ignore_index=True)
+
+    # groupby per delta_center → stats across all days
+    grouped = all_counts.groupby("delta_center")["quote_count"]
+
+    stats = pd.DataFrame({
+        "mean": grouped.mean(),
+        "q25": grouped.quantile(0.25),
+        "q50": grouped.quantile(0.50),
+        "q75": grouped.quantile(0.75),
+    }).reset_index().sort_values("delta_center")
+
+    # -------- Plot -------------
+    plt.figure(figsize=(10,5))
+    plt.plot(stats["delta_center"], stats["mean"], label="Mean", linewidth=2)
+    plt.plot(stats["delta_center"], stats["q25"], label="25th percentile", linestyle="--")
+    plt.plot(stats["delta_center"], stats["q50"], label="Median (50%)", linestyle="-")
+    plt.plot(stats["delta_center"], stats["q75"], label="75th percentile", linestyle="--")
+
+    plt.title("Quotes by Delta — Mean and Quantiles (Across All Days)")
+    plt.xlabel("Delta")
+    plt.ylabel("Quote Count")
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    return stats
