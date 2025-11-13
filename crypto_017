@@ -1,0 +1,125 @@
+from pathlib import Path
+import pandas as pd
+from tqdm import tqdm
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+
+def mean_quantiles_notional_vega_by_delta(root=Path("notional_vega_by_delta")):
+    """
+    Read all parquet files in `root` (each with columns delta/notional_USD/rt_vega),
+    compute mean + 25/50/75 quantiles for notional_USD and rt_vega by delta,
+    and return (stats_df, fig).
+    """
+
+    frames = []
+    for f in tqdm(sorted(root.glob("*.parquet")), desc="Loading delta files", unit="file"):
+        try:
+            df = pd.read_parquet(f)
+            if df.empty:
+                continue
+
+            # handle delta vs delta_center naming
+            if "delta_center" in df.columns and "delta" not in df.columns:
+                df = df.rename(columns={"delta_center": "delta"})
+
+            # keep only needed cols
+            cols_needed = [c for c in ["delta", "notional_USD", "rt_vega"] if c in df.columns]
+            if "delta" not in cols_needed:
+                continue
+
+            df = df[cols_needed].dropna(subset=["delta"])
+            frames.append(df)
+        except Exception as e:
+            tqdm.write(f"⚠️ Skipped {f.name}: {e}")
+
+    if not frames:
+        return pd.DataFrame(columns=[
+            "delta",
+            "notional_mean","notional_q25","notional_q50","notional_q75",
+            "rtvega_mean","rtvega_q25","rtvega_q50","rtvega_q75"
+        ]), make_subplots(rows=2, cols=1)
+
+    all_data = pd.concat(frames, ignore_index=True)
+
+    # groupby for notional_USD
+    g_notional = all_data.groupby("delta")["notional_USD"]
+    notional_stats = pd.DataFrame({
+        "notional_mean": g_notional.mean(),
+        "notional_q25":  g_notional.quantile(0.25),
+        "notional_q50":  g_notional.quantile(0.50),
+        "notional_q75":  g_notional.quantile(0.75),
+    })
+
+    # groupby for rt_vega
+    g_rtvega = all_data.groupby("delta")["rt_vega"]
+    rtvega_stats = pd.DataFrame({
+        "rtvega_mean": g_rtvega.mean(),
+        "rtvega_q25":  g_rtvega.quantile(0.25),
+        "rtvega_q50":  g_rtvega.quantile(0.50),
+        "rtvega_q75":  g_rtvega.quantile(0.75),
+    })
+
+    stats = (
+        pd.concat([notional_stats, rtvega_stats], axis=1)
+          .reset_index()
+          .sort_values("delta")
+          .reset_index(drop=True)
+    )
+
+    # ---------- Plotly figure with subplots ----------
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        subplot_titles=("Notional USD vs Delta (mean & quantiles)",
+                        "rt_vega vs Delta (mean & quantiles)")
+    )
+
+    # Notional subplot (row 1)
+    fig.add_trace(
+        go.Scatter(x=stats["delta"], y=stats["notional_mean"], mode="lines", name="Notional mean"),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=stats["delta"], y=stats["notional_q25"], mode="lines", name="Notional q25", line=dict(dash="dash")),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=stats["delta"], y=stats["notional_q50"], mode="lines", name="Notional median (q50)", line=dict(dash="dot")),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=stats["delta"], y=stats["notional_q75"], mode="lines", name="Notional q75", line=dict(dash="dashdot")),
+        row=1, col=1
+    )
+
+    # rt_vega subplot (row 2)
+    fig.add_trace(
+        go.Scatter(x=stats["delta"], y=stats["rtvega_mean"], mode="lines", name="rt_vega mean"),
+        row=2, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=stats["delta"], y=stats["rtvega_q25"], mode="lines", name="rt_vega q25", line=dict(dash="dash")),
+        row=2, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=stats["delta"], y=stats["rtvega_q50"], mode="lines", name="rt_vega median (q50)", line=dict(dash="dot")),
+        row=2, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=stats["delta"], y=stats["rtvega_q75"], mode="lines", name="rt_vega q75", line=dict(dash="dashdot")),
+        row=2, col=1
+    )
+
+    fig.update_xaxes(title_text="Delta", row=2, col=1)
+    fig.update_yaxes(title_text="Notional USD", row=1, col=1)
+    fig.update_yaxes(title_text="rt_vega", row=2, col=1)
+
+    fig.update_layout(
+        title="Notional USD & rt_vega by Delta (mean and quantiles)",
+        hovermode="x unified"
+    )
+
+    return stats, fig
+
+# Example usage:
+# stats, fig = mean_quantiles_notional_vega_by_delta(Path("notional_vega_by_delta"))
+# fig.show()
