@@ -1,0 +1,112 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ------------------------------------------------------------------
+# 1. Prepare data: datetime, weekday, select relevant columns
+# ------------------------------------------------------------------
+
+# Ensure date is datetime
+df['date'] = pd.to_datetime(df['date'])
+
+# Weekday number (0=Mon,...,6=Sun) and name
+df['weekday_num'] = df['date'].dt.dayofweek
+df['weekday_name'] = df['date'].dt.day_name()
+
+# Select only non-cumulative PnL and level columns
+value_cols = []
+for c in df.columns:
+    cl = c.lower()
+    if ('cumul' in cl) or ('cumul_' in cl) or ('cumul ' in cl):
+        continue
+    if c.startswith('PnL_') or c.startswith('level'):
+        value_cols.append(c)
+
+print("Columns used for seasonality analysis:", value_cols)
+
+# ------------------------------------------------------------------
+# 2. Compute weekday stats per sym and series
+#    (mean, median, 25%, 75%)
+# ------------------------------------------------------------------
+
+agg_funcs = {
+    'mean': 'mean',
+    'median': 'median',
+    'q25': lambda x: x.quantile(0.25),
+    'q75': lambda x: x.quantile(0.75),
+}
+
+# Build a long-form dataframe for easier aggregation
+long = df[['sym', 'weekday_num', 'weekday_name'] + value_cols].melt(
+    id_vars=['sym', 'weekday_num', 'weekday_name'],
+    value_vars=value_cols,
+    var_name='series',
+    value_name='value'
+)
+
+weekday_stats = (
+    long
+    .groupby(['sym', 'series', 'weekday_num', 'weekday_name'])['value']
+    .agg(agg_funcs)
+    .reset_index()
+)
+
+# Order weekdays Monday->Sunday
+weekday_order = [0, 1, 2, 3, 4, 5, 6]
+weekday_name_order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+
+# ------------------------------------------------------------------
+# 3. Plot: for each sym & series, show mean/median/q25–q75 by weekday
+# ------------------------------------------------------------------
+
+def plot_seasonality(weekday_stats):
+    for sym in sorted(weekday_stats['sym'].unique()):
+        sym_data = weekday_stats[weekday_stats['sym'] == sym]
+
+        series_list = sorted(sym_data['series'].unique())
+        n_series = len(series_list)
+
+        # One figure per sym, multiple subplots (one per time series)
+        fig, axes = plt.subplots(
+            n_series, 1,
+            figsize=(10, 3 * n_series),
+            sharex=True
+        )
+        if n_series == 1:
+            axes = [axes]  # make iterable
+
+        fig.suptitle(f"Weekday seasonality for sym={sym}", fontsize=14)
+
+        for ax, series in zip(axes, series_list):
+            sdata = sym_data[sym_data['series'] == series].copy()
+
+            # Ensure fixed weekday order, even if some days are missing
+            sdata = sdata.set_index('weekday_num').reindex(weekday_order).reset_index()
+            sdata['weekday_name'] = weekday_name_order  # overwrite with ordered names
+
+            x = np.arange(len(weekday_order))
+
+            # Plot mean + median + IQR band
+            ax.plot(x, sdata['mean'], marker='o', label='Mean')
+            ax.plot(x, sdata['median'], marker='s', linestyle='--', label='Median')
+            ax.fill_between(
+                x,
+                sdata['q25'],
+                sdata['q75'],
+                alpha=0.2,
+                label='25–75% range'
+            )
+
+            ax.set_title(series)
+            ax.set_ylabel('Value')
+            ax.grid(True, alpha=0.3)
+
+        axes[-1].set_xticks(np.arange(len(weekday_order)))
+        axes[-1].set_xticklabels(weekday_name_order, rotation=45)
+        axes[0].legend(loc='upper left')
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.show()
+
+# Call the plotting function
+plot_seasonality(weekday_stats)
