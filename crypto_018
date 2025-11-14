@@ -1,0 +1,7 @@
+adv_cols = [c for c in df.columns if c.startswith("adv_")]
+vol_col = "vol_50d_3m_mdn"
+
+fmt_dict = {**{c: "{:.4f}" for c in adv_cols},
+            vol_col: "{:.2%}"}
+
+table = df.style.format(fmt_dict)
