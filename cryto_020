@@ -1,0 +1,30 @@
+import requests
+import pandas as pd
+from datetime import datetime
+
+# Coingecko API URL for BTC daily market data
+url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+params = {
+    "vs_currency": "usd",
+    "days": "max"  # full history
+}
+
+# Fetch data
+data = requests.get(url, params=params).json()
+
+# Convert prices to DataFrame
+prices = pd.DataFrame(data["prices"], columns=["timestamp", "price"])
+
+# Convert timestamp to date
+prices["date"] = pd.to_datetime(prices["timestamp"], unit='ms').dt.date
+
+# Filter from 30/03/2019 onward
+start_date = datetime(2019, 3, 30).date()
+prices = prices[prices["date"] >= start_date].reset_index(drop=True)
+
+# Display head of the dataset
+print(prices.head())
+
+# If you want only date + close
+btc_close = prices[["date", "price"]]
+print(btc_close)
