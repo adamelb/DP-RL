@@ -1,0 +1,138 @@
+import pandas as pd
+import plotly.express as px
+
+NOTIONAL_COLS = [
+    "notional_USD",
+    "notional_USD_rt_vega",
+    "notional_USD_rt_vega_approx",
+]
+
+def build_all_frames_trades(all_res):
+    """
+    Takes a list of per-day trade summaries and constructs 4 tidy DataFrames:
+    - df_daily
+    - df_minute
+    - df_delta
+    - df_tenor
+    Each row carries:
+      date, crypto, grouping_key, notional_USD, notional_USD_rt_vega, notional_USD_rt_vega_approx
+    """
+
+    # -------- Daily sums --------
+    rows = []
+    for r in all_res:
+        for crypto, vals in r["by_crypto"][NOTIONAL_COLS].iterrows():
+            rows.append({
+                "date": r["date"],
+                "crypto": crypto,
+                **vals.to_dict()
+            })
+    df_daily = pd.DataFrame(rows)
+    df_daily["date"] = pd.to_datetime(df_daily["date"])
+
+
+    # -------- Per minute --------
+    rows = []
+    for r in all_res:
+        for (crypto, minute), vals in r["by_minute"][NOTIONAL_COLS].iterrows():
+            rows.append({
+                "date": r["date"],
+                "crypto": crypto,
+                "minute": minute,
+                **vals.to_dict()
+            })
+    df_minute = pd.DataFrame(rows)
+    df_minute["minute"] = pd.to_datetime(df_minute["minute"], format="%H:%M").dt.time
+
+
+    # -------- Per delta --------
+    rows = []
+    for r in all_res:
+        for (crypto, delta), vals in r["by_delta"][NOTIONAL_COLS].iterrows():
+            rows.append({
+                "date": r["date"],
+                "crypto": crypto,
+                "delta": float(delta),
+                **vals.to_dict()
+            })
+    df_delta = pd.DataFrame(rows)
+
+
+    # -------- Per tenor (converted to years) --------
+    rows = []
+    for r in all_res:
+        for (crypto, tenor), vals in r["by_tenor"][NOTIONAL_COLS].iterrows():
+            rows.append({
+                "date": r["date"],
+                "crypto": crypto,
+                "tenor_yr": tenor / 365,
+                **vals.to_dict()
+            })
+    df_tenor = pd.DataFrame(rows)
+
+
+    return df_daily, df_minute, df_delta, df_tenor
+
+def figs_daily(df_daily):
+    figs = {}
+    for col in NOTIONAL_COLS:
+        figs[col] = px.line(
+            df_daily,
+            x="date",
+            y=col,
+            color="crypto",
+            title=f"Daily {col} (BTC vs ETH)"
+        )
+    return figs
+
+def figs_minute(df_minute):
+    figs = {}
+    df_avg = df_minute.groupby(["crypto", "minute"])[NOTIONAL_COLS].mean().reset_index()
+
+    for col in NOTIONAL_COLS:
+        figs[col] = px.line(
+            df_avg,
+            x="minute",
+            y=col,
+            color="crypto",
+            title=f"Average per Minute: {col} (BTC vs ETH)"
+        )
+    return figs
+
+def figs_delta(df_delta):
+    figs = {}
+    df_avg = df_delta.groupby(["crypto", "delta"])[NOTIONAL_COLS].mean().reset_index()
+
+    for col in NOTIONAL_COLS:
+        figs[col] = px.line(
+            df_avg,
+            x="delta",
+            y=col,
+            color="crypto",
+            title=f"Average per Delta: {col} (BTC vs ETH)"
+        )
+    return figs
+
+def figs_tenor(df_tenor):
+    figs = {}
+    df_avg = df_tenor.groupby(["crypto", "tenor_yr"])[NOTIONAL_COLS].mean().reset_index()
+
+    for col in NOTIONAL_COLS:
+        figs[col] = px.line(
+            df_avg,
+            x="tenor_yr",
+            y=col,
+            color="crypto",
+            title=f"Average per Tenor (years): {col} (BTC vs ETH)"
+        )
+    return figs
+
+def build_all_figures_trades(all_res):
+    df_daily, df_minute, df_delta, df_tenor = build_all_frames_trades(all_res)
+
+    return {
+        "daily": figs_daily(df_daily),
+        "minute": figs_minute(df_minute),
+        "delta": figs_delta(df_delta),
+        "tenor": figs_tenor(df_tenor),
+    }
