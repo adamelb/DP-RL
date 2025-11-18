@@ -1,0 +1,95 @@
+import pandas as pd
+import plotly.express as px
+
+def build_dataframes(all_res):
+    # -------- Daily counts (BTC/ETH per date) --------
+    rows = []
+    for r in all_res:
+        for crypto, count in r["by_crypto"].items():
+            rows.append({"date": r["date"], "crypto": crypto, "count": count})
+    df_daily = pd.DataFrame(rows)
+    df_daily["date"] = pd.to_datetime(df_daily["date"])
+
+    # -------- Per minute average --------
+    rows = []
+    for r in all_res:
+        for (crypto, minute), count in r["by_minute"].items():
+            rows.append({
+                "date": r["date"],
+                "crypto": crypto,
+                "minute": minute,
+                "count": count
+            })
+    df_minute = pd.DataFrame(rows)
+    df_minute["minute"] = pd.to_datetime(df_minute["minute"], format="%H:%M").dt.time
+
+    # -------- Per delta average --------
+    rows = []
+    for r in all_res:
+        for (crypto, delta), count in r["by_delta"].items():
+            rows.append({
+                "date": r["date"],
+                "crypto": crypto,
+                "delta": float(delta),
+                "count": count
+            })
+    df_delta = pd.DataFrame(rows)
+
+    # -------- Per tenor average --------
+    rows = []
+    for r in all_res:
+        for (crypto, tenor), count in r["by_tenor"].items():
+            rows.append({
+                "date": r["date"],
+                "crypto": crypto,
+                "tenor_yr": tenor/365,   # convert tenor to years
+                "count": count
+            })
+    df_tenor = pd.DataFrame(rows)
+
+    return df_daily, df_minute, df_delta, df_tenor
+
+def fig_by_date(df_daily):
+    fig = px.line(
+        df_daily,
+        x="date",
+        y="count",
+        color="crypto",
+        title="Quotes per Day (BTC vs ETH)"
+    )
+    return fig
+
+
+def fig_by_minute(df_minute):
+    df_avg = df_minute.groupby(["crypto", "minute"])["count"].mean().reset_index()
+    fig = px.line(
+        df_avg,
+        x="minute",
+        y="count",
+        color="crypto",
+        title="Average Quotes per Minute (BTC vs ETH)"
+    )
+    return fig
+
+
+def fig_by_delta(df_delta):
+    df_avg = df_delta.groupby(["crypto", "delta"])["count"].mean().reset_index()
+    fig = px.line(
+        df_avg,
+        x="delta",
+        y="count",
+        color="crypto",
+        title="Average Quotes per Delta"
+    )
+    return fig
+
+def fig_by_tenor(df_tenor):
+    df_avg = df_tenor.groupby(["crypto", "tenor_yr"])["count"].mean().reset_index()
+    fig = px.line(
+        df_avg,
+        x="tenor_yr",
+        y="count",
+        color="crypto",
+        title="Average Quotes per Tenor (Years)"
+    )
+    return figh
