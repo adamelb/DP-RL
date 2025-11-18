@@ -1,0 +1,37 @@
+import pandas as pd
+
+def summarize_one_day(path_to_parquet: str):
+    """
+    Reads a parquet file containing option quotes for a single day and returns:
+      - counts by crypto
+      - counts by minute
+      - counts by delta
+      - counts by tenor (rounded days_to_expiry)
+    """
+
+    df = pd.read_parquet(path_to_parquet)
+
+    # Ensure timestamp is datetime
+    df["local_timestamp"] = pd.to_datetime(df["local_timestamp"])
+
+    # Create minute bucket
+    df["minute"] = df["local_timestamp"].dt.strftime("%H:%M")
+
+    # Round tenor
+    df["tenor"] = df["days_to_expiry"].round().astype(int)
+
+    # ---- Aggregations ----
+    by_crypto = df.groupby("crypto").size()
+
+    by_minute = df.groupby(["crypto", "minute"]).size()
+
+    by_delta = df.groupby(["crypto", "delta"]).size()
+
+    by_tenor = df.groupby(["crypto", "tenor"]).size()
+
+    return {
+        "by_crypto": by_crypto,
+        "by_minute": by_minute,
+        "by_delta": by_delta,
+        "by_tenor": by_tenor,
+    }
