@@ -1,0 +1,28 @@
+def figs_daily(df_daily):
+    """
+    Build daily figures with EWMA(90 days) smoothing for BTC/ETH
+    """
+    figs = {}
+
+    # tri chronologique
+    df_daily = df_daily.sort_values("date")
+
+    # appliquer un EWMA 90 jours par crypto
+    df_smooth = df_daily.copy()
+    df_smooth[NOTIONAL_COLS] = (
+        df_daily.groupby("crypto")[NOTIONAL_COLS]
+        .apply(lambda x: x.ewm(span=90, adjust=False).mean())
+        .reset_index(level=0, drop=True)
+    )
+
+    # construire les figures Plotly
+    for col in NOTIONAL_COLS:
+        figs[col] = px.line(
+            df_smooth,
+            x="date",
+            y=col,
+            color="crypto",
+            title=f"Daily {col} – EWMA 90 jours (BTC vs ETH)"
+        )
+
+    return figs
