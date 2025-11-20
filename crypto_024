@@ -1,0 +1,203 @@
+import pandas as pd
+
+tenor_rows = []
+
+for asof_dt, surf_by_stock in surf_dict_by_dt.items():
+    for stock, surf in surf_by_stock.items():
+        # surf.tenors est array-like
+        for tenor in surf.tenors:
+            tenor_rows.append({
+                "asof": asof_dt,    # date de la surface
+                "stock": stock,
+                "tenor": tenor
+            })
+
+df_tenors = pd.DataFrame(tenor_rows)
+
+# Optionnel : enlever les doublons si tu as des répétitions
+df_tenors = df_tenors.drop_duplicates().reset_index(drop=True)
+
+
+
+import numpy as np
+
+delta_rows = []
+
+for asof_dt, surf_by_stock in surf_dict_by_dt.items():
+    for stock, surf in surf_by_stock.items():
+        for expiry_dt, contracts in surf.option_chain.items():
+            # contracts: liste de tuples (strike_str, "C"/"P")
+            for strike_str, opt_type in contracts:
+                # Convertir le strike en float
+                try:
+                    strike = float(strike_str)
+                except (TypeError, ValueError):
+                    # Si mauvais format, on skip proprement
+                    continue
+
+                # Calcul du delta via la surface
+                try:
+                    delta = surf.from_strike(expiry_dt, strike)
+                except Exception:
+                    # Au cas où la surface ne couvre pas ce point
+                    continue
+
+                # (Optionnel) temps à maturité en jours, utile pour l’analyse
+                ttm_days = (expiry_dt - asof_dt).days
+
+                delta_rows.append({
+                    "asof": asof_dt,        # date de la surface
+                    "stock": stock,
+                    "expiry": expiry_dt,
+                    "ttm_days": ttm_days,   # time-to-maturity brut
+                    "strike": strike,
+                    "option_type": opt_type,
+                    "delta": float(delta) if delta is not None else np.nan,
+                })
+
+df_delta = pd.DataFrame(delta_rows)
+
+def check_date_coverage(df_tenors: pd.DataFrame):
+    """
+    df_tenors : colonnes attendues ["asof", "stock", "tenor"]
+    Retourne (summary_df, fig_heatmap)
+    """
+    df = df_tenors.copy()
+    df["asof"] = pd.to_datetime(df["asof"])
+    df["asof_date"] = df["asof"].dt.date
+
+    # Résumé par stock
+    summary = (
+        df.groupby("stock")["asof_date"]
+          .agg(first_date="min", last_date="max", n_days="nunique")
+          .reset_index()
+          .sort_values("stock")
+    )
+
+    # Nombre de tenors par (stock, date)
+    count = (
+        df.groupby(["stock", "asof_date"])
+          .size()
+          .reset_index(name="n_tenors")
+    )
+
+    pivot = (
+        count.pivot(index="stock", columns="asof_date", values="n_tenors")
+             .fillna(0)
+    )
+
+    fig = px.imshow(
+        pivot,
+        aspect="auto",
+        labels=dict(x="as of date", y="stock", color="#tenors"),
+        title="Date coverage – #tenors par (stock, date)"
+    )
+
+    return summary, fig
+
+
+def check_tenor_coverage(df_tenors: pd.DataFrame):
+    """
+    df_tenors : colonnes attendues ["asof", "stock", "tenor"]
+    Retourne (summary_df, fig_heatmap)
+    """
+    df = df_tenors.copy()
+    df["tenor_str"] = df["tenor"].astype(str)
+
+    # Résumé par stock
+    summary = (
+        df.groupby("stock")["tenor_str"]
+          .agg(
+              n_tenors="nunique",
+              tenors_list=lambda x: sorted(set(x))
+          )
+          .reset_index()
+          .sort_values("stock")
+    )
+
+    # Nombre de dates par (stock, tenor)
+    count = (
+        df.groupby(["stock", "tenor_str"])["asof"]
+          .nunique()
+          .reset_index(name="n_dates")
+    )
+
+    pivot = (
+        count.pivot(index="stock", columns="tenor_str", values="n_dates")
+             .fillna(0)
+    )
+
+    fig = px.imshow(
+        pivot,
+        aspect="auto",
+        labels=dict(x="tenor", y="stock", color="#dates"),
+        title="Tenor coverage – #dates par (stock, tenor)"
+    )
+
+    return summary, fig
+
+
+def check_delta_coverage(df_delta: pd.DataFrame, delta_bins=None):
+    """
+    df_delta : colonnes attendues au minimum ["asof", "stock", "delta"]
+    Retourne (summary_df, fig_heatmap)
+    delta_bins : liste de bornes pour pd.cut, par défaut buckets grossiers [-1,-0.75,...,1]
+    """
+    df = df_delta.copy()
+    df = df[df["delta"].notna()]
+
+    if delta_bins is None:
+        # Buckets standards de delta entre -1 et 1
+        delta_bins = [-1.01, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.01]
+
+    df["delta_bucket"] = pd.cut(df["delta"], bins=delta_bins, include_lowest=True)
+
+    # Résumé par stock
+    summary = (
+        df.groupby("stock")["delta"]
+          .agg(
+              n_points="size",
+              min_delta="min",
+              max_delta="max"
+          )
+          .reset_index()
+          .sort_values("stock")
+    )
+
+    # Nombre de dates contenant au moins un point dans chaque bucket
+    count = (
+        df.groupby(["stock", "delta_bucket"])["asof"]
+          .nunique()
+          .reset_index(name="n_dates")
+    )
+
+    pivot = (
+        count.pivot(index="stock", columns="delta_bucket", values="n_dates")
+             .fillna(0)
+    )
+
+    # Pour que les labels de colonnes soient jolis
+    pivot.columns = pivot.columns.astype(str)
+
+    fig = px.imshow(
+        pivot,
+        aspect="auto",
+        labels=dict(x="delta bucket", y="stock", color="#dates avec points"),
+        title="Delta coverage – #dates par (stock, bucket de delta)"
+    )
+
+    return summary, fig
+
+# DATE COVERAGE
+date_summary, fig_date = check_date_coverage(df_tenors)
+# choix de show
+# fig_date.show()
+
+# TENOR COVERAGE
+tenor_summary, fig_tenor = check_tenor_coverage(df_tenors)
+# fig_tenor.show()
+
+# DELTA COVERAGE
+delta_summary, fig_delta = check_delta_coverage(df_delta)
+# fig_delta.show()
+
