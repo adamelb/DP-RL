@@ -1,0 +1,135 @@
+def check_date_coverage(df_tenors: pd.DataFrame):
+    """
+    df_tenors : colonnes attendues ["asof", "stock", "tenor"]
+    Retourne (summary_df, figs_by_stock)
+      - summary_df : résumé par stock
+      - figs_by_stock : dict[stock] -> figure plotly (série temporelle)
+    """
+    df = df_tenors.copy()
+    df["asof"] = pd.to_datetime(df["asof"])
+    df["asof_date"] = df["asof"].dt.date
+
+    # Résumé global par stock
+    summary = (
+        df.groupby("stock")["asof_date"]
+          .agg(first_date="min", last_date="max", n_days="nunique")
+          .reset_index()
+          .sort_values("stock")
+    )
+
+    figs_by_stock = {}
+
+    for stock, d in df.groupby("stock"):
+        ts = (
+            d.groupby("asof_date")["tenor"]
+             .nunique()
+             .reset_index(name="n_tenors")
+             .sort_values("asof_date")
+        )
+
+        fig = px.line(
+            ts,
+            x="asof_date",
+            y="n_tenors",
+            markers=True,
+            title=f"Date coverage – {stock} (nb de tenors par date)",
+            labels={"asof_date": "as of date", "n_tenors": "#tenors"}
+        )
+
+        figs_by_stock[stock] = fig
+
+    return summary, figs_by_stock
+
+def check_tenor_coverage(df_tenors: pd.DataFrame, nbins: int = 30, density: bool = True):
+    """
+    df_tenors : colonnes attendues ["asof", "stock", "tenor"] avec tenor = float en années
+    Retourne (summary_df, figs_by_stock)
+      - summary_df : résumé par stock (min/max/nb de tenors distincts)
+      - figs_by_stock : dict[stock] -> figure plotly (histogramme de tenors)
+    """
+    df = df_tenors.copy()
+    df["tenor"] = df["tenor"].astype(float)
+
+    # Résumé par stock
+    summary = (
+        df.groupby("stock")["tenor"]
+          .agg(
+              n_points="size",
+              n_tenors_distincts="nunique",
+              min_tenor="min",
+              max_tenor="max"
+          )
+          .reset_index()
+          .sort_values("stock")
+    )
+
+    figs_by_stock = {}
+
+    histnorm = "probability density" if density else None
+
+    for stock, d in df.groupby("stock"):
+        fig = px.histogram(
+            d,
+            x="tenor",
+            nbins=nbins,
+            histnorm=histnorm,
+            title=f"Tenor coverage – {stock}",
+            labels={"tenor": "tenor (années)"}
+        )
+        # Option : ajouter un rug pour voir les points précis
+        fig.update_layout(bargap=0.05)
+
+        figs_by_stock[stock] = fig
+
+    return summary, figs_by_stock
+
+def check_delta_coverage(df_delta: pd.DataFrame, nbins: int = 20, density: bool = True):
+    """
+    df_delta : colonnes attendues au minimum ["asof", "stock", "delta", "option_type"]
+              delta = float (potentiellement négatif pour les puts)
+    On travaille sur |delta| pour avoir l'axe [0,1] et on colore par Call/Put.
+
+    Retourne (summary_df, figs_by_stock)
+      - summary_df : résumé par stock
+      - figs_by_stock : dict[stock] -> figure plotly (histogramme de |delta|)
+    """
+    df = df_delta.copy()
+    df = df[df["delta"].notna()]
+
+    df["abs_delta"] = df["delta"].abs()
+    # Clamp théorique si jamais il y a un peu de bruit >1
+    df["abs_delta"] = df["abs_delta"].clip(0, 1)
+
+    # Résumé par stock
+    summary = (
+        df.groupby("stock")["abs_delta"]
+          .agg(
+              n_points="size",
+              min_abs_delta="min",
+              max_abs_delta="max"
+          )
+          .reset_index()
+          .sort_values("stock")
+    )
+
+    figs_by_stock = {}
+    histnorm = "probability density" if density else None
+
+    for stock, d in df.groupby("stock"):
+        fig = px.histogram(
+            d,
+            x="abs_delta",
+            nbins=nbins,
+            histnorm=histnorm,
+            color="option_type",   # "C" vs "P"
+            barmode="overlay",
+            title=f"Delta coverage – {stock} (|delta|, Call vs Put)",
+            labels={"abs_delta": "|delta|", "option_type": "type d'option"}
+        )
+        fig.update_xaxes(range=[0, 1])
+        fig.update_layout(bargap=0.05)
+
+        figs_by_stock[stock] = fig
+
+    return summary, figs_by_stock
+
