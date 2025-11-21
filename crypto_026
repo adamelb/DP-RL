@@ -1,0 +1,67 @@
+import pandas as pd
+import plotly.express as px
+
+# --- 1. Clean date columns -------------------------------------------------
+
+# asof is tz-aware (America/xxx): strip tz + keep only date part
+df['asof_date'] = df['asof'].dt.tz_localize(None).dt.normalize()
+
+# expiry as date (naive is fine)
+df['expiry_date'] = pd.to_datetime(df['expiry']).dt.normalize()
+
+# IMPORTANT: if your column is named 'expi_type', keep that; if it's 'Expiry_type', adjust below
+expiry_col = 'Expiry_type'   # or 'expi_type'
+
+
+# --- 2. Keep only rows that actually expire on that asof day ---------------
+mask = df['asof_date'] == df['expiry_date']
+expiring = df.loc[mask, ['symbol', 'asof_date', expiry_col]]
+
+# Count contracts by (symbol, date, weekly/monthly)
+counts = (
+    expiring
+    .groupby(['symbol', 'asof_date', expiry_col])
+    .size()
+    .rename('count')
+    .reset_index()
+)
+
+
+# --- 3. Build one Plotly figure per symbol ---------------------------------
+
+figs = {}
+
+for sym, sub in counts.groupby('symbol'):
+    # full date range for that symbol (so we show zeros too)
+    all_days = (
+        df.loc[df['symbol'] == sym, 'asof_date']
+          .sort_values()
+          .unique()
+    )
+    full_idx = pd.DatetimeIndex(all_days)
+
+    # pivot to get columns = ['Weekly', 'Monthly'] with counts
+    pivot = (
+        sub
+        .pivot(index='asof_date', columns=expiry_col, values='count')
+        .reindex(full_idx, fill_value=0)   # fill missing days with 0
+        .rename_axis('date')               # index name -> 'date'
+        .reset_index()
+    )
+
+    # y columns are all columns except 'date'
+    value_cols = [c for c in pivot.columns if c != 'date']
+
+    fig = px.line(
+        pivot,
+        x='date',
+        y=value_cols,
+        markers=True,
+        title=f'Number of weekly & monthly expiries per day - {sym}'
+    )
+
+    figs[sym] = fig
+
+
+# Example usage:
+# figs['AAPL'].show()
