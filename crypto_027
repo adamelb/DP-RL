@@ -1,0 +1,79 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# 1) date column from timestamp (adapt timezone if needed)
+df['date'] = df['Timestamp'].dt.date
+
+# 2) Collapse intraday so each unique option per day is only counted once
+key_cols = [
+    'stock', 'date', 'data_src', 'option_type',
+    'expiry_date', 'strike', 'tenor', 'delta'
+]
+df_unique = df.drop_duplicates(key_cols)
+
+# 3) Create tenor & delta buckets
+df_unique['tenor_bucket'] = df_unique['tenor'].round(1).clip(upper=1.5)
+df_unique['delta_bucket'] = df_unique['delta'].round(2)
+
+# 4) One row per (stock, data_src, date, tenor_bucket, delta_bucket)
+df_daily = df_unique.drop_duplicates(
+    ['stock', 'data_src', 'date', 'tenor_bucket', 'delta_bucket']
+)
+
+
+def plot_delta_tenor_heatmap(stock_name, src):
+    """
+    Heatmap of coverage ratio for (tenor_bucket, delta_bucket)
+    for a given stock and data_src ('intraday' or 'eod').
+
+    Coverage = (# days with at least one option in that bucket) / (total days for that stock + src)
+    """
+    sub = df_daily[(df_daily['stock'] == stock_name) &
+                   (df_daily['data_src'] == src)].copy()
+    if sub.empty:
+        print(f"No data for stock={stock_name}, data_src={src}")
+        return
+
+    # total number of distinct days for that stock + data_src
+    total_days = sub['date'].nunique()
+
+    # count days per (tenor_bucket, delta_bucket)
+    cov = (
+        sub
+        .groupby(['tenor_bucket', 'delta_bucket'])
+        .agg(n_days=('date', 'nunique'))
+        .reset_index()
+    )
+    cov['coverage'] = cov['n_days'] / total_days
+
+    # pivot to 2D grid: rows = tenor, columns = delta
+    heat = (
+        cov
+        .pivot(index='tenor_bucket', columns='delta_bucket', values='coverage')
+        .sort_index()  # tenor ascending
+        .sort_index(axis=1)  # delta ascending
+        .fillna(0.0)  # buckets with no coverage -> 0
+    )
+
+    # --- Plot heatmap ---
+    fig, ax = plt.subplots()
+    im = ax.imshow(heat, aspect='auto', origin='lower')
+
+    # ticks & labels
+    ax.set_xticks(range(len(heat.columns)))
+    ax.set_xticklabels([f"{c:.2f}" for c in heat.columns], rotation=45, ha='right')
+
+    ax.set_yticks(range(len(heat.index)))
+    ax.set_yticklabels([f"{t:.1f}" for t in heat.index])
+
+    ax.set_xlabel("Delta (rounded to 2)")
+    ax.set_ylabel("Tenor (rounded to 1, clipped at 1.5)")
+    ax.set_title(f"Delta–Tenor coverage\nstock={stock_name}, src={src}")
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Coverage ratio (#days with bucket / total days)")
+
+    plt.tight_layout()
+    plt.show()
+
+    return heat  # in case you want the matrix numerically too
