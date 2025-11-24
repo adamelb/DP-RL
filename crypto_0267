@@ -1,0 +1,71 @@
+# define delta buckets; adjust edges as you like
+bins = [-1.01, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.01]
+labels = ['[-1,-0.75)', '[-0.75,-0.5)', '[-0.5,-0.25)', '[-0.25,0)',
+          '[0,0.25)', '[0.25,0.5)', '[0.5,0.75)', '[0.75,1]']
+
+df_unique['delta_bucket'] = pd.cut(df_unique['delta'], bins=bins, labels=labels, include_lowest=True)
+
+delta_cov = (
+    df_unique
+    .groupby(['stock', 'data_src', 'delta_bucket'], observed=True)
+    .agg(n_days=('date', 'nunique'))
+    .reset_index()
+)
+
+total_days_delta = (
+    df_unique
+    .groupby(['stock', 'data_src'], observed=True)['date']
+    .nunique()
+    .reset_index(name='n_days_total')
+)
+
+delta_cov = delta_cov.merge(total_days_delta, on=['stock', 'data_src'], how='left')
+delta_cov['coverage_ratio'] = delta_cov['n_days'] / delta_cov['n_days_total']
+
+
+def plot_tenor_coverage(stock_name):
+    tmp = tenor_cov[tenor_cov['stock'] == stock_name].copy()
+    if tmp.empty:
+        print(f"No data for stock {stock_name}")
+        return
+
+    # wide format: index = tenor, columns = data_src, values = coverage_ratio
+    wide = (
+        tmp
+        .pivot(index='tenor', columns='data_src', values='coverage_ratio')
+        .sort_index()
+    )
+
+    ax = wide.plot(kind='bar')
+    ax.set_title(f"Tenor coverage for {stock_name}")
+    ax.set_xlabel("Tenor")
+    ax.set_ylabel("Coverage ratio (days with data / total days)")
+    ax.legend(title='data_src')
+    plt.tight_layout()
+    plt.show()
+
+# usage
+# plot_tenor_coverage('AAPL')
+
+def plot_delta_coverage(stock_name):
+    tmp = delta_cov[delta_cov['stock'] == stock_name].copy()
+    if tmp.empty:
+        print(f"No data for stock {stock_name}")
+        return
+
+    wide = (
+        tmp
+        .pivot(index='delta_bucket', columns='data_src', values='coverage_ratio')
+        .sort_index()
+    )
+
+    ax = wide.plot(kind='bar')
+    ax.set_title(f"Delta coverage for {stock_name}")
+    ax.set_xlabel("Delta bucket")
+    ax.set_ylabel("Coverage ratio (days with data / total days)")
+    ax.legend(title='data_src')
+    plt.tight_layout()
+    plt.show()
+
+# usage
+# plot_delta_coverage('AAPL')
