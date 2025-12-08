@@ -1,0 +1,2 @@
+from ipywidgets.embed import embed_minimal_html
+embed_minimal_html("report.html", views=[tab_widget], title="My report")
