@@ -1,0 +1,172 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def _ensure_utc(series: pd.Series) -> pd.Series:
+    """Parse timestamps that are *naive but represent UTC* (or already tz-aware)."""
+    s = pd.to_datetime(series, errors="coerce")
+    if getattr(s.dt, "tz", None) is None:
+        # naive -> assume UTC
+        s = s.dt.tz_localize("UTC")
+    else:
+        # tz-aware -> convert to UTC for consistency
+        s = s.dt.tz_convert("UTC")
+    return s
+
+def prepare_intraday_realized_vol(
+    df: pd.DataFrame,
+    dt_col: str = "dt",
+    px_col: str = "fx",              # BTCUSD level
+    tz_local: str = "Europe/Paris",  # for intraday “time-of-day”
+    freq: str = "5min",              # sampling freq (used for bucketing)
+    rv_window: str = "1H",           # realized vol window (e.g., '30min', '1H', '2H')
+    year_days: int = 365,            # crypto often uses 365; set 252 if you prefer
+    holidays_country: str = "FR",    # used if 'holidays' package is available
+    holiday_dates=None,              # optional iterable of dates (datetime.date / 'YYYY-MM-DD')
+) -> pd.DataFrame:
+    """
+    Returns a copy of df with:
+      - dt_utc, dt_local
+      - logret
+      - rv (sqrt(sum r^2) over rv_window)
+      - rv_ann (annualized rv)
+      - day_type in {'business_day','weekend','holiday','weekend_holiday'}
+      - time_bin (HH:MM)
+      - date_local (date)
+    """
+    out = df.copy()
+
+    out["dt_utc"] = _ensure_utc(out[dt_col])
+    out = out.sort_values("dt_utc")
+
+    # local time for intraday grouping
+    out["dt_local"] = out["dt_utc"].dt.tz_convert(tz_local)
+    out["date_local"] = out["dt_local"].dt.date
+    out["time_bin"] = out["dt_local"].dt.floor(freq).dt.strftime("%H:%M")
+
+    # log returns
+    px = pd.to_numeric(out[px_col], errors="coerce")
+    out["logp"] = np.log(px)
+    out["logret"] = out["logp"].diff()
+
+    # realized vol over a rolling time window (uses dt_local index so DST is handled properly)
+    tmp = out.set_index("dt_local")
+    r2 = tmp["logret"].pow(2)
+
+    rv = np.sqrt(r2.rolling(rv_window).sum())  # sqrt(sum r^2) over window
+    tmp["rv"] = rv
+
+    # annualize: sigma_annual = sqrt(Var_window / (window_minutes / minutes_in_year))
+    minutes_in_year = year_days * 24 * 60
+    window_minutes = pd.to_timedelta(rv_window).total_seconds() / 60.0
+    tmp["rv_ann"] = tmp["rv"] * np.sqrt(minutes_in_year / window_minutes)
+
+    out = tmp.reset_index(drop=False).rename(columns={"index": "dt_local"})
+
+    # --- day type: weekend / holiday / business_day ---
+    dow = pd.to_datetime(out["date_local"]).dt.weekday  # 0=Mon ... 6=Sun
+    is_weekend = dow >= 5
+
+    # holidays: either explicit list, or via 'holidays' package if installed
+    is_holiday = np.zeros(len(out), dtype=bool)
+    if holiday_dates is not None:
+        hd = pd.to_datetime(pd.Series(list(holiday_dates)), errors="coerce").dt.date.dropna().unique()
+        is_holiday = pd.Series(out["date_local"]).isin(hd).to_numpy()
+    else:
+        try:
+            import holidays  # pip install holidays
+            years = pd.to_datetime(out["date_local"]).dt.year.unique().tolist()
+            hol = holidays.country_holidays(holidays_country, years=years)
+            is_holiday = pd.Series(out["date_local"]).isin(set(hol)).to_numpy()
+        except Exception:
+            # no holiday info available; keep all False
+            pass
+
+    out["day_type"] = np.select(
+        [is_weekend & is_holiday, is_weekend, is_holiday],
+        ["weekend_holiday", "weekend", "holiday"],
+        default="business_day",
+    )
+
+    # clean: drop rows where returns/rv are nan (first row, early window)
+    out = out.dropna(subset=["logret", "rv", "rv_ann"]).reset_index(drop=True)
+    return out
+
+def intraday_distribution_stats(df_rv: pd.DataFrame, value_col: str = "rv_ann") -> pd.DataFrame:
+    """
+    Per (day_type, time_bin): summary stats + quantiles for the intraday distribution.
+    """
+    g = df_rv.groupby(["day_type", "time_bin"])[value_col]
+    stats = g.agg(
+        count="count",
+        mean="mean",
+        median="median",
+        p10=lambda x: x.quantile(0.10),
+        p25=lambda x: x.quantile(0.25),
+        p75=lambda x: x.quantile(0.75),
+        p90=lambda x: x.quantile(0.90),
+    ).reset_index()
+    return stats
+
+def plot_intraday_profile(stats: pd.DataFrame, title: str = "Intraday realized volatility (annualized)"):
+    """
+    Plots median + [p10,p90] band over time-of-day, split by day_type.
+    """
+    # ensure chronological order
+    stats = stats.copy()
+    stats["t"] = pd.to_datetime(stats["time_bin"], format="%H:%M")
+    stats = stats.sort_values("t")
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    for day_type, sub in stats.groupby("day_type"):
+        ax.plot(sub["t"], sub["median"], label=f"{day_type} median")
+        ax.fill_between(sub["t"], sub["p10"], sub["p90"], alpha=0.15, label=f"{day_type} p10–p90")
+
+    ax.set_title(title)
+    ax.set_xlabel("Local time of day")
+    ax.set_ylabel("Realized vol (annualized)")
+    ax.legend(ncol=2, fontsize=9)
+    fig.autofmt_xdate()
+    plt.tight_layout()
+    plt.show()
+
+def plot_intraday_heatmap(stats: pd.DataFrame, metric: str = "median", title_prefix: str = "Intraday RV heatmap"):
+    """
+    Heatmap per day_type: metric over time_bin.
+    """
+    # numeric x axis order
+    time_order = pd.to_datetime(stats["time_bin"].unique(), format="%H:%M")
+    time_order = pd.Series(time_order).sort_values().dt.strftime("%H:%M").tolist()
+
+    for day_type, sub in stats.groupby("day_type"):
+        pivot = sub.pivot(index="day_type", columns="time_bin", values=metric).reindex(columns=time_order)
+        fig, ax = plt.subplots(figsize=(12, 1.8))
+        im = ax.imshow(pivot.to_numpy(), aspect="auto")
+        ax.set_title(f"{title_prefix}: {day_type} ({metric})")
+        ax.set_yticks([0])
+        ax.set_yticklabels([day_type])
+        # thin x ticks (every hour)
+        cols = pivot.columns.tolist()
+        tick_idx = [i for i, t in enumerate(cols) if t.endswith(":00")]
+        ax.set_xticks(tick_idx)
+        ax.set_xticklabels([cols[i] for i in tick_idx], rotation=0)
+        fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+        plt.tight_layout()
+        plt.show()
+
+# ---------------- EXAMPLE USAGE ----------------
+# df = pd.read_csv("your_data.csv")  # must contain columns: dt, fx
+# df_rv = prepare_intraday_realized_vol(
+#     df,
+#     dt_col="dt",
+#     px_col="fx",
+#     tz_local="Europe/Paris",
+#     freq="5min",
+#     rv_window="1H",
+#     year_days=365,
+#     holidays_country="FR",     # used if you have `holidays` installed
+#     # OR: holiday_dates=["2025-01-01", "2025-04-21", ...]
+# )
+# stats = intraday_distribution_stats(df_rv, value_col="rv_ann")
+# plot_intraday_profile(stats)
+# plot_intraday_heatmap(stats, metric="median")
