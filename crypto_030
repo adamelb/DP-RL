@@ -1,0 +1,50 @@
+## Delta-hedged PnL: Spot vs Forward
+
+**Notation**
+
+- Option value: \(V(t,S)\), maturity \(T\), \(\tau = T-t\)
+- Spot: \(S_t\)
+- Forward (maturity \(T\)):
+\[
+F_t = S_t e^{(r-q)\tau}
+\]
+- Spot delta: \(\Delta_S = \frac{\partial V}{\partial S}\)
+- Forward delta: \(\Delta_F = \frac{\partial V}{\partial F}\)
+
+**Delta relationship**
+\[
+\Delta_S = \Delta_F e^{(r-q)\tau},
+\qquad
+\Delta_F = \Delta_S e^{-(r-q)\tau}
+\]
+
+---
+
+### Forward-hedged PnL
+\[
+d\Pi^{(F)} = dV - \Delta_F\, dF
+\]
+
+---
+
+### Spot-hedged PnL (with carry)
+\[
+d\Pi^{(S)} = dV - \Delta_S\, dS + \Delta_S (r-q) S\, dt
+\]
+
+---
+
+### Equivalence condition
+Using \(\Delta_S = \Delta_F e^{(r-q)\tau}\),
+\[
+-\Delta_S dS + \Delta_S (r-q) S dt = -\Delta_F dF
+\]
+
+\[
+\boxed{d\Pi^{(S)} = d\Pi^{(F)}}
+\]
+
+---
+
+**Key requirement:**  
+Spot hedge must include **financing minus dividends** to replicate a forward hedge.
